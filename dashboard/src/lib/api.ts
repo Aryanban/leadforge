@@ -16,6 +16,7 @@ export interface DashboardStats {
     email: string | null;
     is_verified: boolean;
     rating: number | null;
+    maps_url?: string;
     created_at: string | null;
   }>;
   recent_jobs: Array<{
@@ -34,6 +35,7 @@ export interface LeadItem {
   website: string | null;
   phone: string | null;
   address: string | null;
+  maps_url?: string;
   rating: number | null;
   reviews_count: number | null;
   industry: string | null;

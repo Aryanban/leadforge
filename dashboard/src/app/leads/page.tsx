@@ -15,7 +15,8 @@ import {
   Plus, 
   RefreshCw,
   Loader2,
-  ExternalLink
+  ExternalLink,
+  MapPin
 } from "lucide-react";
 import { api, LeadItem } from "@/lib/api";
 
@@ -72,11 +73,14 @@ export default function LeadsPage() {
   const handleEnrichSingle = async (businessId: number) => {
     try {
       setEnrichingId(businessId);
-      const res = await api.enrichLead(businessId);
-      alert(`Enrichment complete! Found ${res.emails_found || 0} emails (${res.verified_emails || 0} verified).`);
+      const res: any = await api.enrichLead(businessId);
+      const emailCount = res.emails_found || 0;
+      const phoneCount = res.phones_found || 0;
+      const verifiedCount = res.verified_emails || 0;
+      alert(`Multi-Source Search Complete!\n• Emails Found: ${emailCount} (${verifiedCount} verified deliverable)\n• Discovered Phone Numbers: ${phoneCount}\n• Discovered Website: ${res.website || "None"}`);
       fetchLeads();
     } catch (err: any) {
-      alert(`Enrichment notice: ${err.message}`);
+      alert(`Search notice: ${err.message}`);
     } finally {
       setEnrichingId(null);
     }
@@ -86,7 +90,7 @@ export default function LeadsPage() {
     try {
       setBulkEnrichLoading(true);
       const res = await api.enrichAll(25);
-      alert(res.message || "Bulk website enrichment started in background!");
+      alert(res.message || "Deep web contact enrichment started in background across DuckDuckGo & websites!");
       setTimeout(() => fetchLeads(), 3000);
     } catch (err: any) {
       alert(`Failed to trigger bulk enrichment: ${err.message}`);
@@ -228,11 +232,26 @@ export default function LeadsPage() {
                   const cleanPhone = lead.phone ? lead.phone.replace(/[^0-9]/g, "") : "";
                   const waUrl = contact?.whatsapp_link || (cleanPhone ? `https://wa.me/${cleanPhone}` : null);
 
-                  return (
+                    const mapsUrl = lead.maps_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((lead.name + " " + (lead.address || "")).trim())}`;
+
+                    return (
                     <tr key={lead.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-5 py-4 max-w-[240px]">
-                        <div className="font-bold text-slate-900 truncate">{lead.name}</div>
-                        <div className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{lead.address || "Address not listed"}</div>
+                      <td className="px-5 py-4 max-w-[260px]">
+                        <div className="flex items-center gap-1.5">
+                          <a
+                            href={mapsUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5 group max-w-full"
+                            title="Open Google Maps listing in new tab"
+                          >
+                            <span className="truncate">{lead.name}</span>
+                            <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0 group-hover:scale-110 transition-transform" />
+                          </a>
+                        </div>
+                        <div className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
+                          {lead.address || "Address not listed"}
+                        </div>
                       </td>
 
                       <td className="px-4 py-4 whitespace-nowrap">
@@ -305,26 +324,25 @@ export default function LeadsPage() {
                               )}
                             </div>
                           </div>
-                        ) : lead.website ? (
+                        ) : (
                           <button
                             onClick={() => handleEnrichSingle(lead.id)}
                             disabled={enrichingId === lead.id}
-                            className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 font-semibold"
+                            className="inline-flex items-center gap-1 text-[11px] text-indigo-700 hover:text-indigo-900 font-semibold bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 px-2 py-1 rounded-md transition-colors shadow-2xs"
+                            title="Search web & websites to discover email and phone numbers"
                           >
                             {enrichingId === lead.id ? (
                               <>
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                Crawling...
+                                <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
+                                Searching Web...
                               </>
                             ) : (
                               <>
-                                <Sparkles className="w-3 h-3" />
-                                Enrich Email
+                                <Sparkles className="w-3 h-3 text-indigo-600" />
+                                Find Web Contacts
                               </>
                             )}
                           </button>
-                        ) : (
-                          <span className="text-slate-400 italic text-[11px]">No contact</span>
                         )}
                       </td>
 
@@ -333,13 +351,36 @@ export default function LeadsPage() {
                       </td>
 
                       <td className="px-5 py-4 text-right whitespace-nowrap">
-                        <button
-                          onClick={() => handleDelete(lead.id)}
-                          className="text-slate-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
-                          title="Delete Lead"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center justify-end gap-1">
+                          <a
+                            href={mapsUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-400 hover:text-blue-600 p-1.5 rounded-lg hover:bg-blue-50 transition-colors"
+                            title="View on Google Maps"
+                          >
+                            <MapPin className="w-3.5 h-3.5 text-red-500" />
+                          </a>
+                          <button
+                            onClick={() => handleEnrichSingle(lead.id)}
+                            disabled={enrichingId === lead.id}
+                            className="text-slate-400 hover:text-indigo-600 p-1.5 rounded-lg hover:bg-indigo-50 transition-colors"
+                            title="Deep Web Contact Search"
+                          >
+                            {enrichingId === lead.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                            ) : (
+                              <Sparkles className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            onClick={() => handleDelete(lead.id)}
+                            className="text-slate-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
+                            title="Delete Lead"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

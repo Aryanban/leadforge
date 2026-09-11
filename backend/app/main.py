@@ -17,6 +17,11 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing LeadForge database schemas...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            from sqlalchemy import text
+            await conn.execute(text("ALTER TABLE businesses ADD COLUMN maps_url TEXT;"))
+        except Exception:
+            pass
     
     # Auto-seed initial realistic demo data if database is fresh
     try:

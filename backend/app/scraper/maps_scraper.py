@@ -224,11 +224,14 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                                     address = " · ".join(parts[1:])
                             break
 
+                    maps_url = href.split("?")[0] if (href and href.startswith("http")) else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name + ' ' + (address or query))}"
+
                     results.append({
                         "name": name,
                         "phone": phone,
                         "website": website,
                         "address": address or query,
+                        "maps_url": maps_url,
                         "rating": rating,
                         "reviews_count": reviews,
                         "industry": category or (query.split(" in ")[0] if " in " in query else "Local Business"),
@@ -236,6 +239,7 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                         "source": "playwright_maps",
                         "query": query
                     })
+
 
                     if len(results) >= max_results:
                         break
@@ -353,6 +357,7 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                 job.status = "running"
                 await db.commit()
 
+            new_biz_ids = []
             for lead in raw_leads:
                 name = lead.get("name", "").strip()
                 if not name:
@@ -370,6 +375,7 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                         website=lead.get("website") or None,
                         phone=lead.get("phone") or None,
                         address=lead.get("address") or None,
+                        maps_url=lead.get("maps_url") or None,
                         rating=lead.get("rating"),
                         reviews_count=lead.get("reviews_count"),
                         industry=lead.get("industry") or lead.get("query"),
@@ -392,12 +398,15 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                     )
                     db.add(contact)
                     saved_count += 1
+                    new_biz_ids.append(business.id)
                 else:
-                    # Update phone or website if missing
+                    # Update phone, website, or maps_url if missing
                     if not existing.phone and lead.get("phone"):
                         existing.phone = lead.get("phone")
                     if not existing.website and lead.get("website"):
                         existing.website = lead.get("website")
+                    if not existing.maps_url and lead.get("maps_url"):
+                        existing.maps_url = lead.get("maps_url")
 
             # Finalize ScrapeJob
             if job:
@@ -409,6 +418,15 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                     job.error = error_msg
             await db.commit()
             logger.info(f"Scrape job {job_id} completed: found {len(raw_leads)}, saved {saved_count} new leads")
+
+            # Trigger multi-source web enrichment for newly discovered businesses in background
+            if new_biz_ids:
+                from app.enricher.email_finder import enrich_business_by_id
+                for biz_id in new_biz_ids:
+                    try:
+                        asyncio.create_task(enrich_business_by_id(biz_id))
+                    except Exception as enrich_err:
+                        logger.warning(f"Error initiating auto-enrichment for lead {biz_id}: {enrich_err}")
 
         except Exception as e:
             logger.error(f"Error persisting scrape results: {e}")

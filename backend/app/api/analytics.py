@@ -1,3 +1,4 @@
+import urllib.parse
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -63,6 +64,7 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, A
             "email": contacts_lookup.get(b.id).email if b.id in contacts_lookup else None,
             "is_verified": contacts_lookup.get(b.id).is_verified if b.id in contacts_lookup else False,
             "rating": b.rating,
+            "maps_url": b.maps_url or f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote((b.name + ' ' + (b.address or '')).strip())}",
             "created_at": b.created_at.isoformat() if b.created_at else None
         }
         for b in recent_businesses

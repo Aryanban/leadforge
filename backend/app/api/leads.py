@@ -1,4 +1,6 @@
+import urllib.parse
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, delete
 from typing import Optional, List, Dict, Any
@@ -103,12 +105,24 @@ async def get_leads(
         if has_email is False and any(c.get("email") for c in b_contacts):
             continue
 
+        # Compute Google Maps URL
+        maps_url = b.maps_url
+        if not maps_url:
+            extra = b.extra_data or {}
+            maps_url = extra.get("maps_url") if isinstance(extra, dict) else None
+        if not maps_url and b.place_id and b.place_id.startswith("http"):
+            maps_url = b.place_id
+        if not maps_url:
+            query_str = f"{b.name} {b.address or ''}".strip()
+            maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query_str)}"
+
         leads_data.append({
             "id": b.id,
             "name": b.name,
             "website": b.website,
             "phone": b.phone,
             "address": b.address,
+            "maps_url": maps_url,
             "rating": b.rating,
             "reviews_count": b.reviews_count,
             "industry": b.industry,
@@ -116,6 +130,7 @@ async def get_leads(
             "contacts": b_contacts,
             "created_at": b.created_at.isoformat() if b.created_at else None
         })
+
 
     return {
         "total": total,
@@ -146,11 +161,13 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
         "Contact Name",
         "Contact Email",
         "Email Verified",
-        "WhatsApp Link"
+        "WhatsApp Link",
+        "Google Maps URL"
     ])
 
     for b, c in rows:
         contact_name = f"{c.first_name or ''} {c.last_name or ''}".strip() if c else ""
+        maps_url = b.maps_url or (b.place_id if b.place_id and b.place_id.startswith("http") else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(b.name + ' ' + (b.address or ''))}")
         writer.writerow([
             b.id,
             b.name or "",
@@ -163,8 +180,10 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
             contact_name,
             c.email if c else "",
             "Yes" if (c and c.is_verified) else "No",
-            c.whatsapp_link if c else ""
+            c.whatsapp_link if c else "",
+            maps_url
         ])
+
 
     csv_data = output.getvalue()
     return Response(

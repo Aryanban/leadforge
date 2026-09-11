@@ -17,7 +17,9 @@ class Business(Base):
     industry = Column(String, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
+    maps_url = Column(String, nullable=True)
     extra_data = Column(JSON, nullable=True)
+
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

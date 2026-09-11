@@ -272,10 +272,10 @@ export default function ScrapePage() {
               </Link>
               <button
                 onClick={handleEnrichAll}
-                className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-blue-300 bg-white hover:bg-blue-50 text-blue-700 h-9 px-4 transition-colors"
+                className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 h-9 px-4 transition-colors"
               >
-                <Globe2 className="w-3.5 h-3.5 mr-1.5" />
-                Enrich Websites for Emails
+                <Sparkles className="w-3.5 h-3.5 mr-1.5 text-indigo-600" />
+                Deep Web Enrich (Find Missing Emails/Phones)
               </button>
               {enrichStatus && (
                 <span className="text-xs text-blue-700 font-medium animate-fade-in">

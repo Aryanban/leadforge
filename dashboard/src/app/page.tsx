@@ -13,7 +13,9 @@ import {
   Mail, 
   RefreshCw,
   Sparkles,
-  Phone
+  Phone,
+  MapPin,
+  ExternalLink
 } from "lucide-react";
 import { api, DashboardStats } from "@/lib/api";
 
@@ -220,8 +222,17 @@ export default function Home() {
                 {stats?.recent_leads && stats.recent_leads.length > 0 ? (
                   stats.recent_leads.map((lead) => (
                     <tr key={lead.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-5 py-3.5 font-medium text-slate-900 max-w-[200px] truncate">
-                        {lead.name}
+                      <td className="px-5 py-3.5 font-medium text-slate-900 max-w-[220px]">
+                        <a
+                          href={lead.maps_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lead.name)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-blue-600 inline-flex items-center gap-1.5 truncate group max-w-full"
+                          title="View on Google Maps"
+                        >
+                          <span className="truncate">{lead.name}</span>
+                          <MapPin className="w-3 h-3 text-red-500 shrink-0 group-hover:scale-110 transition-transform" />
+                        </a>
                       </td>
                       <td className="px-4 py-3.5 text-slate-600">
                         <span className="inline-block px-2 py-0.5 bg-slate-100 rounded-md text-[11px] font-medium text-slate-700">
