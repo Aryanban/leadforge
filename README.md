@@ -148,6 +148,51 @@ Click **Export CSV** at any time on the Leads Hub to download a spreadsheet with
 
 ---
 
+## 🤖 AI Agent & Model Context Protocol (MCP) Integration
+
+LeadForge is **AI-Agent native**. You can connect it directly to **Google Antigravity**, **Claude Desktop**, or **Cursor** to let an AI assistant autonomously search Google Maps, find corporate contacts across the open web, and sequence cold outreach directly from conversational prompts.
+
+### 1. Using with Antigravity / Claude Desktop (MCP)
+Add to your `mcp_config.json` (or `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "leadforge": {
+      "command": "/path/to/leadforge/.venv/bin/python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/path/to/leadforge/backend"
+    }
+  }
+}
+```
+
+#### Available MCP Tools:
+- **`leadforge_scrape`**: Real-time Google Maps scraper with auto open web contact discovery (Yahoo/Bing/directories). Returns hyperlinked maps listings and deliverable emails.
+- **`leadforge_search_leads`**: Search and filter local leads by category, keyword, or email status.
+- **`leadforge_enrich_lead`**: Triggers deep web contact search and SMTP verification on any business.
+- **`leadforge_create_campaign`**: Sets up multi-step cold email sequences.
+- **`leadforge_get_stats`**: Overview metrics of leads, verified contacts, and campaigns.
+
+### 2. Direct CLI Bridge
+Run lead operations directly from the command line:
+
+```bash
+# Scrape leads with real-time web discovery & format as GitHub Markdown
+python -m app.cli scrape "Real Estate Agents in Rohini Delhi" --limit 10 --format markdown
+
+# Search database with filters
+python -m app.cli search --query "Properties" --has-email --format markdown
+
+# Deep search / enrich a specific business ID
+python -m app.cli enrich 18
+
+# Overview stats
+python -m app.cli stats
+```
+
+---
+
 ## 📡 REST API Reference
 
 The FastAPI backend provides auto-generated OpenAPI documentation accessible at [`http://localhost:8000/docs`](http://localhost:8000/docs).

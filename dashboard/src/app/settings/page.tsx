@@ -9,10 +9,14 @@ import {
   Plus, 
   Trash2, 
   RefreshCw, 
-  ShieldCheck, 
   Server,
   Loader2,
-  Send
+  Send,
+  Bot,
+  Terminal,
+  Copy,
+  Check,
+  Sparkles
 } from "lucide-react";
 import { api, MailboxItem } from "@/lib/api";
 
@@ -30,6 +34,7 @@ export default function SettingsPage() {
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<Record<number, { success: boolean; message: string }>>({});
   const [showAddModal, setShowAddModal] = useState(false);
+  const [copiedPlatform, setCopiedPlatform] = useState<string | null>(null);
 
   // Form state
   const [formEmail, setFormEmail] = useState("");
@@ -207,6 +212,90 @@ export default function SettingsPage() {
               No SMTP mailboxes connected yet. Add one above to begin sending campaigns!
             </div>
           )}
+        </div>
+      </div>
+
+      {/* AI Agent Integration (MCP) */}
+      <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-white via-indigo-50/20 to-blue-50/20 p-6 shadow-xs space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
+                <Sparkles className="w-3 h-3" /> AI Native
+              </span>
+              <h2 className="text-base font-bold text-slate-900">AI Agent Integration & Model Context Protocol (MCP)</h2>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Command LeadForge directly from Google Antigravity, Claude Desktop, or Cursor. The AI can scrape Google Maps, discover emails across the open web, and sequence outreach autonomously.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Antigravity / Claude Config */}
+          <div className="p-4 rounded-xl border border-indigo-100 bg-white/80 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-xs text-slate-800 flex items-center gap-1.5">
+                <Bot className="w-3.5 h-3.5 text-indigo-600" />
+                Antigravity / Gemini CLI (<code>mcp_config.json</code>)
+              </span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(JSON.stringify({
+                    "leadforge": {
+                      "command": "python",
+                      "args": ["-m", "app.mcp_server"],
+                      "cwd": "./backend"
+                    }
+                  }, null, 2));
+                  setCopiedPlatform("antigravity");
+                  setTimeout(() => setCopiedPlatform(null), 2000);
+                }}
+                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1 cursor-pointer"
+              >
+                {copiedPlatform === "antigravity" ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                {copiedPlatform === "antigravity" ? "Copied!" : "Copy JSON"}
+              </button>
+            </div>
+            <pre className="p-3 bg-slate-900 text-slate-100 rounded-lg text-[10px] font-mono overflow-x-auto">
+{`"leadforge": {
+  "command": "python",
+  "args": ["-m", "app.mcp_server"],
+  "cwd": "./backend"
+}`}
+            </pre>
+            <p className="text-[10px] text-slate-500">
+              Paste into your global or local MCP config file under <code>mcpServers</code>.
+            </p>
+          </div>
+
+          {/* CLI Usage */}
+          <div className="p-4 rounded-xl border border-indigo-100 bg-white/80 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-xs text-slate-800 flex items-center gap-1.5">
+                <Terminal className="w-3.5 h-3.5 text-slate-700" />
+                Direct AI Agent CLI Bridge
+              </span>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText('python -m app.cli scrape "Real Estate Agents in Delhi" --limit 10 --format markdown');
+                  setCopiedPlatform("cli");
+                  setTimeout(() => setCopiedPlatform(null), 2000);
+                }}
+                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1 cursor-pointer"
+              >
+                {copiedPlatform === "cli" ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                {copiedPlatform === "cli" ? "Copied!" : "Copy Command"}
+              </button>
+            </div>
+            <pre className="p-3 bg-slate-900 text-slate-100 rounded-lg text-[10px] font-mono overflow-x-auto">
+{`python -m app.cli scrape "Real Estate in Delhi" \\
+  --limit 10 --format markdown`}
+            </pre>
+            <p className="text-[10px] text-slate-500">
+              Outputs clean GitHub Markdown with hyperlinked Google Maps links and WhatsApp buttons.
+            </p>
+          </div>
         </div>
       </div>
 
