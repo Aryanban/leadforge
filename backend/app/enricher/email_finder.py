@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
-from app.verifier.smtp_verifier import verify_email_smtp
+from app.verifier.smtp_verifier import verify_email_smtp, check_catch_all_domain
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,148 @@ EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.co
 CONTACT_PRIORITY_KEYWORDS = [
     'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support'
 ]
+
+
+def generate_email_permutations(name: str, domain: str) -> List[str]:
+    """
+    Generates Apollo/Hunter-grade email permutations based on business/contact name and domain.
+    Includes corporate executive patterns and high-yield department aliases.
+    """
+    if not domain or "." not in domain:
+        return []
+
+    domain = domain.lower().replace("www.", "").strip()
+    permutations: List[str] = []
+
+    # Clean name tokens
+    clean = re.sub(r'[^a-zA-Z\s]', ' ', name).lower().strip()
+    parts = [p for p in clean.split() if len(p) >= 2 and p not in (
+        "limited", "pvt", "ltd", "llc", "inc", "corp", "associates", "agency", "realty", "group", "services"
+    )]
+
+    first = parts[0] if parts else "contact"
+    last = parts[1] if len(parts) > 1 else ""
+
+    if first and last:
+        permutations.extend([
+            f"{first}.{last}@{domain}",
+            f"{first}@{domain}",
+            f"{first}{last}@{domain}",
+            f"{first[0]}{last}@{domain}",
+            f"{first}_{last}@{domain}",
+            f"{last}@{domain}",
+        ])
+    elif first:
+        permutations.extend([
+            f"{first}@{domain}",
+        ])
+
+    # Standard corporate aliases
+    permutations.extend([
+        f"contact@{domain}",
+        f"info@{domain}",
+        f"sales@{domain}",
+        f"office@{domain}",
+        f"support@{domain}",
+        f"hello@{domain}",
+        f"admin@{domain}",
+    ])
+
+    seen = set()
+    unique_perms = []
+    for p in permutations:
+        if p not in seen:
+            seen.add(p)
+            unique_perms.append(p)
+
+    return unique_perms
+
+
+def calculate_lead_quality_score(business: Any, contacts: List[Any]) -> Dict[str, Any]:
+    """
+    Calculates 0-100 Lead Quality Score and classifies into HOT / WARM / COLD tiers.
+    Scoring Breakdown:
+    - Verified Deliverable Email: +30
+    - Unverified Email: +15
+    - Direct Phone Number: +15
+    - WhatsApp Ready Link: +15
+    - Active Website: +15
+    - Google Rating >= 4.5: +10 (>= 4.0: +5)
+    - Review Volume >= 10: +10 (>= 3: +5)
+    """
+    score = 0
+    badges: List[str] = []
+
+    has_verified_email = any(getattr(c, "is_verified", False) or (isinstance(c, dict) and c.get("is_verified")) for c in contacts)
+    has_any_email = any(getattr(c, "email", None) or (isinstance(c, dict) and c.get("email")) for c in contacts)
+    phone = getattr(business, "phone", None) or (business.get("phone") if isinstance(business, dict) else None)
+    has_whatsapp = any(getattr(c, "whatsapp_link", None) or (isinstance(c, dict) and c.get("whatsapp_link")) for c in contacts)
+    website = getattr(business, "website", None) or (business.get("website") if isinstance(business, dict) else None)
+    rating = getattr(business, "rating", None) or (business.get("rating") if isinstance(business, dict) else None)
+    reviews = getattr(business, "reviews_count", None) or (business.get("reviews_count") if isinstance(business, dict) else None)
+    
+    extra = getattr(business, "extra_data", None) or (business.get("extra_data") if isinstance(business, dict) else {}) or {}
+    is_claimed = extra.get("is_claimed", True) if isinstance(extra, dict) else True
+
+    if has_verified_email:
+        score += 30
+        badges.append("Verified Email")
+    elif has_any_email:
+        score += 15
+        badges.append("Email Available")
+
+    if phone:
+        score += 15
+        badges.append("Direct Phone")
+
+    if has_whatsapp:
+        score += 15
+        badges.append("WhatsApp Ready")
+
+    if website:
+        score += 15
+        badges.append("Active Website")
+
+    if rating:
+        try:
+            r_val = float(rating)
+            if r_val >= 4.5:
+                score += 10
+                badges.append("Top Rated")
+            elif r_val >= 4.0:
+                score += 5
+        except (ValueError, TypeError):
+            pass
+
+    if reviews:
+        try:
+            rev_val = int(reviews)
+            if rev_val >= 10:
+                score += 10
+                badges.append("High Reviews")
+            elif rev_val >= 3:
+                score += 5
+        except (ValueError, TypeError):
+            pass
+
+    if not is_claimed:
+        badges.append("Unclaimed GBP")
+
+    # Clamping
+    score = min(100, max(10, score))
+
+    if score >= 75:
+        tier = "HOT"
+    elif score >= 45:
+        tier = "WARM"
+    else:
+        tier = "COLD"
+
+    return {
+        "score": score,
+        "tier": tier,
+        "badges": badges
+    }
 
 
 async def search_web_for_business_contacts(name: str, location: str = "") -> Dict[str, Any]:
@@ -278,6 +420,38 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             except Exception as crawl_err:
                 logger.warning(f"Error crawling website for {business.name}: {crawl_err}")
 
+        # Step 2.5: Apollo-Grade Waterfall Permutations & Catch-All Validation
+        if business.website:
+            try:
+                web_for_domain = business.website if business.website.startswith("http") else f"https://{business.website}"
+                parsed_w = urlparse(web_for_domain)
+                w_domain = parsed_w.netloc.lower().replace("www.", "").strip()
+                if w_domain and "." in w_domain and not any(ex in w_domain for ex in EXCLUDED_EMAIL_DOMAINS):
+                    is_catch_all = check_catch_all_domain(w_domain)
+                    permutations = generate_email_permutations(business.name, w_domain)
+                    
+                    found_perms = 0
+                    for cand in permutations:
+                        if cand in all_emails:
+                            continue
+                        if not is_catch_all:
+                            v_ok, v_stat = verify_email_smtp(cand)
+                            if v_ok and v_stat in ("valid", "valid_mx"):
+                                all_emails.add(cand)
+                                found_perms += 1
+                                if found_perms >= 3:
+                                    break
+                        else:
+                            # On catch-all domains, adopt high-yield department addresses
+                            alias = cand.split("@")[0]
+                            if alias in ("contact", "info", "sales", "office"):
+                                all_emails.add(cand)
+                                found_perms += 1
+                                if found_perms >= 2:
+                                    break
+            except Exception as perm_err:
+                logger.debug(f"Waterfall permutation check for {business.name}: {perm_err}")
+
         # Update business phone if missing
         if not business.phone and all_phones:
             business.phone = list(all_phones)[0]
@@ -338,6 +512,18 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 )
                 db.add(c)
 
+        # Step 4: Calculate AI Lead Quality Score & persist
+        stmt = select(Contact).where(Contact.business_id == business.id)
+        res_contacts = await db.execute(stmt)
+        final_contacts = res_contacts.scalars().all()
+
+        lead_scoring = calculate_lead_quality_score(business, final_contacts)
+        base_extra = dict(business.extra_data) if (business.extra_data and isinstance(business.extra_data, dict)) else {}
+        base_extra["lead_score"] = lead_scoring["score"]
+        base_extra["lead_tier"] = lead_scoring["tier"]
+        base_extra["lead_badges"] = lead_scoring["badges"]
+        business.extra_data = base_extra
+
         await db.commit()
         return {
             "business_id": business_id,
@@ -346,7 +532,10 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             "verified_emails": verified_count,
             "phones_found": len(all_phones),
             "website": business.website,
-            "socials": discovered_socials
+            "socials": discovered_socials,
+            "lead_score": lead_scoring["score"],
+            "lead_tier": lead_scoring["tier"],
+            "lead_badges": lead_scoring["badges"]
         }
 
 

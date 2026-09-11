@@ -11,6 +11,7 @@ import io
 from app.database import get_db
 from app.models.business import Business
 from app.models.contact import Contact
+from app.enricher.email_finder import calculate_lead_quality_score
 
 router = APIRouter()
 
@@ -21,6 +22,9 @@ class LeadCreate(BaseModel):
     website: Optional[str] = None
     address: Optional[str] = None
     industry: Optional[str] = "General"
+
+class TwentyWebhookRequest(BaseModel):
+    webhook_url: Optional[str] = None
 
 @router.get("")
 @router.get("/")
@@ -106,15 +110,30 @@ async def get_leads(
             continue
 
         # Compute Google Maps URL
+        extra = b.extra_data if isinstance(b.extra_data, dict) else {}
         maps_url = b.maps_url
         if not maps_url:
-            extra = b.extra_data or {}
             maps_url = extra.get("maps_url") if isinstance(extra, dict) else None
         if not maps_url and b.place_id and b.place_id.startswith("http"):
             maps_url = b.place_id
         if not maps_url:
             query_str = f"{b.name} {b.address or ''}".strip()
             maps_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query_str)}"
+
+        # Scrape and Apollo Enrichment attributes
+        is_claimed = extra.get("is_claimed", True)
+        operational_status = extra.get("operational_status", "Operational")
+        price_tier = extra.get("price_tier")
+
+        if "lead_score" in extra and "lead_tier" in extra:
+            lead_score = extra["lead_score"]
+            lead_tier = extra["lead_tier"]
+            lead_badges = extra.get("lead_badges", [])
+        else:
+            score_info = calculate_lead_quality_score(b, b_contacts)
+            lead_score = score_info["score"]
+            lead_tier = score_info["tier"]
+            lead_badges = score_info["badges"]
 
         leads_data.append({
             "id": b.id,
@@ -126,11 +145,18 @@ async def get_leads(
             "rating": b.rating,
             "reviews_count": b.reviews_count,
             "industry": b.industry,
+            "latitude": b.latitude,
+            "longitude": b.longitude,
+            "is_claimed": is_claimed,
+            "operational_status": operational_status,
+            "price_tier": price_tier,
+            "lead_score": lead_score,
+            "lead_tier": lead_tier,
+            "lead_badges": lead_badges,
             "primary_contact": primary_contact,
             "contacts": b_contacts,
             "created_at": b.created_at.isoformat() if b.created_at else None
         })
-
 
     return {
         "total": total,
@@ -158,6 +184,11 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
         "Address",
         "Rating",
         "Reviews Count",
+        "Lead Score",
+        "Lead Tier",
+        "Claimed GBP",
+        "Latitude",
+        "Longitude",
         "Contact Name",
         "Contact Email",
         "Email Verified",
@@ -168,6 +199,15 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
     for b, c in rows:
         contact_name = f"{c.first_name or ''} {c.last_name or ''}".strip() if c else ""
         maps_url = b.maps_url or (b.place_id if b.place_id and b.place_id.startswith("http") else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(b.name + ' ' + (b.address or ''))}")
+        extra = b.extra_data if isinstance(b.extra_data, dict) else {}
+        is_claimed = extra.get("is_claimed", True)
+        lead_score = extra.get("lead_score")
+        lead_tier = extra.get("lead_tier")
+        if lead_score is None:
+            score_info = calculate_lead_quality_score(b, [c] if c else [])
+            lead_score = score_info["score"]
+            lead_tier = score_info["tier"]
+
         writer.writerow([
             b.id,
             b.name or "",
@@ -177,6 +217,11 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
             b.address or "",
             b.rating or "",
             b.reviews_count or "",
+            lead_score,
+            lead_tier,
+            "Yes" if is_claimed else "No (Unclaimed)",
+            b.latitude or "",
+            b.longitude or "",
             contact_name,
             c.email if c else "",
             "Yes" if (c and c.is_verified) else "No",
@@ -184,13 +229,113 @@ async def export_leads_csv(db: AsyncSession = Depends(get_db)):
             maps_url
         ])
 
-
     csv_data = output.getvalue()
     return Response(
         content=csv_data,
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=leadforge_leads_export.csv"}
     )
+
+
+@router.get("/export/twenty-crm")
+@router.post("/export/twenty-crm")
+async def export_leads_twenty_crm(payload: Optional[TwentyWebhookRequest] = None, db: AsyncSession = Depends(get_db)):
+    """
+    Exports leads in Twenty CRM / Open-Source CRM standard JSON format.
+    If webhook_url is provided, automatically posts the batch payload to the target endpoint.
+    """
+    stmt = select(Business).order_by(Business.id.desc())
+    res = await db.execute(stmt)
+    businesses = res.scalars().all()
+
+    b_ids = [b.id for b in businesses]
+    contacts_map: Dict[int, List[Contact]] = {b_id: [] for b_id in b_ids}
+    if b_ids:
+        c_stmt = select(Contact).where(Contact.business_id.in_(b_ids))
+        c_res = await db.execute(c_stmt)
+        for c in c_res.scalars().all():
+            contacts_map[c.business_id].append(c)
+
+    companies = []
+    for b in businesses:
+        b_contacts = contacts_map.get(b.id, [])
+        extra = b.extra_data if isinstance(b.extra_data, dict) else {}
+        is_claimed = extra.get("is_claimed", True)
+        
+        score_info = calculate_lead_quality_score(b, b_contacts)
+        lead_score = extra.get("lead_score", score_info["score"])
+        lead_tier = extra.get("lead_tier", score_info["tier"])
+
+        people = []
+        for c in b_contacts:
+            people.append({
+                "firstName": c.first_name,
+                "lastName": c.last_name,
+                "jobTitle": c.title or "Owner / Decision Maker",
+                "emails": {
+                    "primaryEmail": c.email,
+                    "additionalEmails": []
+                },
+                "phones": {
+                    "primaryPhone": c.phone or b.phone,
+                    "additionalPhones": []
+                },
+                "whatsappUrl": c.whatsapp_link,
+                "isEmailVerified": c.is_verified,
+                "verificationStatus": c.verification_status
+            })
+
+        domain = ""
+        if b.website:
+            try:
+                parsed = urllib.parse.urlparse(b.website if b.website.startswith("http") else f"https://{b.website}")
+                domain = parsed.netloc.replace("www.", "")
+            except Exception:
+                domain = b.website
+
+        companies.append({
+            "name": b.name,
+            "domainName": domain,
+            "address": {
+                "addressStreet1": b.address or "",
+                "addressCity": "",
+                "addressPostcode": "",
+                "addressCountry": ""
+            },
+            "rating": b.rating,
+            "reviewsCount": b.reviews_count,
+            "leadScore": lead_score,
+            "leadTier": lead_tier,
+            "isClaimedGBP": is_claimed,
+            "coordinates": {
+                "lat": b.latitude,
+                "lng": b.longitude
+            },
+            "people": people
+        })
+
+    export_payload = {
+        "version": "1.0",
+        "source": "leadforge",
+        "total_records": len(companies),
+        "companies": companies
+    }
+
+    if payload and payload.webhook_url:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(payload.webhook_url, json=export_payload)
+                return {
+                    "status": "synced",
+                    "webhook_url": payload.webhook_url,
+                    "status_code": resp.status_code,
+                    "synced_companies": len(companies)
+                }
+        except Exception as hook_err:
+            raise HTTPException(status_code=500, detail=f"Webhook delivery failed: {hook_err}")
+
+    return export_payload
 
 
 @router.post("/")

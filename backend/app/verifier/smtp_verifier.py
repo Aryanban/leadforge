@@ -87,3 +87,37 @@ def verify_email_smtp(email: str, sender_email: str = "verify@leadforge.dev") ->
     except Exception as e:
         logger.debug(f"SMTP check notice for {clean_email}: {e}")
         return True, "valid_mx"
+
+
+def check_catch_all_domain(domain: str) -> bool:
+    """
+    Apollo-grade Catch-All probe:
+    Probes remote mail server with an intentional nonexistent address.
+    If server returns 250 OK, domain is a catch-all (accepts all addresses).
+    If server returns 550, domain strictly validates individual mailboxes.
+    """
+    if not domain or domain in DISPOSABLE_DOMAINS:
+        return False
+
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = 3.0
+        resolver.lifetime = 3.0
+        records = resolver.resolve(domain, 'MX')
+        if not records:
+            return False
+        mx_record = str(records[0].exchange).rstrip('.')
+    except Exception:
+        return False
+
+    probe_address = f"probe_leadforge_chk{abs(hash(domain)) % 999999}@{domain}"
+    try:
+        server = smtplib.SMTP(mx_record, port=25, timeout=3.5)
+        server.set_debuglevel(0)
+        server.helo("leadforge.dev")
+        server.mail("verify@leadforge.dev")
+        code, _ = server.rcpt(probe_address)
+        server.quit()
+        return code == 250
+    except Exception:
+        return False

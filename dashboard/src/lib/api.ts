@@ -39,6 +39,14 @@ export interface LeadItem {
   rating: number | null;
   reviews_count: number | null;
   industry: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  is_claimed?: boolean;
+  operational_status?: string;
+  price_tier?: string | null;
+  lead_score?: number;
+  lead_tier?: "HOT" | "WARM" | "COLD";
+  lead_badges?: string[];
   primary_contact?: {
     id: number;
     first_name: string | null;
@@ -142,6 +150,12 @@ export const api = {
     request('/leads', { method: 'POST', body: JSON.stringify(data) }),
   deleteLead: (id: number) => request(`/leads/${id}`, { method: 'DELETE' }),
   exportCsvUrl: `${API_BASE}/leads/export/csv`,
+  exportTwentyCrmUrl: `${API_BASE}/leads/export/twenty-crm`,
+  exportTwentyCrm: (webhook_url?: string) =>
+    request<any>('/leads/export/twenty-crm', {
+      method: 'POST',
+      body: JSON.stringify({ webhook_url }),
+    }),
 
   // Scraper
   startScrape: (query: string, max_results: number = 20) =>

@@ -224,6 +224,49 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                                     address = " · ".join(parts[1:])
                             break
 
+                    # Extract Coordinates (Lat, Lng)
+                    latitude, longitude = None, None
+                    coord_match = re.search(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)', href)
+                    if coord_match:
+                        try:
+                            latitude = float(coord_match.group(1))
+                            longitude = float(coord_match.group(2))
+                        except Exception:
+                            pass
+                    if latitude is None:
+                        center_match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', href)
+                        if center_match:
+                            try:
+                                latitude = float(center_match.group(1))
+                                longitude = float(center_match.group(2))
+                            except Exception:
+                                pass
+
+                    # Check Claimed / Unclaimed GBP Status
+                    is_claimed = True
+                    if any("claim this business" in l.lower() or "own this business" in l.lower() for l in lines):
+                        is_claimed = False
+
+                    # Extract Operational Status
+                    status = "Operational"
+                    for l in lines:
+                        if "closed permanently" in l.lower():
+                            status = "Permanently Closed"
+                            break
+                        elif "closed temporarily" in l.lower():
+                            status = "Temporarily Closed"
+                            break
+                        elif any(l.startswith(x) for x in ["Open", "Closed", "Opens"]):
+                            status = l.split("·")[0].strip()
+                            break
+
+                    # Extract Price Tier
+                    price_tier = None
+                    for symbol in ["₹₹₹₹", "₹₹₹", "₹₹", "₹", "$$$$", "$$$", "$$", "$"]:
+                        if symbol in text:
+                            price_tier = symbol
+                            break
+
                     maps_url = href.split("?")[0] if (href and href.startswith("http")) else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name + ' ' + (address or query))}"
 
                     results.append({
@@ -236,6 +279,11 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                         "reviews_count": reviews,
                         "industry": category or (query.split(" in ")[0] if " in " in query else "Local Business"),
                         "place_id": href.split("?")[0][-60:] if href else None,
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "is_claimed": is_claimed,
+                        "operational_status": status,
+                        "price_tier": price_tier,
                         "source": "playwright_maps",
                         "query": query
                     })
@@ -379,7 +427,15 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                         rating=lead.get("rating"),
                         reviews_count=lead.get("reviews_count"),
                         industry=lead.get("industry") or lead.get("query"),
-                        extra_data={"query": query, "scraped_at": datetime.utcnow().isoformat()}
+                        latitude=lead.get("latitude"),
+                        longitude=lead.get("longitude"),
+                        extra_data={
+                            "query": query,
+                            "scraped_at": datetime.utcnow().isoformat(),
+                            "is_claimed": lead.get("is_claimed", True),
+                            "operational_status": lead.get("operational_status", "Operational"),
+                            "price_tier": lead.get("price_tier"),
+                        }
                     )
                     db.add(business)
                     await db.flush()
