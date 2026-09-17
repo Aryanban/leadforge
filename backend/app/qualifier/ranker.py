@@ -58,6 +58,18 @@ def _lead_payload(business: Business, contacts: List[Contact], scoring: Dict[str
             }
             for c in contacts
         ],
+        "social_profiles": [
+            {
+                "platform": p.platform,
+                "url": p.url,
+                "handle": p.handle,
+                "followers": p.followers,
+                "posts_count": p.posts_count,
+                "verified": bool(p.verified),
+                "source": p.source,
+            }
+            for p in (getattr(business, "social_profiles", None) or [])
+        ],
         "score": scoring["score"],
         "tier": scoring["tier"],
         "badges": scoring["badges"],
@@ -98,7 +110,10 @@ async def rank_existing(
     scope_icp: bool = False,
 ) -> List[Dict[str, Any]]:
     """Ranks the leads already in the database against the given ICP profile."""
-    stmt = select(Business).options(selectinload(Business.contacts))
+    stmt = select(Business).options(
+        selectinload(Business.contacts),
+        selectinload(Business.social_profiles),
+    )
     if scope_icp and getattr(icp_profile, "id", None) is not None:
         stmt = stmt.where(Business.icp_profile_id == icp_profile.id)
     stmt = stmt.order_by(Business.id.desc())

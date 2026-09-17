@@ -7,6 +7,7 @@ from .send import Send
 from .scrape_job import ScrapeJob
 from .icp_profile import ICPProfile
 from .source_stats import SourceStats
+from .social_profile import SocialProfile
 
 __all__ = [
     "Business",
@@ -19,4 +20,5 @@ __all__ = [
     "ScrapeJob",
     "ICPProfile",
     "SourceStats",
+    "SocialProfile",
 ]

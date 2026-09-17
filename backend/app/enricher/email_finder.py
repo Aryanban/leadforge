@@ -353,7 +353,31 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             except Exception as crawl_err:
                 logger.warning(f"Error crawling website for {business.name}: {crawl_err}")
 
-        # Step 2.5: Apollo-Grade Waterfall Permutations & Catch-All Validation
+        # Step 2.5: Social enrichment — Stage A (website-derived + JSON-LD sameAs)
+        # always on; Stage B (direct platform search) only behind the opt-in flag.
+        try:
+            from app.enricher.social_finder import (
+                find_business_socials,
+                probe_direct_socials,
+                upsert_social_profiles,
+            )
+            from app.config import settings
+
+            merged_socials = await find_business_socials(business, contact_socials=discovered_socials)
+            provenance = "website"
+            if settings.SOCIAL_DIRECT:
+                direct_socials = await probe_direct_socials(business)
+                for platform, url in direct_socials.items():
+                    merged_socials.setdefault(platform, url)
+                if direct_socials:
+                    provenance = "direct"
+            if merged_socials:
+                await upsert_social_profiles(db, business.id, merged_socials, provenance=provenance)
+                discovered_socials.update(merged_socials)
+        except Exception as social_err:
+            logger.debug(f"Social enrichment skipped for {business.name}: {social_err}")
+
+        # Step 2.6: Apollo-Grade Waterfall Permutations & Catch-All Validation
         if business.website:
             try:
                 web_for_domain = business.website if business.website.startswith("http") else f"https://{business.website}"

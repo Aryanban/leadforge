@@ -2,6 +2,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 import httpx
+from sqlalchemy import inspect as sa_inspect
 
 SOCIAL_PLATFORMS = ("linkedin", "facebook", "instagram", "twitter", "youtube")
 
@@ -24,6 +25,18 @@ def _contact_socials(contacts: List[Any]) -> Dict[str, str]:
     return merged
 
 
+def _business_socials(business: Any) -> Dict[str, str]:
+    """Reads persisted SocialProfile rows, only when the relation is already loaded."""
+    try:
+        state = sa_inspect(business)
+        if "social_profiles" in state.unloaded:
+            return {}
+        profiles = getattr(business, "social_profiles", None) or []
+        return {p.platform: p.url for p in profiles if getattr(p, "platform", None)}
+    except Exception:
+        return {}
+
+
 def extract_signals(business: Any, contacts: Optional[List[Any]] = None) -> Dict[str, Any]:
     """
     Extracts objective, network-free facts about a lead from the persisted record.
@@ -38,7 +51,7 @@ def extract_signals(business: Any, contacts: Optional[List[Any]] = None) -> Dict
         extra = {}
 
     emails = _contact_emails(contacts)
-    socials = _contact_socials(contacts)
+    socials = {**_business_socials(business), **_contact_socials(contacts)}
     website = getattr(business, "website", None)
 
     rating = getattr(business, "rating", None)

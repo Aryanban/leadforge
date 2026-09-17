@@ -28,4 +28,5 @@ class Business(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     contacts = relationship("Contact", back_populates="business", cascade="all, delete-orphan")
+    social_profiles = relationship("SocialProfile", back_populates="business", cascade="all, delete-orphan")
     icp_profile = relationship("ICPProfile", back_populates="businesses")

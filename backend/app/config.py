@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     PLAYWRIGHT_HEADLESS: bool = True
     ENRICH_MAX_PAGES: int = 4
     REQUEST_TIMEOUT: int = 15
+    # Stage-B social enrichment: direct Instagram/Facebook/LinkedIn search.
+    # Off by default — these endpoints block scrapers and are ToS-gray.
+    SOCIAL_DIRECT: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

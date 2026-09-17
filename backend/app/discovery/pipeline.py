@@ -136,7 +136,10 @@ async def run_discovery(
         async with async_session_maker() as db:
             stmt = (
                 select(Business)
-                .options(selectinload(Business.contacts))
+                .options(
+                    selectinload(Business.contacts),
+                    selectinload(Business.social_profiles),
+                )
                 .where(Business.id.in_(all_new_ids))
             )
             res = await db.execute(stmt)
