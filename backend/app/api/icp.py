@@ -158,6 +158,14 @@ async def parse_icp(payload: ParseRequest):
     return parse_icp_text(payload.text)
 
 
+@router.get("/sources/list")
+async def list_sources():
+    """Sources the router can use for discovery (manual override help)."""
+    from app.sources.router import list_available_sources
+
+    return list_available_sources()
+
+
 @router.post("/{profile_id}/rank")
 async def rank_leads_for_profile(
     profile_id: int,

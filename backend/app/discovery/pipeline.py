@@ -12,6 +12,7 @@ from app.models.contact import Contact
 from app.models.icp_profile import ICPProfile
 from app.models.scrape_job import ScrapeJob
 from app.qualifier.ranker import rank_businesses
+from app.sources.router import discover as run_sources
 
 logger = logging.getLogger(__name__)
 
@@ -34,39 +35,40 @@ async def _record_source_stats(
     source: str,
     niche: Optional[str],
     area: Optional[str],
+    discovered: int,
     ranked: List[Dict[str, Any]],
 ) -> None:
-    """Persists per-source yield quality so the router can learn over time."""
+    """Persists per-source yield quality so the router learns over time."""
     from app.models.source_stats import SourceStats
 
-    if not ranked:
+    if discovered == 0 and not ranked:
         return
     try:
         async with async_session_maker() as db:
             stmt = select(SourceStats).where(
                 SourceStats.source == source,
-                SourceStats.niche == (niche or ""),
+                SourceStats.niche == (niche or "").title(),
                 SourceStats.area == (area or ""),
             )
             res = await db.execute(stmt)
             stats = res.scalars().first()
 
-            avg = sum(lead["score"] for lead in ranked) / len(ranked)
+            avg = (sum(lead["score"] for lead in ranked) / len(ranked)) if ranked else 0.0
             hot = sum(1 for lead in ranked if lead["tier"] == "HOT")
 
             if stats is None:
                 stats = SourceStats(
                     source=source,
-                    niche=niche or "",
+                    niche=(niche or "").title(),
                     area=area or "",
-                    leads_found=len(ranked),
+                    leads_found=discovered,
                     enriched=len(ranked),
                     avg_score=avg,
                     hot_leads=hot,
                 )
                 db.add(stats)
             else:
-                stats.leads_found += len(ranked)
+                stats.leads_found += discovered
                 stats.enriched += len(ranked)
                 stats.avg_score = (stats.avg_score or 0) * 0.7 + avg * 0.3
                 stats.hot_leads += hot
@@ -86,13 +88,12 @@ async def run_discovery(
     """
     Full discovery pipeline for an ICP profile:
 
-    1. Scrape sources for the niche+area (P0: Google Maps incl. HTTP fallback).
-    2. Enrich new leads (emails, phones, socials, SMTP verification, health probes).
-    3. Rank every lead against the ICP and keep those above the min-score gate.
-    4. Persist the ranked shortlist on the ScrapeJob for the dashboard to render.
+    1. Route the niche+area to the best sources (learned over time).
+    2. Discover raw leads from every source, dedupe against known businesses.
+    3. Enrich the new leads (emails, phones, socials, SMTP verification, health probes).
+    4. Rank every lead against the ICP and keep those above the min-score gate.
+    5. Persist the ranked shortlist on the ScrapeJob for the dashboard to render.
     """
-    from app.scraper.maps_scraper import scrape_leads_and_save
-
     async with async_session_maker() as db:
         job = await db.get(ScrapeJob, job_id)
         icp_profile = await db.get(ICPProfile, icp_profile_id)
@@ -100,25 +101,35 @@ async def run_discovery(
             raise ValueError("Discovery job or ICP profile not found")
 
         job.status = "running"
+        job.icp_profile_id = icp_profile_id
         await db.commit()
 
     query = f"{niche} in {area}".strip() if area else niche.strip()
 
+    raw_by_source: Dict[str, List[dict]] = {}
     try:
-        saved_count, new_biz_ids = await scrape_leads_and_save(
-            job_id, query, max_results,
-            icp_profile_id=icp_profile_id,
-            enrich=False,
-        )
+        raw_by_source = await run_sources(niche, area, max_results, icp_profile, sources)
     except Exception as e:
         async with async_session_maker() as db:
             job = await db.get(ScrapeJob, job_id)
             job.status = "failed"
-            job.error = f"Scraping failed: {e}"
+            job.error = f"Source routing failed: {e}"
             await db.commit()
         raise
 
-    await _enrich_new_leads(new_biz_ids)
+    all_new_ids: List[int] = []
+    per_source_counts: Dict[str, int] = {}
+    async with async_session_maker() as db:
+        for source_name, raw_leads in raw_by_source.items():
+            try:
+                new_ids = await _persist(db, raw_leads, icp_profile_id, job_id, query)
+            except Exception as e:
+                logger.warning(f"Persistence failed for source '{source_name}': {e}")
+                new_ids = []
+            per_source_counts[source_name] = len(raw_leads)
+            all_new_ids.extend(new_ids)
+
+    await _enrich_new_leads(all_new_ids)
 
     ranked: List[Dict[str, Any]] = []
     try:
@@ -126,7 +137,7 @@ async def run_discovery(
             stmt = (
                 select(Business)
                 .options(selectinload(Business.contacts))
-                .where(Business.id.in_(new_biz_ids))
+                .where(Business.id.in_(all_new_ids))
             )
             res = await db.execute(stmt)
             businesses = list(res.scalars().all())
@@ -139,13 +150,13 @@ async def run_discovery(
     except Exception as e:
         logger.warning(f"Ranking failed for job {job_id}: {e}")
 
-    primary_source = (sources[0] if sources else "google_maps") or "google_maps"
-    await _record_source_stats(primary_source, niche, area, ranked)
+    for source_name, count in per_source_counts.items():
+        await _record_source_stats(source_name, niche, area, count, ranked)
 
     async with async_session_maker() as db:
         job = await db.get(ScrapeJob, job_id)
         job.status = "completed"
-        job.total_found = saved_count
+        job.total_found = sum(per_source_counts.values())
         job.leads_saved = len(ranked)
         job.result = {
             "niche": niche,
@@ -154,13 +165,31 @@ async def run_discovery(
             "icp_profile_id": icp_profile_id,
             "min_score": icp_profile.min_score,
             "preset": icp_profile.preset,
+            "sources_used": list(raw_by_source.keys()),
+            "per_source_counts": per_source_counts,
             "ranked_leads": ranked,
         }
         job.finished_at = datetime.utcnow()
         await db.commit()
 
     logger.info(
-        f"Discovery job {job_id} completed: {saved_count} scraped, {len(ranked)} passed "
-        f"the ICP gate (min_score={icp_profile.min_score})"
+        f"Discovery job {job_id} completed: {job.total_found} scraped across "
+        f"{len(per_source_counts)} sources, {len(ranked)} passed the ICP gate "
+        f"(min_score={icp_profile.min_score})"
     )
-    return {"job_id": job_id, "scraped": saved_count, "ranked_leads": ranked}
+    return {"job_id": job_id, "scraped": job.total_found, "ranked_leads": ranked}
+
+
+async def _persist(
+    db: AsyncSession,
+    raw_leads: List[dict],
+    icp_profile_id: Optional[int],
+    job_id: Optional[int],
+    query: str,
+) -> List[int]:
+    """Dedupe-aware persistence for one source's raw leads."""
+    from app.dedupe.persist import persist_raw_leads
+
+    for lead in raw_leads:
+        lead.setdefault("query", query)
+    return await persist_raw_leads(db, raw_leads, icp_profile_id, job_id=job_id)
