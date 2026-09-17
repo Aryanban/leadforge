@@ -2,7 +2,7 @@ import re
 import urllib.parse
 import logging
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import select
 
@@ -368,7 +368,13 @@ async def scrape_google_http_fallback(query: str, max_results: int = 20) -> List
     return results
 
 
-async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) -> int:
+async def scrape_leads_and_save(
+    job_id: int,
+    query: str,
+    max_results: int = 20,
+    icp_profile_id: Optional[int] = None,
+    enrich: bool = True,
+) -> Tuple[int, List[int]]:
     """
     Main orchestrator for scraping:
     1. Runs high-fidelity Google Maps Playwright scraper
@@ -376,6 +382,11 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
     3. Persists results directly into SQLite/Postgres database
     4. Creates initial contact records for each business
     5. Updates ScrapeJob status
+
+    When icp_profile_id is provided, newly discovered businesses are tagged with the
+    profile so downstream scoring uses the ICP-aware weights. Pass enrich=False to
+    suppress the fire-and-forget enrichment (e.g. the discovery pipeline enriches
+    synchronously so it can rank once enrichment is complete).
     """
     raw_leads = []
     error_msg = None
@@ -429,6 +440,8 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                         industry=lead.get("industry") or lead.get("query"),
                         latitude=lead.get("latitude"),
                         longitude=lead.get("longitude"),
+                        source=lead.get("source", "google_maps"),
+                        icp_profile_id=icp_profile_id,
                         extra_data={
                             "query": query,
                             "scraped_at": datetime.utcnow().isoformat(),
@@ -463,6 +476,8 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                         existing.website = lead.get("website")
                     if not existing.maps_url and lead.get("maps_url"):
                         existing.maps_url = lead.get("maps_url")
+                    if icp_profile_id and not existing.icp_profile_id:
+                        existing.icp_profile_id = icp_profile_id
 
             # Finalize ScrapeJob
             if job:
@@ -476,7 +491,7 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
             logger.info(f"Scrape job {job_id} completed: found {len(raw_leads)}, saved {saved_count} new leads")
 
             # Trigger multi-source web enrichment for newly discovered businesses in background
-            if new_biz_ids:
+            if enrich and new_biz_ids:
                 from app.enricher.email_finder import enrich_business_by_id
                 for biz_id in new_biz_ids:
                     try:
@@ -491,4 +506,4 @@ async def scrape_leads_and_save(job_id: int, query: str, max_results: int = 20) 
                 job.error = str(e)
                 await db.commit()
 
-    return saved_count
+    return saved_count, new_biz_ids

@@ -156,7 +156,7 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             job_id = job.id
 
         # Run scrape
-        saved_count = await scrape_leads_and_save(query=query, max_results=max_results, job_id=job_id)
+        saved_count, _new_biz_ids = await scrape_leads_and_save(query=query, max_results=max_results, job_id=job_id)
 
         # Fetch newly scraped leads
         async with async_session_maker() as db:

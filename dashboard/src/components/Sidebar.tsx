@@ -2,14 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { 
-  LayoutDashboard, 
-  Search, 
-  Users, 
-  Mail, 
+import {
+  LayoutDashboard,
+  Search,
+  Users,
+  Mail,
   Settings,
   Sparkles,
-  ExternalLink
+  ExternalLink,
+  Target
 } from "lucide-react";
 
 export function Sidebar() {
@@ -17,6 +18,7 @@ export function Sidebar() {
 
   const navItems = [
     { href: "/", label: "Overview", icon: LayoutDashboard },
+    { href: "/find", label: "Find Best Leads", icon: Target },
     { href: "/scrape", label: "Scrape Leads", icon: Search },
     { href: "/leads", label: "Lead Database", icon: Users },
     { href: "/campaigns", label: "Email Campaigns", icon: Mail },

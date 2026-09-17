@@ -5,6 +5,8 @@ from .campaign_step import CampaignStep
 from .mailbox import Mailbox
 from .send import Send
 from .scrape_job import ScrapeJob
+from .icp_profile import ICPProfile
+from .source_stats import SourceStats
 
 __all__ = [
     "Business",
@@ -14,5 +16,7 @@ __all__ = [
     "CampaignStep",
     "Mailbox",
     "Send",
-    "ScrapeJob"
+    "ScrapeJob",
+    "ICPProfile",
+    "SourceStats",
 ]

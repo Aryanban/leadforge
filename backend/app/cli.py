@@ -69,7 +69,7 @@ async def cmd_scrape(query: str, limit: int = 10, auto_enrich: bool = True, outp
         job_id = job.id
 
     # 2. Run scraping
-    saved_count = await scrape_leads_and_save(query=query, max_results=limit, job_id=job_id)
+    saved_count, _new_biz_ids = await scrape_leads_and_save(query=query, max_results=limit, job_id=job_id)
 
     # 3. Query the freshly saved/updated leads
     async with async_session_maker() as db:

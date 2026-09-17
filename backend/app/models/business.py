@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -20,8 +20,12 @@ class Business(Base):
     maps_url = Column(String, nullable=True)
     extra_data = Column(JSON, nullable=True)
 
-    
+    source = Column(String, nullable=True)
+    icp_profile_id = Column(Integer, ForeignKey("icp_profiles.id"), nullable=True, index=True)
+    icp_fit = Column(JSON, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     contacts = relationship("Contact", back_populates="business", cascade="all, delete-orphan")
+    icp_profile = relationship("ICPProfile", back_populates="businesses")

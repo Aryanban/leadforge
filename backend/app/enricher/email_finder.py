@@ -82,89 +82,22 @@ def generate_email_permutations(name: str, domain: str) -> List[str]:
 
 def calculate_lead_quality_score(business: Any, contacts: List[Any]) -> Dict[str, Any]:
     """
-    Calculates 0-100 Lead Quality Score and classifies into HOT / WARM / COLD tiers.
-    Scoring Breakdown:
-    - Verified Deliverable Email: +30
-    - Unverified Email: +15
-    - Direct Phone Number: +15
-    - WhatsApp Ready Link: +15
-    - Active Website: +15
-    - Google Rating >= 4.5: +10 (>= 4.0: +5)
-    - Review Volume >= 10: +10 (>= 3: +5)
+    Legacy entry point for the 0-100 lead quality score.
+
+    Preserved as a thin wrapper over the weighted qualifier model so existing
+    callers keep producing identical scores and badges; it is equivalent to
+    scoring without an attached ICP profile.
     """
-    score = 0
-    badges: List[str] = []
+    from app.qualifier.scorer import score_lead
 
-    has_verified_email = any(getattr(c, "is_verified", False) or (isinstance(c, dict) and c.get("is_verified")) for c in contacts)
-    has_any_email = any(getattr(c, "email", None) or (isinstance(c, dict) and c.get("email")) for c in contacts)
-    phone = getattr(business, "phone", None) or (business.get("phone") if isinstance(business, dict) else None)
-    has_whatsapp = any(getattr(c, "whatsapp_link", None) or (isinstance(c, dict) and c.get("whatsapp_link")) for c in contacts)
-    website = getattr(business, "website", None) or (business.get("website") if isinstance(business, dict) else None)
-    rating = getattr(business, "rating", None) or (business.get("rating") if isinstance(business, dict) else None)
-    reviews = getattr(business, "reviews_count", None) or (business.get("reviews_count") if isinstance(business, dict) else None)
-    
-    extra = getattr(business, "extra_data", None) or (business.get("extra_data") if isinstance(business, dict) else {}) or {}
-    is_claimed = extra.get("is_claimed", True) if isinstance(extra, dict) else True
+    result = score_lead(business, contacts)
 
-    if has_verified_email:
-        score += 30
-        badges.append("Verified Email")
-    elif has_any_email:
-        score += 15
-        badges.append("Email Available")
+    extra = getattr(business, "extra_data", None)
+    if isinstance(extra, dict) and extra.get("is_claimed", True) is False:
+        if "Unclaimed GBP" not in result["badges"]:
+            result["badges"].append("Unclaimed GBP")
 
-    if phone:
-        score += 15
-        badges.append("Direct Phone")
-
-    if has_whatsapp:
-        score += 15
-        badges.append("WhatsApp Ready")
-
-    if website:
-        score += 15
-        badges.append("Active Website")
-
-    if rating:
-        try:
-            r_val = float(rating)
-            if r_val >= 4.5:
-                score += 10
-                badges.append("Top Rated")
-            elif r_val >= 4.0:
-                score += 5
-        except (ValueError, TypeError):
-            pass
-
-    if reviews:
-        try:
-            rev_val = int(reviews)
-            if rev_val >= 10:
-                score += 10
-                badges.append("High Reviews")
-            elif rev_val >= 3:
-                score += 5
-        except (ValueError, TypeError):
-            pass
-
-    if not is_claimed:
-        badges.append("Unclaimed GBP")
-
-    # Clamping
-    score = min(100, max(10, score))
-
-    if score >= 75:
-        tier = "HOT"
-    elif score >= 45:
-        tier = "WARM"
-    else:
-        tier = "COLD"
-
-    return {
-        "score": score,
-        "tier": tier,
-        "badges": badges
-    }
+    return result
 
 
 async def search_web_for_business_contacts(name: str, location: str = "") -> Dict[str, Any]:
@@ -512,17 +445,44 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 )
                 db.add(c)
 
-        # Step 4: Calculate AI Lead Quality Score & persist
+        # Step 4: Calculate Lead Quality Score & persist
+        icp_profile = None
+        if business.icp_profile_id:
+            from app.models.icp_profile import ICPProfile
+            icp_profile = await db.get(ICPProfile, business.icp_profile_id)
+
+        # Network-dependent fit signals (SSL, site freshness, ad spend) are only
+        # probed for ICP-driven enrichment and cached so scoring stays repeatable.
+        if icp_profile is not None:
+            try:
+                from app.qualifier.signals import probe_business_health
+                health_patch = await probe_business_health(business)
+                base_extra = dict(business.extra_data) if (business.extra_data and isinstance(business.extra_data, dict)) else {}
+                base_extra.update({k: v for k, v in health_patch.items() if v is not None})
+                business.extra_data = base_extra
+            except Exception as probe_err:
+                logger.debug(f"Health probe skipped for {business.name}: {probe_err}")
+
         stmt = select(Contact).where(Contact.business_id == business.id)
         res_contacts = await db.execute(stmt)
         final_contacts = res_contacts.scalars().all()
 
-        lead_scoring = calculate_lead_quality_score(business, final_contacts)
+        from app.qualifier.scorer import score_lead
+        lead_scoring = score_lead(business, final_contacts, icp_profile)
         base_extra = dict(business.extra_data) if (business.extra_data and isinstance(business.extra_data, dict)) else {}
         base_extra["lead_score"] = lead_scoring["score"]
         base_extra["lead_tier"] = lead_scoring["tier"]
         base_extra["lead_badges"] = lead_scoring["badges"]
         business.extra_data = base_extra
+
+        if icp_profile is not None:
+            business.icp_fit = {
+                "score": lead_scoring["score"],
+                "tier": lead_scoring["tier"],
+                "badges": lead_scoring["badges"],
+                "signal_breakdown": lead_scoring["signal_breakdown"],
+                "min_score": icp_profile.min_score,
+            }
 
         await db.commit()
         return {

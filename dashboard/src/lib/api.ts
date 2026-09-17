@@ -106,6 +106,81 @@ export interface MailboxItem {
   is_active: boolean;
 }
 
+export interface ICPDraft {
+  name: string;
+  niche: string;
+  area: string | null;
+  keywords: string[];
+  exclude_keywords: string[];
+  min_score: number;
+  preset: "outreach_quality" | "agency_opportunity";
+  signal_weights: Record<string, number> | null;
+  preferred_sources: string[] | null;
+}
+
+export interface ICPProfile extends ICPDraft {
+  id: number;
+  source_stats: Record<string, { leads: number; avg_score: number }>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface RankedContact {
+  id: number;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  whatsapp_link: string | null;
+  social_links: Record<string, string> | null;
+  is_verified: boolean;
+  verification_status: string;
+}
+
+export interface RankedLead {
+  business_id: number;
+  name: string;
+  industry: string | null;
+  address: string | null;
+  phone: string | null;
+  website: string | null;
+  rating: number | null;
+  reviews_count: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  source: string | null;
+  contacts: RankedContact[];
+  score: number;
+  tier: "HOT" | "WARM" | "COLD";
+  badges: string[];
+  signal_breakdown: Record<string, number>;
+  signals: Record<string, unknown>;
+}
+
+export interface DiscoveryResult {
+  niche: string;
+  area: string | null;
+  query: string;
+  icp_profile_id: number;
+  min_score: number;
+  preset: string;
+  ranked_leads: RankedLead[];
+}
+
+export interface DiscoveryJob {
+  id: number;
+  query: string;
+  status: string;
+  total_found: number;
+  leads_saved: number;
+  error: string | null;
+  icp_profile_id: number | null;
+  result: DiscoveryResult | null;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
   try {
@@ -195,4 +270,25 @@ export const api = {
   testMailbox: (id: number) =>
     request<{ success: boolean; message: string }>(`/mailboxes/${id}/test`, { method: 'POST' }),
   deleteMailbox: (id: number) => request(`/mailboxes/${id}`, { method: 'DELETE' }),
+
+  // ICP & Discovery
+  parseIcp: (text: string) =>
+    request<ICPDraft>('/icp/parse', { method: 'POST', body: JSON.stringify({ text }) }),
+  createIcp: (data: ICPDraft) =>
+    request<ICPProfile>('/icp', { method: 'POST', body: JSON.stringify(data) }),
+  listIcps: () => request<ICPProfile[]>('/icp'),
+  getIcp: (id: number) => request<ICPProfile>(`/icp/${id}`),
+  updateIcp: (id: number, data: Partial<ICPDraft>) =>
+    request<ICPProfile>(`/icp/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteIcp: (id: number) => request(`/icp/${id}`, { method: 'DELETE' }),
+  rankLeads: (id: number, limit = 50) =>
+    request<{ icp_profile_id: number; min_score: number; total: number; ranked_leads: RankedLead[] }>(
+      `/icp/${id}/rank?limit=${limit}`
+    ),
+  startDiscovery: (data: { niche: string; area?: string | null; icp_profile_id: number; max_results?: number }) =>
+    request<{ job_id: number; status: string; message: string }>('/icp/discover', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  getDiscoveryJob: (id: number) => request<DiscoveryJob>(`/icp/discover/${id}`),
 };

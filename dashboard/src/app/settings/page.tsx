@@ -16,7 +16,8 @@ import {
   Terminal,
   Copy,
   Check,
-  Sparkles
+  Sparkles,
+  ShieldCheck
 } from "lucide-react";
 import { api, MailboxItem } from "@/lib/api";
 

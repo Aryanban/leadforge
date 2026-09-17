@@ -24,11 +24,20 @@ jobs:
           cd backend
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Validate Python code syntax
         run: |
           cd backend
           python -m compileall app/
+
+      - name: Run backend tests
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./test-leadforge.db
+          USE_CELERY: "false"
+        run: |
+          cd backend
+          python -m pytest -q
 
   frontend-check:
     name: Frontend Build
