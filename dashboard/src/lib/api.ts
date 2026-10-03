@@ -231,6 +231,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ webhook_url }),
     }),
+  importCsv: (csv_content: string) =>
+    request<{ status: string; imported: number; skipped: number; total_rows_processed: number }>('/leads/import/csv', {
+      method: 'POST',
+      body: JSON.stringify({ csv_content }),
+    }),
+  getIcebreaker: (business_id: number) =>
+    request<any>(`/leads/${business_id}/icebreaker`),
+  checkSpam: (subject: string, body: string) =>
+    request<{
+      score: number;
+      tier: string;
+      is_safe: boolean;
+      high_risk_words: string[];
+      moderate_risk_words: string[];
+      warnings: string[];
+      recommendations: string[];
+    }>('/campaigns/check-spam', {
+      method: 'POST',
+      body: JSON.stringify({ subject, body }),
+    }),
 
   // Scraper
   startScrape: (query: string, max_results: number = 20) =>

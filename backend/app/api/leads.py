@@ -372,3 +372,150 @@ async def delete_lead(business_id: int, db: AsyncSession = Depends(get_db)):
     await db.execute(stmt)
     await db.commit()
     return {"status": "deleted", "id": business_id}
+
+
+from fastapi import Request
+
+@router.post("/import/csv")
+async def import_leads_csv(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Apollo/Clay-grade Bulk Lead CSV Importer.
+    Accepts CSV file upload, JSON payload with csv_content, or raw text CSV.
+    Automatically assigns lead quality scores and WhatsApp links.
+    """
+    content_type = request.headers.get("content-type", "")
+    csv_text = ""
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if upload and hasattr(upload, "read"):
+            content = await upload.read()
+            csv_text = content.decode("utf-8", errors="ignore")
+        elif "csv_content" in form:
+            csv_text = str(form["csv_content"])
+        else:
+            raise HTTPException(status_code=400, detail="No file or csv_content found in multipart request")
+    elif "application/json" in content_type:
+        body = await request.json()
+        csv_text = body.get("csv_content", "")
+    else:
+        raw = await request.body()
+        csv_text = raw.decode("utf-8", errors="ignore")
+
+    if not csv_text.strip():
+        raise HTTPException(status_code=400, detail="CSV content is empty")
+
+    f = io.StringIO(csv_text.strip())
+    reader = csv.DictReader(f)
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV must contain a header row")
+
+    fieldnames = [fn.strip() for fn in reader.fieldnames]
+
+    def match_header(candidates: List[str]) -> Optional[str]:
+        for fn in fieldnames:
+            normalized = fn.lower().replace(" ", "_").replace("-", "_")
+            if normalized in candidates:
+                return fn
+        return None
+
+    name_col = match_header(["business_name", "company_name", "company", "name", "business", "title"]) or fieldnames[0]
+    email_col = match_header(["email", "contact_email", "e_mail", "mail", "primary_email"])
+    phone_col = match_header(["phone", "phone_number", "mobile", "tel", "telephone", "contact_number"])
+    website_col = match_header(["website", "domain", "url", "web_url", "web"])
+    address_col = match_header(["address", "location", "city", "street", "full_address"])
+    industry_col = match_header(["industry", "category", "niche", "sector"])
+
+    imported = 0
+    skipped = 0
+
+    for row in reader:
+        raw_name = (row.get(name_col) or "").strip()
+        if not raw_name:
+            skipped += 1
+            continue
+
+        raw_phone = (row.get(phone_col) or "").strip() if phone_col else None
+        raw_email = (row.get(email_col) or "").strip() if email_col else None
+        raw_website = (row.get(website_col) or "").strip() if website_col else None
+        raw_address = (row.get(address_col) or "").strip() if address_col else None
+        raw_industry = (row.get(industry_col) or "").strip() if industry_col else "General"
+
+        # Create business
+        business = Business(
+            name=raw_name,
+            phone=raw_phone,
+            website=raw_website,
+            address=raw_address,
+            industry=raw_industry
+        )
+        db.add(business)
+        await db.flush()
+
+        # Create contact if email or phone present
+        contact_list = []
+        if raw_email or raw_phone:
+            digits_only = "".join(filter(str.isdigit, raw_phone or ""))
+            wa_link = f"https://wa.me/{digits_only}" if digits_only else None
+            contact = Contact(
+                business_id=business.id,
+                first_name=raw_name.split()[0],
+                email=raw_email,
+                phone=raw_phone,
+                whatsapp_link=wa_link,
+                is_verified=False,
+                source="csv_import"
+            )
+            db.add(contact)
+            contact_list.append(contact)
+
+        # Calculate quality score
+        score_info = calculate_lead_quality_score(business, contact_list)
+        business.extra_data = {
+            "lead_score": score_info["score"],
+            "lead_tier": score_info["tier"],
+            "lead_badges": score_info["badges"],
+            "imported_via": "csv"
+        }
+        imported += 1
+
+    await db.commit()
+    return {
+        "status": "success",
+        "imported": imported,
+        "skipped": skipped,
+        "total_rows_processed": imported + skipped
+    }
+
+
+@router.get("/{business_id}/icebreaker")
+@router.post("/{business_id}/icebreaker")
+async def get_lead_icebreaker(business_id: int, db: AsyncSession = Depends(get_db)):
+    """Generates personalized AI cold outreach icebreakers for a specific lead."""
+    business = await db.get(Business, business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    c_stmt = select(Contact).where(Contact.business_id == business_id).limit(1)
+    c_res = await db.execute(c_stmt)
+    contact = c_res.scalars().first()
+
+    icebreaker = generate_ai_icebreaker(
+        business_name=business.name,
+        industry=business.industry,
+        city="Delhi NCR",
+        rating=business.rating,
+        reviews_count=business.reviews_count,
+        website=business.website,
+        first_name=contact.first_name if contact else None
+    )
+
+    return {
+        "business_id": business.id,
+        "business_name": business.name,
+        **icebreaker
+    }

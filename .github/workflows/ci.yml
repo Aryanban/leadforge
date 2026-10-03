@@ -35,9 +35,10 @@ jobs:
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test-leadforge.db
           USE_CELERY: "false"
+          PYTHONPATH: backend
         run: |
           cd backend
-          python -m pytest -q
+          python -m pytest -q tests/
 
   frontend-check:
     name: Frontend Build

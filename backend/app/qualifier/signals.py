@@ -7,10 +7,16 @@ from sqlalchemy import inspect as sa_inspect
 SOCIAL_PLATFORMS = ("linkedin", "facebook", "instagram", "twitter", "youtube")
 
 
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 def _contact_emails(contacts: List[Any]) -> List[str]:
     out = []
     for c in contacts or []:
-        email = getattr(c, "email", None) or (c.get("email") if isinstance(c, dict) else None)
+        email = _get(c, "email")
         if email:
             out.append(str(email).lower().strip())
     return out
@@ -19,7 +25,7 @@ def _contact_emails(contacts: List[Any]) -> List[str]:
 def _contact_socials(contacts: List[Any]) -> Dict[str, str]:
     merged: Dict[str, str] = {}
     for c in contacts or []:
-        links = getattr(c, "social_links", None)
+        links = _get(c, "social_links")
         if isinstance(links, dict):
             merged.update({k: v for k, v in links.items() if isinstance(v, str)})
     return merged
@@ -27,6 +33,8 @@ def _contact_socials(contacts: List[Any]) -> Dict[str, str]:
 
 def _business_socials(business: Any) -> Dict[str, str]:
     """Reads persisted SocialProfile rows, only when the relation is already loaded."""
+    if isinstance(business, dict):
+        return business.get("social_profiles") or {}
     try:
         state = sa_inspect(business)
         if "social_profiles" in state.unloaded:
@@ -46,16 +54,16 @@ def extract_signals(business: Any, contacts: Optional[List[Any]] = None) -> Dict
     enrichment and cached on business.extra_data.
     """
     contacts = contacts or []
-    extra = getattr(business, "extra_data", None)
+    extra = _get(business, "extra_data")
     if not isinstance(extra, dict):
         extra = {}
 
     emails = _contact_emails(contacts)
     socials = {**_business_socials(business), **_contact_socials(contacts)}
-    website = getattr(business, "website", None)
+    website = _get(business, "website")
 
-    rating = getattr(business, "rating", None)
-    reviews = getattr(business, "reviews_count", None)
+    rating = _get(business, "rating")
+    reviews = _get(business, "reviews_count")
 
     try:
         rating_val = float(rating) if rating is not None else None
@@ -68,17 +76,17 @@ def extract_signals(business: Any, contacts: Optional[List[Any]] = None) -> Dict
         reviews_val = None
 
     return {
-        "verified_email": any(getattr(c, "is_verified", False) for c in contacts),
+        "verified_email": any(bool(_get(c, "is_verified", False)) for c in contacts),
         "any_email": bool(emails),
         "email_count": len(emails),
-        "phone": bool(getattr(business, "phone", None)),
-        "whatsapp": any(getattr(c, "whatsapp_link", None) for c in contacts),
+        "phone": bool(_get(business, "phone")),
+        "whatsapp": any(bool(_get(c, "whatsapp_link")) for c in contacts),
         "website": bool(website),
         "rating": rating_val,
         "reviews_count": reviews_val,
         "unclaimed_gbp": bool(extra.get("is_claimed", True) is False),
-        "category": (getattr(business, "industry", None) or "").lower(),
-        "name": (getattr(business, "name", None) or "").lower(),
+        "category": (_get(business, "industry") or "").lower(),
+        "name": (_get(business, "name") or "").lower(),
         "social_presence": bool(socials),
         "social_platforms": sorted(socials.keys()),
         "ssl_valid": extra.get("ssl_valid"),

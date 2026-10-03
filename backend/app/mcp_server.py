@@ -134,6 +134,31 @@ TOOLS_DEFINITIONS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "leadforge_check_spam",
+        "description": "Analyzes cold email subject and body copy for spam trigger words, all-caps flags, link density, and deliverability hygiene.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Subject line"},
+                "body": {"type": "string", "description": "Email body copy"}
+            },
+            "required": ["subject", "body"]
+        }
+    },
+    {
+        "name": "leadforge_generate_icebreaker",
+        "description": "Generates Apollo/Clay-grade personalized cold outreach icebreaker hooks, compliments, and pain points for a business lead.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "business_id": {"type": "integer", "description": "Lead business ID in database"},
+                "business_name": {"type": "string", "description": "Business name (if not using ID)"},
+                "industry": {"type": "string", "description": "Industry / niche"},
+                "city": {"type": "string", "description": "City or territory"}
+            }
+        }
     }
 ]
 
@@ -326,6 +351,75 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"• **Outreach Campaigns**: {total_camps}\n"
             "• **Dashboard**: [http://localhost:3000](http://localhost:3000)\n"
             "• **Backend API**: [http://localhost:8000](http://localhost:8000)"
+        )
+
+    elif name == "leadforge_check_spam":
+        from app.campaigns.spam_checker import check_cold_email_spam
+        subject = arguments.get("subject", "")
+        body = arguments.get("body", "")
+        result = check_cold_email_spam(subject, body)
+
+        lines = [
+            "### LeadForge Deliverability & Spam Scorecard\n",
+            f"• **Score**: {result['score']}/100 ({result['tier']})",
+            f"• **Safe to Send**: {'✓ Yes' if result['is_safe'] else '⚠ Caution / High Risk'}",
+            f"• **Subject Word Count**: {result['subject_word_count']} words",
+            f"• **Link Count**: {result['link_count']}",
+            f"• **Personalization Detected**: {'✓ Yes' if result['has_personalization'] else 'None'}\n"
+        ]
+
+        if result["high_risk_words"]:
+            lines.append(f"**High-Risk Triggers**: `{', '.join(result['high_risk_words'])}`")
+        if result["moderate_risk_words"]:
+            lines.append(f"**Promotional Words**: `{', '.join(result['moderate_risk_words'])}`")
+        if result["warnings"]:
+            lines.append("\n**Warnings & Recommendations**:")
+            for w in result["warnings"]:
+                lines.append(f"- ⚠ {w}")
+            for r in result["recommendations"]:
+                lines.append(f"- 💡 {r}")
+
+        return "\n".join(lines)
+
+    elif name == "leadforge_generate_icebreaker":
+        from app.enricher.ai_icebreaker import generate_ai_icebreaker
+        b_id = arguments.get("business_id")
+        b_name = arguments.get("business_name")
+        industry = arguments.get("industry")
+        city = arguments.get("city", "Delhi NCR")
+
+        if b_id:
+            async with async_session_maker() as db:
+                b = await db.get(Business, int(b_id))
+                if b:
+                    b_name = b.name
+                    industry = b.industry or industry
+                    c_stmt = select(Contact).where(Contact.business_id == b.id).limit(1)
+                    c_res = await db.execute(c_stmt)
+                    c = c_res.scalars().first()
+                    first_name = c.first_name if c else None
+                    info = generate_ai_icebreaker(
+                        business_name=b.name,
+                        industry=b.industry,
+                        city=city,
+                        rating=b.rating,
+                        reviews_count=b.reviews_count,
+                        website=b.website,
+                        first_name=first_name
+                    )
+                else:
+                    info = generate_ai_icebreaker(business_name=b_name or f"Business #{b_id}", industry=industry, city=city)
+        else:
+            info = generate_ai_icebreaker(business_name=b_name or "Your Business", industry=industry, city=city)
+
+        return (
+            f"### AI Personalized Icebreaker for {info['business_name']}\n\n"
+            f"**Opening Hook (Angle 1)**:\n> {info['full_opening_hook']}\n\n"
+            f"**Alternative Hook (Angle 2)**:\n> {info['alternative_hook']}\n\n"
+            f"**Authentic Compliment**: {info['compliment']}\n"
+            f"**Identified Pain Point**: {info['pain_point']}\n"
+            f"**Low-Friction Call-To-Action**: {info['call_to_action']}\n\n"
+            f"*Variables exported*: `{{{{ai_icebreaker}}}}`, `{{{{compliment}}}}`, `{{{{pain_point}}}}`, `{{{{call_to_action}}}}`"
         )
 
     else:

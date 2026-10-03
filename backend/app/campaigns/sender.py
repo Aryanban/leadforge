@@ -118,28 +118,40 @@ def send_single_email(
         return False, str(e)
 
 
+from app.enricher.ai_icebreaker import generate_ai_icebreaker
+
 async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[str, Any]:
     """
-    Orchestrates the dispatch of a campaign:
-    1. Fetches campaign and first step
-    2. Identifies contacts not yet sent this step and not unsubscribed
-    3. Picks active mailboxes with remaining daily quota
-    4. Interpolates variables and dispatches with rate-limiting delays
+    Orchestrates the dispatch of a multi-step campaign sequence:
+    1. Fetches all configured steps ordered by step_number
+    2. Identifies contacts needing Step 1, or Step N+1 whose delay_days have elapsed
+    3. Auto-suppresses bounced, unsubscribed, or replied contacts
+    4. Automatically injects AI icebreakers and personalized business hooks
+    5. Rotates across active mailboxes respecting daily limits
+    6. Automatically marks recipient as bounced on SMTP rejection (550/554)
     """
     sent_count = 0
     failed_count = 0
+    bounced_count = 0
 
     async with async_session_maker() as db:
         campaign = await db.get(Campaign, campaign_id)
         if not campaign or campaign.status != CampaignStatus.ACTIVE.value:
             return {"error": "Campaign not found or not active"}
 
-        # Get first campaign step
-        stmt = select(CampaignStep).where(CampaignStep.campaign_id == campaign_id).order_by(CampaignStep.step_number.asc())
+        # Get all campaign steps
+        stmt = (
+            select(CampaignStep)
+            .where(CampaignStep.campaign_id == campaign_id)
+            .order_by(CampaignStep.step_number.asc())
+        )
         res = await db.execute(stmt)
-        step = res.scalars().first()
-        if not step:
+        steps = res.scalars().all()
+        if not steps:
             return {"error": "No steps configured for this campaign"}
+
+        steps_by_number = {s.step_number: s for s in steps}
+        step_ids_to_step = {s.id: s for s in steps}
 
         # Get available mailboxes
         m_stmt = select(Mailbox).where(Mailbox.is_active == True, Mailbox.sent_today < Mailbox.daily_limit)
@@ -149,34 +161,100 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         if not mailboxes:
             return {"error": "No active mailboxes available with remaining daily quota"}
 
-        # Find contacts with verified or valid email, not unsubscribed, who have not been sent this step
-        subq = select(Send.contact_id).where(Send.campaign_id == campaign_id, Send.step_id == step.id)
+        # Load candidate contacts who have an email, haven't unsubscribed, and haven't bounced
         c_stmt = (
             select(Contact, Business)
             .join(Business, Contact.business_id == Business.id, isouter=True)
             .where(
                 Contact.email.isnot(None),
                 Contact.unsubscribed == False,
-                ~Contact.id.in_(subq)
+                Contact.verification_status != "bounced"
             )
-            .limit(max_sends)
         )
         c_res = await db.execute(c_stmt)
-        contacts_to_send = c_res.all()
+        candidates = c_res.all()
 
-        if not contacts_to_send:
-            # All done!
+        if not candidates:
             campaign.status = CampaignStatus.COMPLETED.value
             await db.commit()
-            return {"message": "All eligible contacts have received this campaign step", "sent": 0}
+            return {"message": "No eligible contacts found", "sent": 0}
+
+        # Retrieve all previous sends for this campaign
+        sends_stmt = select(Send).where(Send.campaign_id == campaign_id)
+        sends_res = await db.execute(sends_stmt)
+        all_sends = sends_res.scalars().all()
+
+        sends_by_contact: Dict[int, List[Send]] = {}
+        for s in all_sends:
+            sends_by_contact.setdefault(s.contact_id, []).append(s)
+
+        now = datetime.utcnow()
+        queue_to_send: List[Tuple[Contact, Business, CampaignStep]] = []
+
+        for contact, business in candidates:
+            c_sends = sends_by_contact.get(contact.id, [])
+
+            # If recipient already replied or bounced, skip them
+            if any(s.replied for s in c_sends) or any(s.status == "bounced" for s in c_sends):
+                continue
+
+            if not c_sends:
+                # Needs Step 1
+                step_1 = steps_by_number.get(1)
+                if step_1:
+                    queue_to_send.append((contact, business, step_1))
+            else:
+                # Find the latest successfully sent step
+                sorted_sends = sorted(
+                    [s for s in c_sends if s.status == "sent" and s.sent_at],
+                    key=lambda x: x.sent_at,
+                    reverse=True
+                )
+                if not sorted_sends:
+                    # Retry pending or failed
+                    step_1 = steps_by_number.get(1)
+                    if step_1:
+                        queue_to_send.append((contact, business, step_1))
+                    continue
+
+                last_send = sorted_sends[0]
+                last_step = step_ids_to_step.get(last_send.step_id)
+                last_step_num = last_step.step_number if last_step else 1
+                next_step_num = last_step_num + 1
+
+                if next_step_num in steps_by_number:
+                    next_step = steps_by_number[next_step_num]
+                    # Check delay requirement in days
+                    days_elapsed = (now - last_send.sent_at).total_seconds() / 86400.0
+                    if days_elapsed >= next_step.delay_days:
+                        queue_to_send.append((contact, business, next_step))
+
+            if len(queue_to_send) >= max_sends:
+                break
+
+        if not queue_to_send:
+            # Check if all active contacts have finished all steps
+            campaign.status = CampaignStatus.COMPLETED.value
+            await db.commit()
+            return {"message": "All eligible contacts are up to date with sequence schedule", "sent": 0}
 
         mailbox_idx = 0
 
-        for contact, business in contacts_to_send:
+        for contact, business, step in queue_to_send:
             mailbox = mailboxes[mailbox_idx % len(mailboxes)]
             mailbox_idx += 1
 
-            # Prepare replacement dictionary
+            # Synthesize AI Icebreaker intelligence if available
+            icebreaker_info = generate_ai_icebreaker(
+                business_name=business.name if business else "Your Business",
+                industry=business.industry if business else "General",
+                city="Delhi NCR",
+                rating=business.rating if business else None,
+                reviews_count=business.reviews_count if business else None,
+                website=business.website if business else None,
+                first_name=contact.first_name
+            )
+
             data = {
                 "business_name": business.name if business else "Your Business",
                 "first_name": contact.first_name or "Friend",
@@ -184,14 +262,17 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 "phone": contact.phone or (business.phone if business else "") or "",
                 "city": "Delhi NCR",
                 "category": business.industry if business else "Real Estate",
-                "website": business.website if business else ""
+                "website": business.website if business else "",
+                "ai_icebreaker": icebreaker_info["ai_icebreaker"],
+                "compliment": icebreaker_info["compliment"],
+                "pain_point": icebreaker_info["pain_point"],
+                "call_to_action": icebreaker_info["call_to_action"]
             }
 
             rendered_subject = interpolate_template(step.subject, data)
             rendered_body_text = interpolate_template(step.body_text, data)
             rendered_body_html = interpolate_template(step.body_html, data) if step.body_html else None
 
-            # Create Send record
             send_record = Send(
                 campaign_id=campaign_id,
                 step_id=step.id,
@@ -202,7 +283,6 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             db.add(send_record)
             await db.flush()
 
-            # Execute send
             success, err = send_single_email(
                 mailbox=mailbox,
                 to_email=contact.email,
@@ -213,23 +293,32 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 contact_id=contact.id
             )
 
+            # Detect bounce codes in error message
+            is_bounced = any(code in (err or "").lower() for code in ["550", "554", "user unknown", "mailbox unavailable", "recipient rejected", "no such user"])
+
             if success:
                 send_record.status = "sent"
                 send_record.sent_at = datetime.utcnow()
                 mailbox.sent_today += 1
                 sent_count += 1
+            elif is_bounced:
+                send_record.status = "bounced"
+                send_record.error_message = err
+                contact.verification_status = "bounced"
+                contact.is_verified = False
+                bounced_count += 1
             else:
                 send_record.status = "failed"
                 send_record.error_message = err
                 failed_count += 1
 
             await db.commit()
-
-            # Gentle rate-limiting delay between sends to protect sender IP
             await asyncio.sleep(settings.DEFAULT_DELAY_SECONDS)
 
         return {
             "campaign_id": campaign_id,
             "sent_count": sent_count,
-            "failed_count": failed_count
+            "failed_count": failed_count,
+            "bounced_count": bounced_count
         }
+

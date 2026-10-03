@@ -181,3 +181,19 @@ async def preview_template(req: PreviewRequest):
         "rendered_subject": rendered_subject,
         "rendered_body": rendered_body
     }
+
+
+from app.campaigns.spam_checker import check_cold_email_spam
+
+class SpamCheckRequest(BaseModel):
+    subject: str
+    body: str
+
+@router.post("/check-spam")
+async def check_email_deliverability(req: SpamCheckRequest):
+    """
+    Evaluates cold outreach copy against spam filters, trigger words,
+    subject line hygiene, and delivers actionable recommendations.
+    """
+    result = check_cold_email_spam(req.subject, req.body)
+    return result
