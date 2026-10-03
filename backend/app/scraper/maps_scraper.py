@@ -85,6 +85,14 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
         )
         page = await context.new_page()
 
+        # Performance Turbo: abort heavy images, media, and fonts to accelerate DOM parsing 3x-5x
+        async def _block_heavy_assets(route):
+            if route.request.resource_type in ["image", "media", "font"]:
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", _block_heavy_assets)
+
         try:
             logger.info(f"Opening Google Maps search for: {query}")
             await page.goto(url, timeout=35000, wait_until="domcontentloaded")

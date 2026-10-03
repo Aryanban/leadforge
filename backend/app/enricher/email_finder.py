@@ -21,8 +21,25 @@ EXCLUDED_EMAIL_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '
 EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.com', 'email.com', 'google.com', 'schema.org')
 
 CONTACT_PRIORITY_KEYWORDS = [
-    'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support'
+    'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support', 'impressum'
 ]
+
+
+def decode_cloudflare_email(cf_hex: str) -> str:
+    """Decodes Cloudflare email obfuscation hex strings (data-cfemail)."""
+    try:
+        r = int(cf_hex[:2], 16)
+        email = ''.join(chr(int(cf_hex[i:i+2], 16) ^ r) for i in range(2, len(cf_hex), 2))
+        return email.strip().lower() if EMAIL_REGEX.match(email.strip()) else ""
+    except Exception:
+        return ""
+
+
+def deobfuscate_text_emails(text: str) -> str:
+    """Normalizes anti-bot email obfuscations like 'user [at] domain [dot] com'."""
+    t = re.sub(r'\[at\]|\(at\)|\bat\b', '@', text, flags=re.IGNORECASE)
+    t = re.sub(r'\[dot\]|\(dot\)|\bdot\b', '.', t, flags=re.IGNORECASE)
+    return t
 
 
 def generate_email_permutations(name: str, domain: str) -> List[str]:
@@ -195,6 +212,7 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
     whatsapp_links: Set[str] = set()
     socials: Dict[str, str] = {}
     visited: Set[str] = set()
+    executives: List[Dict[str, str]] = []
 
     parsed_base = urlparse(url)
     base_domain = parsed_base.netloc.lower().replace("www.", "")
@@ -206,6 +224,15 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
+
+    EXEC_TITLES = [
+        r'founder', r'co-founder', r'ceo', r'managing director', r'director',
+        r'principal broker', r'president', r'owner', r'partner', r'proprietor'
+    ]
+    TITLE_PATTERN = re.compile(
+        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*(?:[-–,|:]|\bis\b|\bas\b)\s*(' + '|'.join(EXEC_TITLES) + r')\b',
+        re.IGNORECASE
+    )
 
     async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False, headers=headers) as client:
         while (priority_queue or to_visit) and len(visited) < max_pages:
@@ -227,8 +254,9 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
 
                 html_text = response.text
 
-                # 1. Regex email search
-                raw_emails = EMAIL_REGEX.findall(html_text)
+                # 1. Regex email search + deobfuscated text search
+                normalized_text = deobfuscate_text_emails(html_text)
+                raw_emails = EMAIL_REGEX.findall(normalized_text)
                 for em in raw_emails:
                     em_clean = em.lower().strip(".")
                     if not any(em_clean.endswith(ext) for ext in EXCLUDED_EMAIL_EXTENSIONS):
@@ -243,8 +271,23 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
                     if len(re.sub(r'\D', '', clean_ph)) >= 10:
                         phones.add(clean_ph.strip())
 
-                # 3. DOM parsing for mailto:, tel:, WhatsApp, and Socials
+                # 3. DOM parsing for Cloudflare emails, mailto:, tel:, WhatsApp, and Socials
                 soup = BeautifulSoup(html_text, 'html.parser')
+
+                # Cloudflare email protection decode
+                for cf_el in soup.select('[data-cfemail], .__cf_email__'):
+                    cf_hex = cf_el.get('data-cfemail') or cf_el.get('href', '').split('#')[-1]
+                    if cf_hex:
+                        cf_email = decode_cloudflare_email(cf_hex)
+                        if cf_email and not any(ex in cf_email for ex in EXCLUDED_EMAIL_DOMAINS):
+                            emails.add(cf_email)
+
+                # Executive detection on about/team pages
+                text_clean = soup.get_text(" ", strip=True)
+                for match in TITLE_PATTERN.finditer(text_clean):
+                    found_name, found_title = match.group(1).strip(), match.group(2).strip()
+                    if len(found_name.split()) in (2, 3) and not any(w in found_name.lower() for w in ["about", "contact", "home", "terms", "service", "privacy"]):
+                        executives.append({"name": found_name, "title": found_title.title()})
                 
                 for link in soup.find_all('a', href=True):
                     href = link['href'].strip()
@@ -303,7 +346,8 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
         "emails": list(emails),
         "phones": list(phones),
         "whatsapp": list(whatsapp_links)[0] if whatsapp_links else None,
-        "socials": socials
+        "socials": socials,
+        "executives": executives[:5]
     }
 
 
@@ -425,11 +469,18 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 verified_count += 1
 
             clean_phone = re.sub(r'[^0-9]', '', business.phone or (list(all_phones)[0] if all_phones else ""))
+            execs = crawl_res.get("executives", []) if business.website else []
+            exec_match = execs[0] if execs else None
+            c_first = exec_match["name"].split()[0] if exec_match else (business.name.split()[0] if business.name else "Owner")
+            c_last = " ".join(exec_match["name"].split()[1:]) if exec_match and len(exec_match["name"].split()) > 1 else ""
+            c_title = exec_match["title"] if exec_match else "Owner / Decision Maker"
+
             if not existing_contact:
                 new_contact = Contact(
                     business_id=business.id,
-                    first_name=business.name.split()[0] if business.name else "Owner",
-                    title="Owner / Decision Maker",
+                    first_name=c_first,
+                    last_name=c_last,
+                    title=c_title,
                     email=email,
                     phone=business.phone or (list(all_phones)[0] if all_phones else None),
                     whatsapp_link=discovered_whatsapp or (f"https://wa.me/{clean_phone}" if clean_phone else None),
@@ -442,6 +493,10 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             else:
                 existing_contact.is_verified = is_valid
                 existing_contact.verification_status = v_status
+                if exec_match and existing_contact.first_name == business.name.split()[0]:
+                    existing_contact.first_name = c_first
+                    existing_contact.last_name = c_last
+                    existing_contact.title = c_title
                 if discovered_socials:
                     existing_contact.social_links = discovered_socials
                 if discovered_whatsapp and not existing_contact.whatsapp_link:

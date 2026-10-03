@@ -21,7 +21,13 @@ import {
   Database,
   Flame,
   Zap,
-  ShieldCheck
+  ShieldCheck,
+  Upload,
+  Wand2,
+  Copy,
+  Check,
+  FileText,
+  AlertTriangle
 } from "lucide-react";
 import { api, LeadItem } from "@/lib/api";
 
@@ -39,6 +45,24 @@ export default function LeadsPage() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [syncWebhookUrl, setSyncWebhookUrl] = useState("");
   const [syncingTwenty, setSyncingTwenty] = useState(false);
+
+  // CSV Import State
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importCsvText, setImportCsvText] = useState("");
+  const [importingCsv, setImportingCsv] = useState(false);
+
+  // AI Icebreaker State
+  const [activeIcebreaker, setActiveIcebreaker] = useState<any | null>(null);
+  const [loadingIcebreakerId, setLoadingIcebreakerId] = useState<number | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Cold Email Spam Checker State
+  const [showSpamModal, setShowSpamModal] = useState(false);
+  const [spamSubject, setSpamSubject] = useState("Quick question regarding {{business_name}}");
+  const [spamBody, setSpamBody] = useState("Hi {{first_name}},\n\nSaw your impressive work with {{business_name}} in {{city}}.\n{{ai_icebreaker}}\n\nWould you be open to a brief 4-minute chat this Thursday to see how we're solving this for other {{category}} leaders?\n\nBest regards,\nAryan");
+  const [spamResult, setSpamResult] = useState<any | null>(null);
+  const [checkingSpam, setCheckingSpam] = useState(false);
+
   const [newLead, setNewLead] = useState({
     name: "",
     phone: "",
@@ -145,6 +169,65 @@ export default function LeadsPage() {
     }
   };
 
+  const handleImportCsv = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importCsvText.trim()) return;
+    try {
+      setImportingCsv(true);
+      const res = await api.importCsv(importCsvText.trim());
+      alert(`Import Successful!\n• Imported Leads: ${res.imported}\n• Skipped: ${res.skipped}\n• Total Processed: ${res.total_rows_processed}`);
+      setShowImportModal(false);
+      setImportCsvText("");
+      fetchLeads();
+    } catch (err: any) {
+      alert(`CSV Import failed: ${err.message}`);
+    } finally {
+      setImportingCsv(false);
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) setImportCsvText(content);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleShowIcebreaker = async (leadId: number) => {
+    try {
+      setLoadingIcebreakerId(leadId);
+      const res = await api.getIcebreaker(leadId);
+      setActiveIcebreaker(res);
+    } catch (err: any) {
+      alert(`Icebreaker generation notice: ${err.message}`);
+    } finally {
+      setLoadingIcebreakerId(null);
+    }
+  };
+
+  const handleRunSpamCheck = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    try {
+      setCheckingSpam(true);
+      const res = await api.checkSpam(spamSubject, spamBody);
+      setSpamResult(res);
+    } catch (err: any) {
+      alert(`Spam analysis notice: ${err.message}`);
+    } finally {
+      setCheckingSpam(false);
+    }
+  };
+
+  const copyText = (text: string, key: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Top Header */}
@@ -172,6 +255,15 @@ export default function LeadsPage() {
             Auto-Enrich Missing Emails
           </button>
 
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs"
+            title="Import custom lead lists from CSV"
+          >
+            <Upload className="w-3.5 h-3.5 mr-1.5 text-blue-600" />
+            Import CSV
+          </button>
+
           <a
             href={api.exportCsvUrl}
             download="leadforge_leads.csv"
@@ -180,6 +272,18 @@ export default function LeadsPage() {
             <Download className="w-3.5 h-3.5 mr-1.5" />
             Export CSV
           </a>
+
+          <button
+            onClick={() => {
+              setShowSpamModal(true);
+              if (!spamResult) handleRunSpamCheck();
+            }}
+            className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-purple-200 bg-purple-50/80 hover:bg-purple-100 text-purple-700 h-9 px-3.5 transition-colors shadow-xs"
+            title="Score cold email deliverability and spam risk"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 mr-1.5" />
+            Spam Checker
+          </button>
 
           <button
             onClick={() => setShowSyncModal(true)}
@@ -420,6 +524,18 @@ export default function LeadsPage() {
 
                       <td className="px-5 py-4 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => handleShowIcebreaker(lead.id)}
+                            disabled={loadingIcebreakerId === lead.id}
+                            className="text-slate-400 hover:text-purple-600 p-1.5 rounded-lg hover:bg-purple-50 transition-colors"
+                            title="Generate AI Icebreaker Hook"
+                          >
+                            {loadingIcebreakerId === lead.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-600" />
+                            ) : (
+                              <Wand2 className="w-3.5 h-3.5 text-purple-600" />
+                            )}
+                          </button>
                           <a
                             href={mapsUrl}
                             target="_blank"
@@ -644,6 +760,372 @@ export default function LeadsPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Import CSV Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Upload className="w-5 h-5 text-blue-600" />
+                <h3 className="font-bold text-base text-slate-900">Import Leads from CSV</h3>
+              </div>
+              <button
+                onClick={() => setShowImportModal(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Upload a CSV file or paste raw CSV text. Automatically detects headers like <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">name</code>, <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">phone</code>, <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">email</code>, <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">website</code>, and <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[11px]">address</code>.
+            </p>
+
+            <form onSubmit={handleImportCsv} className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1.5">Choose .csv File</label>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={handleFileUpload}
+                  className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 border border-slate-200 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1.5">Or Paste Raw CSV Content</label>
+                <textarea
+                  rows={6}
+                  value={importCsvText}
+                  onChange={(e) => setImportCsvText(e.target.value)}
+                  placeholder="name,phone,email,website,city,category&#10;Apex Dental,555-0192,dr@apexdental.com,https://apexdental.com,Austin,Dentist"
+                  className="w-full p-2.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 font-mono text-xs text-slate-800"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 font-medium text-xs text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={importingCsv || !importCsvText.trim()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50"
+                >
+                  {importingCsv ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  Import Leads
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* AI Icebreaker / Hook Modal */}
+      {activeIcebreaker && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Wand2 className="w-5 h-5 text-purple-600" />
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">
+                    AI Cold Outreach Hooks — {activeIcebreaker.business_name}
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Industry: {activeIcebreaker.industry || "Local Business"} • 1-on-1 personalized copy ready for outreach
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveIcebreaker(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Primary Full Opening Hook */}
+            <div className="p-4 bg-gradient-to-br from-purple-50/60 to-indigo-50/60 border border-purple-200/70 rounded-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-purple-900 uppercase tracking-wide">
+                  Primary 1-on-1 Cold Email Hook
+                </span>
+                <button
+                  onClick={() => copyText(activeIcebreaker.full_opening_hook, "full_hook")}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-white border border-purple-200 text-purple-700 text-xs font-semibold hover:bg-purple-50 transition-colors shadow-2xs"
+                >
+                  {copiedKey === "full_hook" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedKey === "full_hook" ? "Copied!" : "Copy"}
+                </button>
+              </div>
+              <p className="text-sm font-medium text-slate-800 leading-relaxed bg-white/70 p-3 rounded-lg border border-purple-100 font-sans">
+                &ldquo;{activeIcebreaker.full_opening_hook}&rdquo;
+              </p>
+            </div>
+
+            {/* Sub-components & Angles */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Alternative Hook */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-700">Alternative Angle</span>
+                  <button
+                    onClick={() => copyText(activeIcebreaker.alternative_hook, "alt_hook")}
+                    className="text-slate-500 hover:text-purple-600 p-1"
+                    title="Copy"
+                  >
+                    {copiedKey === "alt_hook" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 italic leading-relaxed">
+                  &ldquo;{activeIcebreaker.alternative_hook}&rdquo;
+                </p>
+              </div>
+
+              {/* Genuine Compliment */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-700">Genuine Compliment</span>
+                  <button
+                    onClick={() => copyText(activeIcebreaker.compliment, "compliment")}
+                    className="text-slate-500 hover:text-purple-600 p-1"
+                    title="Copy"
+                  >
+                    {copiedKey === "compliment" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 italic leading-relaxed">
+                  &ldquo;{activeIcebreaker.compliment}&rdquo;
+                </p>
+              </div>
+
+              {/* Industry Pain Point */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-700">Industry Pain Point</span>
+                  <button
+                    onClick={() => copyText(activeIcebreaker.pain_point, "pain_point")}
+                    className="text-slate-500 hover:text-purple-600 p-1"
+                    title="Copy"
+                  >
+                    {copiedKey === "pain_point" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 italic leading-relaxed">
+                  &ldquo;{activeIcebreaker.pain_point}&rdquo;
+                </p>
+              </div>
+
+              {/* Low Friction CTA */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-700">Low-Friction Call-to-Action</span>
+                  <button
+                    onClick={() => copyText(activeIcebreaker.call_to_action, "cta")}
+                    className="text-slate-500 hover:text-purple-600 p-1"
+                    title="Copy"
+                  >
+                    {copiedKey === "cta" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-600 italic leading-relaxed">
+                  &ldquo;{activeIcebreaker.call_to_action}&rdquo;
+                </p>
+              </div>
+            </div>
+
+            {/* Suggested Subject Line */}
+            {activeIcebreaker.suggested_subject_line && (
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                <div>
+                  <span className="font-semibold text-slate-700 mr-2">Subject:</span>
+                  <span className="font-mono text-slate-800">{activeIcebreaker.suggested_subject_line}</span>
+                </div>
+                <button
+                  onClick={() => copyText(activeIcebreaker.suggested_subject_line, "subject")}
+                  className="inline-flex items-center gap-1 text-slate-500 hover:text-purple-600 text-[11px] font-medium"
+                >
+                  {copiedKey === "subject" ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                  {copiedKey === "subject" ? "Copied" : "Copy"}
+                </button>
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setActiveIcebreaker(null)}
+                className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Spam Checker Modal */}
+      {showSpamModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-purple-600" />
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">Cold Email Deliverability & Spam Checker</h3>
+                  <p className="text-[11px] text-slate-500">
+                    Analyze trigger words, link density, formatting, and spam score to reach the inbox
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowSpamModal(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleRunSpamCheck} className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">Subject Line</label>
+                <input
+                  type="text"
+                  required
+                  value={spamSubject}
+                  onChange={(e) => setSpamSubject(e.target.value)}
+                  className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500/20 text-xs font-sans"
+                  placeholder="e.g. Quick question regarding {{business_name}}"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">Email Body Text</label>
+                <textarea
+                  rows={6}
+                  required
+                  value={spamBody}
+                  onChange={(e) => setSpamBody(e.target.value)}
+                  className="w-full p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500/20 text-xs font-sans leading-relaxed"
+                  placeholder="Paste your cold email copy..."
+                />
+              </div>
+
+              <div className="flex justify-between items-center pt-1">
+                <div className="text-[11px] text-slate-400">
+                  Supported variables: <code className="font-mono text-purple-600">&#123;&#123;business_name&#125;&#125;</code>, <code className="font-mono text-purple-600">&#123;&#123;first_name&#125;&#125;</code>, <code className="font-mono text-purple-600">&#123;&#123;city&#125;&#125;</code>
+                </div>
+                <button
+                  type="submit"
+                  disabled={checkingSpam}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50"
+                >
+                  {checkingSpam ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                  Analyze Deliverability
+                </button>
+              </div>
+            </form>
+
+            {/* Spam Analysis Report */}
+            {spamResult && (
+              <div className="mt-4 p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-baseline gap-1">
+                      <span className={`text-3xl font-extrabold ${
+                        spamResult.score >= 80 ? "text-emerald-600" : spamResult.score >= 60 ? "text-amber-600" : "text-rose-600"
+                      }`}>
+                        {spamResult.score}
+                      </span>
+                      <span className="text-xs text-slate-400 font-bold">/100</span>
+                    </div>
+
+                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold tracking-wide uppercase ${
+                      spamResult.tier === "EXCELLENT"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : spamResult.tier === "GOOD"
+                        ? "bg-blue-100 text-blue-800"
+                        : spamResult.tier === "NEEDS_IMPROVEMENT"
+                        ? "bg-amber-100 text-amber-800"
+                        : "bg-rose-100 text-rose-800"
+                    }`}>
+                      {spamResult.tier.replace(/_/g, " ")}
+                    </span>
+                  </div>
+
+                  <span className="text-xs font-medium text-slate-500">
+                    {spamResult.is_safe ? "✓ Safe for Sending" : "⚠️ High Spam Risk"}
+                  </span>
+                </div>
+
+                {/* Progress bar */}
+                <div className="w-full bg-slate-200 rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full transition-all ${
+                      spamResult.score >= 80 ? "bg-emerald-500" : spamResult.score >= 60 ? "bg-amber-500" : "bg-rose-500"
+                    }`}
+                    style={{ width: `${Math.min(100, Math.max(5, spamResult.score))}%` }}
+                  />
+                </div>
+
+                {/* Trigger Words */}
+                {(spamResult.high_risk_words?.length > 0 || spamResult.moderate_risk_words?.length > 0) ? (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-bold text-slate-700">Spam Trigger Words Detected:</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {spamResult.high_risk_words?.map((w: string, i: number) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-semibold">
+                          ⚠️ {w} (High Risk)
+                        </span>
+                      ))}
+                      {spamResult.moderate_risk_words?.map((w: string, i: number) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold">
+                          {w}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg">
+                    ✓ Zero spam trigger words detected.
+                  </div>
+                )}
+
+                {/* Warnings / Recommendations */}
+                {(spamResult.recommendations?.length > 0 || spamResult.warnings?.length > 0) && (
+                  <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
+                    <div className="text-[11px] font-bold text-slate-700">Deliverability Recommendations:</div>
+                    <ul className="text-xs text-slate-600 space-y-1 pl-4 list-disc">
+                      {spamResult.recommendations?.map((rec: string, i: number) => (
+                        <li key={i}>{rec}</li>
+                      ))}
+                      {spamResult.warnings?.map((warn: string, i: number) => (
+                        <li key={i} className="text-amber-700">{warn}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowSpamModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-xs"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

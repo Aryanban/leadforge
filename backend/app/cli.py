@@ -16,6 +16,8 @@ from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
 from app.scraper.maps_scraper import scrape_leads_and_save
 from app.enricher.email_finder import enrich_business_by_id
+from app.campaigns.spam_checker import check_cold_email_spam
+from app.enricher.ai_icebreaker import generate_ai_icebreaker
 
 
 def format_markdown_table(leads: List[Dict[str, Any]]) -> str:
@@ -186,6 +188,34 @@ async def cmd_stats():
     }, indent=2))
 
 
+async def cmd_spam(subject: str, body: str):
+    res = check_cold_email_spam(subject, body)
+    print(json.dumps(res, indent=2))
+
+
+async def cmd_icebreaker(business_id: int):
+    async with async_session_maker() as db:
+        b = await db.get(Business, business_id)
+        if not b:
+            print(json.dumps({"error": f"Business ID {business_id} not found"}))
+            return
+        c_stmt = select(Contact).where(Contact.business_id == b.id).limit(1)
+        c_res = await db.execute(c_stmt)
+        c = c_res.scalar_one_or_none()
+        first_name = c.first_name if c else ""
+        city = b.address.split(",")[-2].strip() if b.address and len(b.address.split(",")) > 1 else (b.address or "your area")
+        res = generate_ai_icebreaker(
+            business_name=b.name,
+            industry=b.industry,
+            city=city,
+            rating=b.rating,
+            reviews_count=b.reviews_count,
+            website=b.website,
+            first_name=first_name
+        )
+    print(json.dumps(res, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadForge AI Agent CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -208,6 +238,15 @@ def main():
     p_enrich = subparsers.add_parser("enrich", help="Run multi-source web enrichment for a business ID")
     p_enrich.add_argument("business_id", type=int, help="Business ID to enrich")
 
+    # Spam check command
+    p_spam = subparsers.add_parser("spam", help="Analyze cold email deliverability and spam risk score")
+    p_spam.add_argument("--subject", type=str, required=True, help="Email subject line")
+    p_spam.add_argument("--body", type=str, required=True, help="Email body text")
+
+    # Icebreaker command
+    p_ice = subparsers.add_parser("icebreaker", help="Generate 1-on-1 personalized AI cold email hooks for a lead")
+    p_ice.add_argument("business_id", type=int, help="Business ID to generate hooks for")
+
     # Stats command
     subparsers.add_parser("stats", help="Get overview statistics")
 
@@ -219,6 +258,10 @@ def main():
         asyncio.run(cmd_search(search_term=args.query, industry=args.industry, has_email=args.has_email, limit=args.limit, output_format=args.format))
     elif args.command == "enrich":
         asyncio.run(cmd_enrich(business_id=args.business_id))
+    elif args.command == "spam":
+        asyncio.run(cmd_spam(subject=args.subject, body=args.body))
+    elif args.command == "icebreaker":
+        asyncio.run(cmd_icebreaker(business_id=args.business_id))
     elif args.command == "stats":
         asyncio.run(cmd_stats())
 
