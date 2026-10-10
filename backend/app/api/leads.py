@@ -11,6 +11,7 @@ import io
 from app.database import get_db
 from app.models.business import Business
 from app.models.contact import Contact
+from app.campaigns.sender import resolve_city
 from app.enricher.email_finder import calculate_lead_quality_score
 
 router = APIRouter()
@@ -507,7 +508,7 @@ async def get_lead_icebreaker(business_id: int, db: AsyncSession = Depends(get_d
     icebreaker = generate_ai_icebreaker(
         business_name=business.name,
         industry=business.industry,
-        city="Delhi NCR",
+        city=resolve_city(business),
         rating=business.rating,
         reviews_count=business.reviews_count,
         website=business.website,

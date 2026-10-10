@@ -16,6 +16,32 @@ logger = logging.getLogger(__name__)
 
 PHONE_REGEX = re.compile(r'(\+?91[\s-]?[6789]\d{9}|0?[6789]\d{4}\s*\d{5}|0?[6789]\d{9}|\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})')
 
+# Query -> industry. Splitting a search query on " in " only works when the
+# user phrases it exactly that way; anything else fell back to a hardcoded
+# "Real Estate", which is how every scraped lead ended up mis-categorised.
+# This parses the common phrasings and otherwise keeps the whole query.
+_QUERY_SPLIT_RE = re.compile(
+    r'\s+(?:in|near|around|at|within)\s+', re.IGNORECASE
+)
+
+
+def industry_of_query(query: str) -> str:
+    """Extracts the category from a Maps search query.
+
+    "dentists in Rohini Delhi" -> "dentists"; "Dentists near Saket" -> "Dentists".
+    Returns the cleaned query unchanged when no location preposition is present,
+    so an unrecognised phrasing never silently becomes a made-up industry.
+    """
+    if not query or not query.strip():
+        return "Business"
+    parts = _QUERY_SPLIT_RE.split(query.strip(), maxsplit=1)
+    head = parts[0].strip(" ,-").strip()
+    if head and len(parts) > 1 and len(head) >= 2:
+        return head
+    # No location clause - the query itself is the category.
+    return query.strip()
+
+
 async def _launch_browser(p):
     """
     Launch browser with multi-channel fallback:
@@ -153,7 +179,7 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                         "address": address or query,
                         "rating": rating,
                         "reviews_count": None,
-                        "industry": query.split(" in ")[0] if " in " in query else "Real Estate",
+                        "industry": industry_of_query(query),
                         "source": "playwright_single",
                         "query": query
                     })
