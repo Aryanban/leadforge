@@ -9,6 +9,7 @@ from app.models.business import Business
 from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
 
+from app.sources import in_phone
 from .match import find_existing_business, normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -69,15 +70,28 @@ async def persist_raw_leads(
         await db.flush()
 
         clean_phone = normalize_phone(lead.get("phone"))
+        raw_phone = lead.get("phone")
         contact = Contact(
             business_id=business.id,
             first_name=name.split()[0] if name.split() else "Owner",
             title="Owner / Decision Maker",
-            phone=lead.get("phone") or None,
-            whatsapp_link=f"https://wa.me/{clean_phone}" if clean_phone else None,
+            # E.164, so the stored number and the wa.me link agree with each other
+            # and with whatever the enrichment stage verifies later.
+            phone=in_phone.to_e164(raw_phone) or raw_phone or None,
+            # wa.me needs the country code. Passing the bare 10-digit national
+            # number (as this did) makes WhatsApp resolve it to another country.
+            whatsapp_link=in_phone.whatsapp_link(raw_phone),
             email=None,
             source=lead.get("source", "discovery"),
             verification_status="unverified",
+            extra_data={
+                "channel": in_phone.preferred_channel(raw_phone),
+                "line_type": (
+                    "mobile" if in_phone.is_mobile(raw_phone)
+                    else "landline" if in_phone.is_landline(raw_phone)
+                    else None
+                ),
+            },
         )
         db.add(contact)
         new_ids.append(business.id)

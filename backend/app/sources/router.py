@@ -1,8 +1,10 @@
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import async_session_maker
 from app.models.source_stats import SourceStats
 
@@ -74,6 +76,28 @@ async def select_sources(
     return sorted(eligible, key=priority_key, reverse=True)
 
 
+async def _run_source(source: Source, niche: str, area: Optional[str], limit: int) -> tuple:
+    """Runs one source under its own timeout so a hang cannot stall the run.
+
+    Returns ``(source_name, leads, error)``. A source that times out or raises
+    degrades to an empty result — discovery must never fail as a whole because
+    one directory is down, and the caller records the failure for health
+    monitoring rather than swallowing it silently.
+    """
+    try:
+        leads = await asyncio.wait_for(
+            source.search(niche, area, limit=limit),
+            timeout=settings.SOURCE_TIMEOUT_SECONDS,
+        )
+        return source.name, leads or [], None
+    except asyncio.TimeoutError:
+        message = f"timed out after {settings.SOURCE_TIMEOUT_SECONDS}s"
+    except Exception as e:  # noqa: BLE001 - one bad source must not kill the run
+        message = str(e)
+    logger.warning(f"[{source.name}] failed during discovery: {message}")
+    return source.name, [], message
+
+
 async def discover(
     niche: str,
     area: Optional[str],
@@ -81,7 +105,17 @@ async def discover(
     icp_profile: Any = None,
     sources: Optional[List[str]] = None,
 ) -> Dict[str, List[dict]]:
-    """Runs every selected source and returns leads grouped by source name."""
+    """Runs every selected source concurrently and returns leads grouped by name.
+
+    The previous implementation awaited each source in turn, so wall-clock time
+    was the *sum* of every directory's latency (Google Maps alone can take tens
+    of seconds). Fanning them out makes it the *max*, which is the whole run.
+
+    At most ``SOURCE_MAX_CONCURRENCY`` sources run at once: these are all
+    scraping the same class of target, and an unbounded fan-out is what gets an
+    egress IP rate-limited. Order is preserved by priority so the highest-yield
+    source still wins a slot first.
+    """
     if sources:
         chosen: List[Source] = [
             BY_NAME[name] for name in sources if name in BY_NAME and BY_NAME[name].supports(niche, area)
@@ -89,15 +123,30 @@ async def discover(
     else:
         chosen = await select_sources(niche, area, icp_profile)
 
+    if not chosen:
+        return {}
+
+    semaphore = asyncio.Semaphore(max(1, settings.SOURCE_MAX_CONCURRENCY))
+
+    async def guarded(source: Source) -> tuple:
+        async with semaphore:
+            return await _run_source(source, niche, area, limit)
+
+    # gather(return_exceptions=True) as belt-and-braces: _run_source already
+    # converts failures into values, but a bug in an adapter must not propagate.
+    outcomes = await asyncio.gather(
+        *(guarded(source) for source in chosen), return_exceptions=True
+    )
+
     results: Dict[str, List[dict]] = {}
-    for source in chosen:
-        try:
-            leads = await source.search(niche, area, limit=limit)
-            results[source.name] = leads or []
-            logger.info(f"[{source.name}] returned {len(results[source.name])} raw leads")
-        except Exception as e:
-            logger.warning(f"[{source.name}] failed during discovery: {e}")
+    for source, outcome in zip(chosen, outcomes):
+        if isinstance(outcome, BaseException):
+            logger.warning(f"[{source.name}] crashed during discovery: {outcome!r}")
             results[source.name] = []
+            continue
+        name, leads, _error = outcome
+        results[name] = leads
+        logger.info(f"[{name}] returned {len(leads)} raw leads")
     return results
 
 

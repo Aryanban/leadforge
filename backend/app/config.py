@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # Off by default — these endpoints block scrapers and are ToS-gray.
     SOCIAL_DIRECT: bool = False
 
+    # Discovery fan-out. Sources used to be awaited one at a time, so a run took
+    # the SUM of every directory's latency; with these they take the MAX.
+    # The cap matters: every source hits the same class of target, and an
+    # unbounded fan-out from one IP is what triggers rate-limiting.
+    SOURCE_MAX_CONCURRENCY: int = 3
+    SOURCE_TIMEOUT_SECONDS: int = 30
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def __init__(self, **kwargs):

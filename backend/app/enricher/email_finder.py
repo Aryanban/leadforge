@@ -4,13 +4,16 @@ import re
 import urllib.parse
 from urllib.parse import urlparse, urljoin
 import logging
+from datetime import datetime, timezone
 from typing import Dict, List, Set, Any, Optional
 from sqlalchemy import select
 
 from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
-from app.verifier.smtp_verifier import verify_email_smtp, check_catch_all_domain
+from app.sources import in_phone
+from app.verifier.smtp_verifier import verify_email, check_catch_all_domain
+from app.verifier.email_status import detect_role_account, detect_placeholder_domain
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,12 @@ EMAIL_REGEX = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
 PHONE_REGEX = re.compile(r'(\+?91[\s-]?[6789]\d{9}|0?[6789]\d{4}\s*\d{5}|0?[6789]\d{9}|\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})')
 
 EXCLUDED_EMAIL_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.css', '.js', '.woff', '.pdf')
-EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.com', 'email.com', 'google.com', 'schema.org')
+# Scoped to HTML boilerplate / CDN / example hosts only. This list used to
+# include 'google.com', which silently discarded genuine @google.com corporate
+# addresses - a real lead lost to a noise filter. Real corporate domains are
+# handled by email_status.detect_placeholder_domain, which knows the difference
+# between sentry.io/example.com and a company's actual mail domain.
+EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.com', 'email.com', 'schema.org')
 
 CONTACT_PRIORITY_KEYWORDS = [
     'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support', 'impressum'
@@ -469,16 +477,28 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             res = await db.execute(stmt)
             existing_contact = res.scalars().first()
 
-            is_valid, v_status = verify_email_smtp(email)
+            # Use the rich result, not the (bool, str) shim, so sub-status,
+            # confidence, MX host and role/free flags are persisted. The shim
+            # collapses 20 states into one bool and loses the explanation.
+            result = verify_email(email)
+            is_valid = result.is_deliverable
+            v_status = result.status.value
             if is_valid:
                 verified_count += 1
 
-            clean_phone = re.sub(r'[^0-9]', '', business.phone or (list(all_phones)[0] if all_phones else ""))
+            clean_phone = in_phone.to_e164(
+                business.phone or (list(all_phones)[0] if all_phones else None)
+            )
             execs = crawl_res.get("executives", []) if business.website else []
             exec_match = execs[0] if execs else None
             c_first = exec_match["name"].split()[0] if exec_match else (business.name.split()[0] if business.name else "Owner")
             c_last = " ".join(exec_match["name"].split()[1:]) if exec_match and len(exec_match["name"].split()) > 1 else ""
             c_title = exec_match["title"] if exec_match else "Owner / Decision Maker"
+
+            # Person vs role: a discovered executive name means this address
+            # belongs to a human. A shared mailbox (info@) is still a lead but
+            # must not be counted as a person found.
+            is_role = result.is_role or (exec_match is None and detect_role_account(email.split("@")[0]))
 
             if not existing_contact:
                 new_contact = Contact(
@@ -487,17 +507,37 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     last_name=c_last,
                     title=c_title,
                     email=email,
-                    phone=business.phone or (list(all_phones)[0] if all_phones else None),
-                    whatsapp_link=discovered_whatsapp or (f"https://wa.me/{clean_phone}" if clean_phone else None),
+                    phone=in_phone.to_e164(business.phone or (list(all_phones)[0] if all_phones else None))
+                         or (business.phone or (list(all_phones)[0] if all_phones else None)),
+                    whatsapp_link=discovered_whatsapp or in_phone.whatsapp_link(
+                        business.phone or (list(all_phones)[0] if all_phones else None)
+                    ),
                     social_links=discovered_socials,
                     is_verified=is_valid,
                     verification_status=v_status,
-                    source="multi_source_enricher"
+                    verification_sub_status=result.sub_status,
+                    verification_confidence=result.confidence,
+                    verification_detail=result.detail,
+                    mx_host=result.mx_host,
+                    is_role_account=is_role,
+                    is_free_email=result.is_free,
+                    preferred_channel=in_phone.preferred_channel(
+                        business.phone or (list(all_phones)[0] if all_phones else None)
+                    ),
+                    source="multi_source_enricher",
+                    verified_at=datetime.now(timezone.utc) if is_valid else None,
                 )
                 db.add(new_contact)
             else:
                 existing_contact.is_verified = is_valid
                 existing_contact.verification_status = v_status
+                existing_contact.verification_sub_status = result.sub_status
+                existing_contact.verification_confidence = result.confidence
+                existing_contact.verification_detail = result.detail
+                existing_contact.mx_host = result.mx_host
+                existing_contact.is_role_account = is_role
+                existing_contact.is_free_email = result.is_free
+                existing_contact.verified_at = datetime.now(timezone.utc) if is_valid else None
                 if exec_match and existing_contact.first_name == business.name.split()[0]:
                     existing_contact.first_name = c_first
                     existing_contact.last_name = c_last
@@ -514,16 +554,27 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             existing_contact = res.scalars().first()
             if existing_contact:
                 if all_phones and not existing_contact.phone:
-                    existing_contact.phone = list(all_phones)[0]
-                    clean_phone = re.sub(r'[^0-9]', '', existing_contact.phone or "")
-                    existing_contact.whatsapp_link = f"https://wa.me/{clean_phone}" if clean_phone else None
+                    existing_contact.phone = in_phone.to_e164(list(all_phones)[0]) or list(all_phones)[0]
+                    existing_contact.whatsapp_link = in_phone.whatsapp_link(list(all_phones)[0])
+                    existing_contact.preferred_channel = in_phone.preferred_channel(list(all_phones)[0])
             elif business.phone:
-                clean_phone = re.sub(r'[^0-9]', '', business.phone or "")
+                # Phone-only lead: no email was found, so this contact exists purely
+                # for the WhatsApp/call channel, which is the primary India channel.
                 c = Contact(
                     business_id=business.id,
                     first_name=business.name.split()[0] if business.name else "Owner",
-                    phone=business.phone,
-                    whatsapp_link=f"https://wa.me/{clean_phone}" if clean_phone else None,
+                    phone=in_phone.to_e164(business.phone) or business.phone,
+                    whatsapp_link=in_phone.whatsapp_link(business.phone),
+                    preferred_channel=in_phone.preferred_channel(business.phone),
+                    extra_data={
+                        "line_type": (
+                            "mobile" if in_phone.is_mobile(business.phone)
+                            else "landline" if in_phone.is_landline(business.phone)
+                            else None
+                        ),
+                        "dnd_scrub": in_phone.scrub_dnd(business.phone),
+                        "city_from_phone": in_phone.city_from_phone(business.phone),
+                    },
                     source="multi_source_enricher",
                     verification_status="unverified"
                 )
