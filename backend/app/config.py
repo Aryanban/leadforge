@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     SOURCE_MAX_CONCURRENCY: int = 3
     SOURCE_TIMEOUT_SECONDS: int = 30
 
+    # HTTP hardening for the directory sources. JustDial returns a 14-byte stub
+    # and ZaubaCorp a 403 when they dislike the client, so a single attempt with
+    # a single User-Agent is not a usable strategy. Retries cost nothing when
+    # the first attempt succeeds and rescue an entire source when it does not.
+    HTTP_MAX_RETRIES: int = 3
+    HTTP_RETRY_BACKOFF: float = 1.5
+    # Rotating residential proxies. Comma-separated URLs, e.g.
+    # PROXY_LIST=http://user:pass@ip:port,http://user:pass@ip2:port
+    # Without these, Google/JustDial scraping from a datacentre IP rate-limits
+    # quickly. Empty means direct egress.
+    PROXY_LIST: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def __init__(self, **kwargs):

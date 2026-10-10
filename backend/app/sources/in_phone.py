@@ -67,16 +67,26 @@ STD_CODE_CITIES = {
     "421": "Bhiwandi",
     "431": "Tiruchirappalli",
     "452": "Madurai",
-    "471": "Alappuzha",
+    "471": "Thiruvananthapuram",
+    "473": "Pathanamthitta",
     "474": "Kollam",
-    "477": "Kottayam",
+    "475": "Punalur",
+    "477": "Varkala",
+    "478": "Cherthala",
+    "479": "Kayamkulam",
+    "480": "Irinjalakuda",
     "481": "Kottayam",
-    "483": "Kozhikode",
+    "483": "Manjeri",
     "484": "Kochi",
+    "485": "Muvattupuzha",
     "487": "Thrissur",
-    "490": "Kannur",
-    "495": "Palakkad",
-    "497": "Malappuram",
+    "488": "Kodungallur",
+    "490": "Thalassery",
+    "491": "Palakkad",
+    "493": "Malappuram",
+    "494": "Tirur",
+    "495": "Kozhikode",
+    "497": "Kannur",
     "512": "Kanpur",
     "522": "Lucknow",
     "532": "Prayagraj",
@@ -152,7 +162,10 @@ def std_code(raw: Optional[str]) -> Optional[str]:
     for length in (4, 3, 2):
         candidate = digits[:length]
         if candidate in STD_CODE_CITIES and 6 <= len(digits) - length <= 8:
-            return candidate
+            # Return the dialable trunk-zero form (e.g. "011", "0487") — this is
+            # the real STD code as dialled, and what callers expect. Lookups into
+            # STD_CODE_CITIES use the bare key, stripped in city_from_phone.
+            return "0" + candidate
     return None
 
 
@@ -161,9 +174,15 @@ def city_from_phone(raw: Optional[str]) -> Optional[str]:
 
     This is what replaces the 30-city hardcode: the number carries the
     geography even when the address text names only a locality ("Saket").
+
+    Returns a lowercase canonical city, matching :func:`extract_city` so that a
+    phone-derived city and an address-derived city join/dedupe on the same key.
     """
     code = std_code(raw)
-    return STD_CODE_CITIES.get(code) if code else None
+    if not code:
+        return None
+    city = STD_CODE_CITIES.get(code[1:] if code.startswith("0") else code)
+    return city.lower() if city else None
 
 
 def scrub_dnd(raw: Optional[str]) -> dict:
@@ -176,6 +195,8 @@ def scrub_dnd(raw: Optional[str]) -> dict:
     """
     return {
         "number": to_e164(raw),
+        "is_mobile": is_mobile(raw),
+        "is_landline": is_landline(raw),
         "dnd_scrubbed": False,
         "sms_allowed": False,
         "requires_aggregator": True,
@@ -221,7 +242,16 @@ def to_e164(raw: Optional[str], default_cc: str = "91") -> Optional[str]:
     ``+91 98123 45678``, ``098123 45678``, ``919812345678``, ``9812345678``.
     Returns ``None`` when the number is too short to be dialable, rather than
     inventing a valid-looking number.
+
+    A number written with an explicit ``+`` and a *non-Indian* country code is
+    left alone (returned as ``+<digits>``): stamping ``+91`` onto ``+1 415 ...``
+    would silently fabricate an Indian number that dials the wrong place.
     """
+    text = str(raw).strip() if raw is not None else ""
+    if text.startswith("+"):
+        digits = digits_only(text)
+        if digits and not digits.startswith("91"):
+            return f"+{digits}"
     digits = _strip_cc(digits_only(raw))
     if not digits or len(digits) < NSDN_LENGTH:
         return None
