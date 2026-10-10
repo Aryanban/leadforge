@@ -16,6 +16,8 @@ from app.models.business import Business
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_step import CampaignStep
 from app.models.send import Send
+from app.campaigns.bounces import classify_bounce, HARD, SOFT
+from app.campaigns.suppression import is_suppressed, add_suppression
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,39 @@ def interpolate_template(text: str, data: Dict[str, str]) -> str:
         placeholder = f"{{{{{key}}}}}"
         result = result.replace(placeholder, str(val or ""))
     return result
+
+
+def resolve_city(business: Optional[Business]) -> str:
+    """Best-effort human-readable town for a lead.
+
+    Order of preference:
+      1. An explicit `city` already stored in ``extra_data`` (set by sources
+         that know their city, e.g. the IndiaMART/JustDial parsers).
+      2. ``extract_city()`` applied to the street address.
+      3. The ICP area the business was discovered under.
+      4. A neutral fallback - never a hardcoded city.
+    """
+    if business is None:
+        return "your area"
+
+    extra = business.extra_data or {}
+    explicit = extra.get("city") or extra.get("area") or extra.get("locality")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    try:
+        from app.sources.http_utils import extract_city
+        derived = extract_city(business.address)
+    except Exception:  # pragma: no cover - defensive, never break a send
+        derived = None
+    if derived:
+        return derived
+
+    icp = getattr(business, "icp_profile", None)
+    if icp is not None and getattr(icp, "area", None):
+        return str(icp.area).strip()
+
+    return "your area"
 
 
 def test_smtp_connection(host: str, port: int, user: str, password: str) -> Tuple[bool, str]:
@@ -67,10 +102,14 @@ def send_single_email(
 
         tracking_base = settings.TRACKING_DOMAIN.rstrip("/")
 
-        # Inject List-Unsubscribe headers
+        # Inject List-Unsubscribe headers.
+        # RFC 8058 one-click POST is mandatory for bulk senders at Gmail and
+        # Yahoo (Feb 2024+). Without `List-Unsubscribe-Post` the unsubscribe
+        # link is not rendered in the Gmail UI and the sender is penalised.
         if contact_id:
             unsub_url = f"{tracking_base}/api/v1/campaigns/tracker/unsubscribe/{contact_id}"
-            msg["List-Unsubscribe"] = f"<{unsub_url}>"
+            msg["List-Unsubscribe"] = f"<{unsub_url}>, <mailto:{mailbox.email}?subject=unsubscribe>"
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
         # Inject open tracking pixel and unsubscribe link
         pixel_tag = ""
@@ -194,6 +233,22 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         for contact, business in candidates:
             c_sends = sends_by_contact.get(contact.id, [])
 
+            # Authoritative suppression gate (gate 3 of 4). The per-contact
+            # `unsubscribed` boolean only records an unsubscribe on THIS row;
+            # a bounce, complaint or "stop" reply on any campaign must block
+            # the address everywhere. Check the workspace-wide table here,
+            # immediately before we would open an SMTP connection.
+            suppression_reason = await is_suppressed(db, contact.email)
+            if suppression_reason:
+                contact.unsubscribed = True
+                if suppression_reason == HARD:
+                    contact.verification_status = "bounced"
+                    contact.is_verified = False
+                logger.info(
+                    "suppressing %s before queue (%s)", contact.email, suppression_reason
+                )
+                continue
+
             # If recipient already replied or bounced, skip them
             if any(s.replied for s in c_sends) or any(s.status == "bounced" for s in c_sends):
                 continue
@@ -244,11 +299,18 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             mailbox = mailboxes[mailbox_idx % len(mailboxes)]
             mailbox_idx += 1
 
+            # Resolve the real location/category for THIS lead. Never assume
+            # the campaign's city or industry - a Delhi-targeted campaign can
+            # still pull in a Noida lead, and {{city}} must match the town the
+            # recipient actually trades in.
+            lead_city = resolve_city(business)
+            lead_category = (business.industry if business and business.industry else None) or "your business"
+
             # Synthesize AI Icebreaker intelligence if available
             icebreaker_info = generate_ai_icebreaker(
                 business_name=business.name if business else "Your Business",
-                industry=business.industry if business else "General",
-                city="Delhi NCR",
+                industry=lead_category,
+                city=lead_city,
                 rating=business.rating if business else None,
                 reviews_count=business.reviews_count if business else None,
                 website=business.website if business else None,
@@ -260,8 +322,8 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 "first_name": contact.first_name or "Friend",
                 "last_name": contact.last_name or "",
                 "phone": contact.phone or (business.phone if business else "") or "",
-                "city": "Delhi NCR",
-                "category": business.industry if business else "Real Estate",
+                "city": lead_city,
+                "category": lead_category,
                 "website": business.website if business else "",
                 "ai_icebreaker": icebreaker_info["ai_icebreaker"],
                 "compliment": icebreaker_info["compliment"],
@@ -293,21 +355,36 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 contact_id=contact.id
             )
 
-            # Detect bounce codes in error message
-            is_bounced = any(code in (err or "").lower() for code in ["550", "554", "user unknown", "mailbox unavailable", "recipient rejected", "no such user"])
+            # Classify the failure by SMTP semantics, not by substring
+            # matching. Only a permanent (5xx recipient) bounce is recorded as
+            # "bounced" and suppressed forever; a soft bounce is retried and a
+            # policy block leaves the lead untouched. The old inline check
+            # matched "550" anywhere in the text, which misfired on messages
+            # that merely quote a code.
+            bounce_reason = classify_bounce(err) if not success else None
 
             if success:
                 send_record.status = "sent"
                 send_record.sent_at = datetime.utcnow()
                 mailbox.sent_today += 1
                 sent_count += 1
-            elif is_bounced:
+            elif bounce_reason == HARD:
                 send_record.status = "bounced"
                 send_record.error_message = err
                 contact.verification_status = "bounced"
                 contact.is_verified = False
+                await add_suppression(db, contact.email, HARD, detail=err)
                 bounced_count += 1
+            elif bounce_reason == SOFT:
+                send_record.status = "failed"
+                send_record.error_message = err
+                # Transient: do not mark the lead bad. A soft suppression with
+                # an expiry guards the next batch while the mailbox recovers.
+                await add_suppression(db, contact.email, SOFT, detail=err)
+                failed_count += 1
             else:
+                # Not a recipient problem (policy block / unknown). Retry, but
+                # never suppress - the address is fine, our sender is not.
                 send_record.status = "failed"
                 send_record.error_message = err
                 failed_count += 1

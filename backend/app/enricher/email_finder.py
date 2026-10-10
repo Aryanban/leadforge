@@ -437,7 +437,12 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                             continue
                         if not is_catch_all:
                             v_ok, v_stat = verify_email_smtp(cand)
-                            if v_ok and v_stat in ("valid", "valid_mx"):
+                            # Strict only: adopt a permuted mailbox only when the
+                            # SMTP handshake positively confirmed it. The old
+                            # "valid_mx" status (valid merely because port 25 was
+                            # blocked) was removed by the verifier rewrite - it was
+                            # a false-positive generator.
+                            if v_ok and v_stat == "valid":
                                 all_emails.add(cand)
                                 found_perms += 1
                                 if found_perms >= 3:

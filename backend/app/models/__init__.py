@@ -8,6 +8,7 @@ from .scrape_job import ScrapeJob
 from .icp_profile import ICPProfile
 from .source_stats import SourceStats
 from .social_profile import SocialProfile
+from .suppression import Suppression
 
 __all__ = [
     "Business",
@@ -21,4 +22,5 @@ __all__ = [
     "ICPProfile",
     "SourceStats",
     "SocialProfile",
+    "Suppression",
 ]
