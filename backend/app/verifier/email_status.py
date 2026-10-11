@@ -127,8 +127,10 @@ PLACEHOLDER_DOMAINS = frozenset(
 #: after DATA (or actively blocklist probing IPs). Probing them yields false
 #: "valid" results and gets your egress IP penalised - so we never probe.
 NO_PROBE_MX_PATTERNS = (
-    "aspmx.l.google.com",
+    "gmail-smtp-in.l.google.com",  # free Gmail (caught live: gmail.com MX)
     "googlemail-smtp-in.l.google.com",
+    "aspmx.l.google.com",  # Google Workspace
+    "googlemail.com",  # any Google-hosted MX (e.g. aspmx2.googlemail.com)
     "mx.zoho.com",
     "mx.zoho.in",
     "mx2.zoho.com",
