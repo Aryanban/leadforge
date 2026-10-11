@@ -136,6 +136,12 @@ async def get_leads(
             lead_tier = score_info["tier"]
             lead_badges = score_info["badges"]
 
+        # India source-trust: surfaces *why* a lead's score was adjusted —
+        # self-listed directories (JustDial/IndiaMART) carry shared/stale
+        # risk, live GBP and first-party sites do not. Advisory for the UI.
+        from app.qualifier.source_trust import source_trust, trust_score_modifier
+        _trust_val, _trust_note = source_trust(getattr(b, "source", None))
+
         leads_data.append({
             "id": b.id,
             "name": b.name,
@@ -154,6 +160,10 @@ async def get_leads(
             "lead_score": lead_score,
             "lead_tier": lead_tier,
             "lead_badges": lead_badges,
+            "source": getattr(b, "source", None),
+            "source_trust": _trust_val,
+            "trust_note": _trust_note,
+            "trust_modifier": trust_score_modifier(_trust_val),
             "primary_contact": primary_contact,
             "contacts": b_contacts,
             "created_at": b.created_at.isoformat() if b.created_at else None

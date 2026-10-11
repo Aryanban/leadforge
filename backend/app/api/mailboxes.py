@@ -36,6 +36,10 @@ async def list_mailboxes(db: AsyncSession = Depends(get_db)):
             "daily_limit": m.daily_limit,
             "sent_today": m.sent_today,
             "is_active": m.is_active,
+            # Warmup/health state for the dashboard health bars. getattr keeps
+            # old databases (pre-migration) serving instead of 500ing.
+            "health_score": getattr(m, "health_score", 1.0),
+            "health_paused": bool(getattr(m, "health_paused", False)),
             "created_at": m.created_at.isoformat() if m.created_at else None
         }
         for m in mailboxes

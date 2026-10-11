@@ -75,6 +75,8 @@ def _lead_payload(business: Business, contacts: List[Contact], scoring: Dict[str
         "badges": scoring["badges"],
         "signal_breakdown": scoring["signal_breakdown"],
         "signals": scoring["signals"],
+        "source_trust": scoring.get("source_trust"),
+        "trust_modifier": scoring.get("trust_modifier", 0),
     }
 
 

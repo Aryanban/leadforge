@@ -30,6 +30,7 @@ import {
   AlertTriangle
 } from "lucide-react";
 import { api, LeadItem } from "@/lib/api";
+import { TrustBadge } from "@/components/IndiaKit";
 
 export default function LeadsPage() {
   const [leads, setLeads] = useState<LeadItem[]>([]);
@@ -413,6 +414,12 @@ export default function LeadsPage() {
                             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
                               ❄️ {lead.lead_score || 35} COLD
                             </span>
+                          )}
+
+                          {lead.source_trust != null && lead.source_trust < 0.75 && (
+                            <div title={lead.trust_note || undefined}>
+                              <TrustBadge trust={lead.source_trust} modifier={lead.trust_modifier} />
+                            </div>
                           )}
 
                           {lead.is_claimed === false && (

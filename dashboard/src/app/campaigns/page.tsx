@@ -17,6 +17,7 @@ import {
   ChevronRight
 } from "lucide-react";
 import { api, CampaignItem } from "@/lib/api";
+import { IndiaReadiness, FestivalHook } from "@/components/IndiaKit";
 
 const TEMPLATE_VARIABLES = [
   { tag: "{{business_name}}", label: "Business Name" },
@@ -53,6 +54,8 @@ PlotBook Team`
   );
   const [previewData, setPreviewData] = useState<{ rendered_subject: string; rendered_body: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [warmHandoff, setWarmHandoff] = useState<Record<number, any>>({});
+  const [handoffLoading, setHandoffLoading] = useState<number | null>(null);
 
   const fetchCampaigns = async () => {
     try {
@@ -98,6 +101,16 @@ PlotBook Team`
     try {
       const details = await api.getCampaign(id);
       setSelectedCampaign(details);
+      // Warm WhatsApp handoff, loaded lazily: only engaged contacts surface.
+      try {
+        setHandoffLoading(id);
+        const handoff = await api.getWarmHandoff(id);
+        setWarmHandoff((prev) => ({ ...prev, [id]: handoff }));
+      } catch {
+        /* offline backend: details still render, handoff just stays empty */
+      } finally {
+        setHandoffLoading(null);
+      }
     } catch (err: any) {
       alert(`Could not fetch details: ${err.message}`);
     }
@@ -179,6 +192,7 @@ PlotBook Team`
       </div>
 
       {/* Campaigns Grid */}
+      <IndiaReadiness />
       <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
         {loading ? (
           <div className="col-span-full p-12 text-center text-slate-400">
@@ -309,6 +323,9 @@ PlotBook Team`
                     </button>
                   ))}
                 </div>
+                <div className="pt-1">
+                  <FestivalHook />
+                </div>
               </div>
 
               <div>
@@ -419,6 +436,55 @@ PlotBook Team`
                     <div className="p-4 text-center text-slate-400">No sends dispatched yet.</div>
                   )}
                 </div>
+              </div>
+
+              {/* Warm WhatsApp handoff: only engaged contacts ever surface. */}
+              <div>
+                <h4 className="font-bold text-slate-800 mb-1">Warm WhatsApp Handoff</h4>
+                <p className="text-[11px] text-slate-500 mb-2">
+                  Contacts who opened or clicked this campaign — the only safe WhatsApp step.
+                  LeadForge never auto-sends; open the chat and write a personal message.
+                </p>
+                {handoffLoading === selectedCampaign.id ? (
+                  <div className="p-4 text-center text-slate-400">
+                    <Loader2 className="w-4 h-4 animate-spin mx-auto mb-1 text-emerald-600" />
+                    Checking engagement…
+                  </div>
+                ) : warmHandoff[selectedCampaign.id]?.candidates?.length > 0 ? (
+                  <div className="space-y-2">
+                    {warmHandoff[selectedCampaign.id].candidates.map((c: any) => (
+                      <div
+                        key={c.contact_id}
+                        className="p-3 rounded-xl border border-emerald-200/70 bg-emerald-50/40 flex items-center justify-between gap-3"
+                      >
+                        <div className="text-[11px]">
+                          <div className="font-bold text-slate-900">{c.name || `Contact #${c.contact_id}`}</div>
+                          <div className="text-slate-500">
+                            opened {c.engagement.opened}×
+                            {c.engagement.clicked > 0 && ` · clicked ${c.engagement.clicked}×`}
+                            {c.engagement.replied > 0 && ` · replied`}
+                          </div>
+                        </div>
+                        {c.whatsapp_link ? (
+                          <a
+                            href={c.whatsapp_link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
+                          >
+                            Open chat
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">no mobile</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-4 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                    No engaged contacts yet — handoff appears after 3+ opens or a click.
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -20,6 +20,7 @@ import {
   ShieldCheck
 } from "lucide-react";
 import { api, MailboxItem } from "@/lib/api";
+import { AuthBadge } from "@/components/IndiaKit";
 
 const PRESET_PROVIDERS = [
   { name: "Gmail", host: "smtp.gmail.com", port: 587 },
@@ -156,18 +157,53 @@ export default function SettingsPage() {
                   className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                 >
                   <div className="space-y-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <Mail className="w-4 h-4 text-blue-600" />
                       <span className="font-bold text-sm text-slate-900">{mb.email}</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800">
-                        Active
-                      </span>
+                      {mb.health_paused ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-red-100 text-red-800">
+                          Paused — needs review
+                        </span>
+                      ) : (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-800">
+                          Active
+                        </span>
+                      )}
+                      <AuthBadge domain={mb.email.split("@")[1] || ""} />
                     </div>
                     <p className="text-xs text-slate-500">
                       Host: <code className="font-mono">{mb.smtp_host}:{mb.smtp_port}</code> | Sender:{" "}
                       <strong>{mb.first_name} {mb.last_name}</strong> | Limit:{" "}
                       <strong>{mb.sent_today} / {mb.daily_limit} sent today</strong>
                     </p>
+                    {/* Reputation health: one glance, no docs needed. */}
+                    <div
+                      className="flex items-center gap-2"
+                      title={
+                        mb.health_paused
+                          ? "Bounce rate tripped the safety threshold — review recent sends before re-enabling."
+                          : "Reputation score from the last 50 sends. Bounces count double; amber means slow down."
+                      }
+                    >
+                      <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-200">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            (mb.health_score ?? 1) >= 0.8
+                              ? "bg-emerald-500"
+                              : (mb.health_score ?? 1) >= 0.5
+                              ? "bg-amber-500"
+                              : "bg-red-500"
+                          }`}
+                          style={{ width: `${Math.round((mb.health_score ?? 1) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        reputation {Math.round((mb.health_score ?? 1) * 100)}%
+                        {mb.created_at &&
+                          (Date.now() - new Date(mb.created_at).getTime()) / 86400000 < 14 &&
+                          " · warming up"}
+                      </span>
+                    </div>
 
                     {testRes && (
                       <div className={`text-xs font-medium mt-1.5 flex items-center gap-1 ${

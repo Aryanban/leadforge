@@ -47,6 +47,10 @@ export interface LeadItem {
   lead_score?: number;
   lead_tier?: "HOT" | "WARM" | "COLD";
   lead_badges?: string[];
+  source?: string | null;
+  source_trust?: number | null;
+  trust_note?: string | null;
+  trust_modifier?: number;
   primary_contact?: {
     id: number;
     first_name: string | null;
@@ -104,6 +108,50 @@ export interface MailboxItem {
   daily_limit: number;
   sent_today: number;
   is_active: boolean;
+  health_score?: number | null;
+  health_paused?: boolean | null;
+  created_at?: string | null;
+}
+
+// --- India readiness (advisory: operator decides, nothing gates a send) ---
+
+export interface IndiaAdvisorReport {
+  quiet_hours_now: boolean;
+  festival: {
+    festival: string | null;
+    key: string | null;
+    emoji: string;
+    subject_hook: string | null;
+    hinglish_line: string | null;
+  };
+  auth: {
+    domain: string;
+    spf_ok: boolean;
+    dkim_ok: boolean;
+    dmarc_ok: boolean;
+    ok: boolean;
+    warnings: string[];
+  } | null;
+}
+
+export interface IndiaCopyKit {
+  festival: IndiaAdvisorReport["festival"];
+  hinglish_closers: Array<{ english: string; hinglish: string }>;
+  culture_checklist: { do: string[]; dont: string[] };
+}
+
+export interface WarmHandoffCandidate {
+  contact_id: number;
+  name: string | null;
+  whatsapp_link: string | null;
+  engagement: { sent: number; opened: number; clicked: number; replied: number; bounced: number };
+  reason: string;
+}
+
+export interface WarmHandoffResponse {
+  campaign_id: number;
+  candidates: WarmHandoffCandidate[];
+  note: string;
 }
 
 export interface ICPDraft {
@@ -150,6 +198,8 @@ export interface RankedLead {
   latitude: number | null;
   longitude: number | null;
   source: string | null;
+  source_trust?: number | null;
+  trust_modifier?: number;
   contacts: RankedContact[];
   score: number;
   tier: "HOT" | "WARM" | "COLD";
@@ -311,4 +361,16 @@ export const api = {
       body: JSON.stringify(data),
     }),
   getDiscoveryJob: (id: number) => request<DiscoveryJob>(`/icp/discover/${id}`),
+
+  // India readiness (advisory endpoints: operator decides, nothing gates)
+  getIndiaAdvisor: (domain?: string) =>
+    request<IndiaAdvisorReport>(`/campaigns/india/advisor${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`),
+  getIndiaCopy: () => request<IndiaCopyKit>("/campaigns/india/copy"),
+  getWarmHandoff: (campaignId: number) =>
+    request<WarmHandoffResponse>(`/campaigns/india/handoff/${campaignId}`),
+  postDltChecklist: (numbers: string[]) =>
+    request<{ numbers: Array<{ number: string | null; is_mobile: boolean; is_landline: boolean; dnd_scrubbed: boolean; sms_allowed: boolean }>; quiet_hours_now: boolean; warnings: string[] }>("/campaigns/india/dlt-checklist", {
+      method: "POST",
+      body: JSON.stringify({ numbers }),
+    }),
 };

@@ -19,6 +19,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { api, ICPDraft, RankedLead, DiscoveryJob } from "@/lib/api";
+import { TrustBadge } from "@/components/IndiaKit";
 
 const EMPTY_DRAFT: ICPDraft = {
   name: "",
@@ -407,18 +408,21 @@ function LeadCard({ lead }: { lead: RankedLead }) {
         </span>
       </div>
 
-      {lead.badges.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {lead.badges.map((badge) => (
-            <span
-              key={badge}
-              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-blue-700 border border-blue-100"
-            >
-              {badge}
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="flex flex-wrap gap-1">
+        {lead.badges.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {lead.badges.map((badge) => (
+              <span
+                key={badge}
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-blue-700 border border-blue-100"
+              >
+                {badge}
+              </span>
+            ))}
+          </div>
+        )}
+        <TrustBadge trust={lead.source_trust} modifier={lead.trust_modifier} />
+      </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
         {lead.phone ? (

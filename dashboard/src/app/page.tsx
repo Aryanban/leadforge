@@ -18,6 +18,7 @@ import {
   ExternalLink
 } from "lucide-react";
 import { api, DashboardStats } from "@/lib/api";
+import { IndiaReadiness } from "@/components/IndiaKit";
 
 export default function Home() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -87,6 +88,9 @@ export default function Home() {
           </Link>
         </div>
       </div>
+
+      {/* India readiness: auth, quiet hours, festival hooks — advisory only */}
+      <IndiaReadiness />
 
       {/* KPI Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
