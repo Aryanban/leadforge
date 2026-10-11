@@ -18,6 +18,10 @@ from app.models.campaign_step import CampaignStep
 from app.models.send import Send
 from app.campaigns.bounces import classify_bounce, HARD, SOFT
 from app.campaigns.suppression import is_suppressed, add_suppression
+from app.campaigns.warmup import (
+    mailbox_age_days, ramp_limit, mailbox_health, is_mailbox_usable,
+    rolling_24h_count, recent_outcomes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,10 +196,41 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         steps_by_number = {s.step_number: s for s in steps}
         step_ids_to_step = {s.id: s for s in steps}
 
-        # Get available mailboxes
+        # Get available mailboxes, then apply the warmup/health/rolling gates.
+        # `sent_today < daily_limit` is only a fast pre-filter: the rolling
+        # 24h count over real Send timestamps is authoritative, a new mailbox
+        # ramps 10 -> limit over RAMP_DAYS, and a sick mailbox is held out
+        # until reviewed. Aged healthy mailboxes rotate first so fresh ones
+        # build reputation slowly - this is what keeps Gmail bulk-foldering
+        # at bay for new sending domains.
         m_stmt = select(Mailbox).where(Mailbox.is_active == True, Mailbox.sent_today < Mailbox.daily_limit)
         m_res = await db.execute(m_stmt)
-        mailboxes = m_res.scalars().all()
+        candidates_mb = list(m_res.scalars().all())
+
+        mailboxes = []
+        for mb in candidates_mb:
+            if getattr(mb, "health_paused", False):
+                logger.info("mailbox %s held out: health pause until review", mb.email)
+                continue
+            age = mailbox_age_days(getattr(mb, "created_at", None), now)
+            cap = ramp_limit(mb.daily_limit or 50, age)
+            used = await rolling_24h_count(db, mb.id, now)
+            if used >= cap:
+                continue
+            bounced, failed, sent = await recent_outcomes(db, mb.id)
+            health = mailbox_health(bounced, failed, sent)
+            mb.health_score = health
+            usable, reason = is_mailbox_usable(health, age)
+            if not usable:
+                mb.health_paused = True
+                logger.warning("mailbox %s auto-paused: health %.3f", mb.email, health)
+                continue
+            mailboxes.append((0 if reason == "ready" else 1, mb))
+
+        if candidates_mb:
+            await db.commit()  # persist refreshed health scores / auto-pauses
+
+        mailboxes = [mb for _, mb in sorted(mailboxes, key=lambda t: t[0])]
 
         if not mailboxes:
             return {"error": "No active mailboxes available with remaining daily quota"}

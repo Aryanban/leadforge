@@ -12,8 +12,9 @@ from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
 from app.sources import in_phone
-from app.verifier.smtp_verifier import verify_email, check_catch_all_domain
+from app.verifier.smtp_verifier import verify_email, verify_batch, check_catch_all_domain
 from app.verifier.email_status import detect_role_account, detect_placeholder_domain
+from app.enricher.pattern import generate_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +392,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             logger.info(f"Discovered official website for {business.name}: {business.website}")
 
         # Step 2: Crawl website if present
+        crawl_res: Dict[str, Any] = {}
         if business.website:
             try:
                 crawl_res = await crawl_website_for_contacts(business.website)
@@ -436,15 +438,31 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 parsed_w = urlparse(web_for_domain)
                 w_domain = parsed_w.netloc.lower().replace("www.", "").strip()
                 if w_domain and "." in w_domain and not any(ex in w_domain for ex in EXCLUDED_EMAIL_DOMAINS):
+                    person_names = []
+                    for ex in (crawl_res.get("executives", []) or [])[:2]:
+                        toks = (ex.get("name", "") or "").split()
+                        if toks:
+                            person_names.append((toks[0], " ".join(toks[1:])))
+                    seeds = [e for e in all_emails if e.rpartition("@")[2].lower() == w_domain]
+                    permutations, _pat, _conf = generate_candidates(
+                        w_domain, person_names=person_names or None, seeds=seeds,
+                    )
+                    if not person_names:
+                        permutations = [q for q in permutations if q.split("@")[0] in (
+                            "contact", "info", "sales", "office")]
                     is_catch_all = check_catch_all_domain(w_domain)
-                    permutations = generate_email_permutations(business.name, w_domain)
-                    
+
+                    batch = await verify_batch(
+                        [c for c in permutations if c not in all_emails])
+
                     found_perms = 0
                     for cand in permutations:
                         if cand in all_emails:
                             continue
                         if not is_catch_all:
-                            v_ok, v_stat = verify_email_smtp(cand)
+                            cand_res = batch.get(cand)
+                            v_ok = cand_res.is_deliverable if cand_res else False
+                            v_stat = cand_res.status.value if cand_res else "unknown"
                             # Strict only: adopt a permuted mailbox only when the
                             # SMTP handshake positively confirmed it. The old
                             # "valid_mx" status (valid merely because port 25 was
