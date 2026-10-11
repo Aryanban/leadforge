@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_step import CampaignStep
 from app.models.send import Send
+from app.models.contact import Contact
 from app.campaigns.sender import execute_campaign_step, interpolate_template
 
 router = APIRouter()
@@ -197,3 +198,87 @@ async def check_email_deliverability(req: SpamCheckRequest):
     """
     result = check_cold_email_spam(req.subject, req.body)
     return result
+
+
+# --- India advisor (advisory only: nothing here blocks, gates or sends) ------
+
+from app.campaigns.india_advisor import check_sender_auth, dlt_checklist, in_quiet_hours
+from app.campaigns.india_copy import festival_context, hinglish_closers, culture_checklist
+from app.campaigns.engagement import whatsapp_handoff, engagement_summary
+
+
+class DltCheckRequest(BaseModel):
+    numbers: List[str] = []
+
+
+@router.get("/india/advisor")
+async def india_advisor(domain: Optional[str] = None):
+    """One-shot India readiness report for the dashboard banner.
+
+    Sender auth (SPF/DKIM/DMARC) when a domain is given, TRAI quiet-hours
+    state, and the current festival hook. Pure advice — the operator
+    decides what to do; no send is ever gated here.
+    """
+    out: Dict[str, Any] = {
+        "quiet_hours_now": in_quiet_hours(),
+        "festival": festival_context(),
+        "auth": check_sender_auth(domain) if domain else None,
+    }
+    return out
+
+
+@router.post("/india/dlt-checklist")
+async def india_dlt_checklist(req: DltCheckRequest):
+    """TRAI/DLT posture report for a batch of numbers. Advisory only."""
+    return dlt_checklist(req.numbers)
+
+
+@router.get("/india/copy")
+async def india_copy_kit():
+    """Hinglish closers, festival hook, and the India copy do/don't checklist."""
+    return {
+        "festival": festival_context(),
+        "hinglish_closers": hinglish_closers(),
+        "culture_checklist": culture_checklist(),
+    }
+
+
+@router.get("/india/handoff/{campaign_id}")
+async def india_warm_handoff(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Contacts eligible for a *warm* WhatsApp handoff after email engagement.
+
+    Surfaces (never sends) contacts who opened/clicked the email — the only
+    WhatsApp posture that survives Meta's anti-spam policy: WhatsApp advances
+    deals it knows, cold WhatsApp gets numbers reported.
+    """
+    stmt = select(Send).where(Send.campaign_id == campaign_id)
+    res = await db.execute(stmt)
+    sends = res.scalars().all()
+
+    by_contact: Dict[int, List[Send]] = {}
+    for s in sends:
+        by_contact.setdefault(s.contact_id, []).append(s)
+
+    candidates = []
+    if by_contact:
+        c_res = await db.execute(
+            select(Contact).where(Contact.id.in_(list(by_contact.keys())))
+        )
+        for contact in c_res.scalars().all():
+            c_sends = by_contact.get(contact.id, [])
+            advice = whatsapp_handoff(
+                c_sends, bool(contact.whatsapp_link) and not contact.unsubscribed
+            )
+            if advice["suggest"]:
+                candidates.append({
+                    "contact_id": contact.id,
+                    "name": " ".join(
+                        p for p in (contact.first_name, contact.last_name) if p
+                    ) or None,
+                    "whatsapp_link": contact.whatsapp_link,
+                    "engagement": engagement_summary(c_sends),
+                    "reason": advice["reason"],
+                })
+    return {"campaign_id": campaign_id, "candidates": candidates,
+            "note": "Advisory: LeadForge never auto-sends WhatsApp; open the "
+                    "link and write a personal message."}

@@ -83,6 +83,22 @@ def score_lead(
     contacts = contacts or []
     signals = extract_signals(business, contacts)
 
+    # India source-trust overlay: self-listed directories (JustDial/IndiaMART)
+    # carry shared-lead / stale-number risk; live GBP and first-party website
+    # data do not. This shifts the score but never gates it — the operator
+    # decides whether a lead is worth a call.
+    from .source_trust import source_trust, trust_score_modifier, SOURCE_TRUST
+    _source = (business.get("source") if isinstance(business, dict)
+               else getattr(business, "source", None))
+    if _source and str(_source).strip().lower() in SOURCE_TRUST:
+        _trust, _trust_note = source_trust(_source)
+        _trust_delta = trust_score_modifier(_trust)
+        _trust_known = True
+    else:
+        # No recorded source, or a source we have no data for: stay exactly
+        # on the legacy formula so historical scores do not drift.
+        _trust, _trust_delta, _trust_known = 0.0, 0.0, False
+
     if icp_profile is not None:
         preset_name = (getattr(icp_profile, "preset", None) or "outreach_quality")
         weights = dict(PRESETS.get(preset_name, PRESETS["outreach_quality"]))
@@ -140,7 +156,11 @@ def score_lead(
             add("running_ads", bool(signals["running_ads"]), "Running Ads")
 
     score = int(sum(breakdown.values()))
-    score = min(100, max(10, score))
+    score = min(100, max(10, score + int(round(_trust_delta))))
+    if _trust_known and _trust < 0.75:
+        badges.append("Verify phone (directory-sourced)")
+    elif _trust_known and _trust >= 0.90 and _source:
+        badges.append(f"Trusted source: {_source}")
 
     if score >= 75:
         tier = "HOT"
@@ -155,4 +175,6 @@ def score_lead(
         "badges": badges,
         "signal_breakdown": breakdown,
         "signals": signals,
+        "source_trust": _trust if _trust_known else None,
+        "trust_modifier": _trust_delta,
     }
