@@ -235,7 +235,17 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         if not mailboxes:
             return {"error": "No active mailboxes available with remaining daily quota"}
 
-        # Load candidate contacts who have an email, haven't unsubscribed, and haven't bounced
+        # Load candidate contacts who have an email, haven't unsubscribed, and haven't bounced.
+        # If this campaign has explicit targets (Apollo-style "Add to Sequence"),
+        # scope to them: a campaign must never email a lead the operator didn't
+        # pick. An empty target set keeps the legacy all-eligible behaviour so
+        # campaigns created before targeting existed still run.
+        from app.models.campaign_step import CampaignTarget
+        target_stmt = select(CampaignTarget.contact_id).where(
+            CampaignTarget.campaign_id == campaign_id)
+        target_res = await db.execute(target_stmt)
+        target_ids = {row[0] for row in target_res.all()}
+
         c_stmt = (
             select(Contact, Business)
             .join(Business, Contact.business_id == Business.id, isouter=True)
@@ -245,6 +255,8 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 Contact.verification_status != "bounced"
             )
         )
+        if target_ids:
+            c_stmt = c_stmt.where(Contact.id.in_(target_ids))
         c_res = await db.execute(c_stmt)
         candidates = c_res.all()
 

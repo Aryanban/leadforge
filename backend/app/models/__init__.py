@@ -1,7 +1,7 @@
 from .business import Business
 from .contact import Contact
 from .campaign import Campaign, CampaignStatus
-from .campaign_step import CampaignStep
+from .campaign_step import CampaignStep, CampaignTarget
 from .mailbox import Mailbox
 from .send import Send
 from .scrape_job import ScrapeJob
@@ -16,6 +16,7 @@ __all__ = [
     "Campaign",
     "CampaignStatus",
     "CampaignStep",
+    "CampaignTarget",
     "Mailbox",
     "Send",
     "ScrapeJob",

@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 import contextlib
 import logging
 
@@ -12,34 +13,48 @@ from app.seeds import seed_initial_data_if_empty
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("leadforge")
 
+
+def _sync_missing_columns(sync_conn) -> None:
+    """Additive migration: ALTER TABLE ADD COLUMN for any model column the live
+    database lacks.
+
+    Replaces a hand-maintained SQL list that drifted every time a column was
+    added (and once silently no-op'd for an entire session because `text` was
+    not imported). Deriving from the models means a new column needs no
+    migration bookkeeping, which is what self-hosted users actually need.
+
+    Only adds columns - never drops or retypes - so it is safe to run on every
+    boot. Missing tables are left to ``create_all``.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(sync_conn)
+    existing_tables = set(inspector.get_table_names())
+    dialect = sync_conn.dialect
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        have = {c["name"] for c in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(dialect)}'
+            default = getattr(col.default, "arg", None)
+            if default is not None and not callable(default):
+                ddl += f" DEFAULT {default!r}" if isinstance(default, str) else f" DEFAULT {default}"
+            try:
+                sync_conn.execute(text(ddl))
+                logger.info("schema sync: added %s.%s", table.name, col.name)
+            except Exception as exc:  # pragma: no cover - dialect-specific limits
+                logger.warning("schema sync skipped %s.%s: %s", table.name, col.name, exc)
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing LeadForge database schemas...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Additive column migrations for pre-existing SQLite installs.
-        for stmt in (
-            "ALTER TABLE businesses ADD COLUMN maps_url TEXT;",
-            "ALTER TABLE businesses ADD COLUMN source TEXT;",
-            "ALTER TABLE businesses ADD COLUMN icp_profile_id INTEGER REFERENCES icp_profiles(id);",
-            "ALTER TABLE businesses ADD COLUMN icp_fit JSON;",
-            "ALTER TABLE scrape_jobs ADD COLUMN result JSON;",
-            "ALTER TABLE scrape_jobs ADD COLUMN icp_profile_id INTEGER;",
-            # Campaign deliverability columns (warmup/health gate).
-            "ALTER TABLE mailboxes ADD COLUMN health_score FLOAT DEFAULT 1.0;",
-            "ALTER TABLE mailboxes ADD COLUMN health_paused BOOLEAN DEFAULT 0;",
-            # Verification detail columns (rich verifier results).
-            "ALTER TABLE contacts ADD COLUMN verification_sub_status VARCHAR;",
-            "ALTER TABLE contacts ADD COLUMN verification_confidence FLOAT;",
-            "ALTER TABLE contacts ADD COLUMN verification_detail VARCHAR;",
-            "ALTER TABLE contacts ADD COLUMN mx_host VARCHAR;",
-            "ALTER TABLE contacts ADD COLUMN is_role_account BOOLEAN DEFAULT 0;",
-            "ALTER TABLE contacts ADD COLUMN is_free_email BOOLEAN DEFAULT 0;",
-        ):
-            try:
-                await conn.execute(text(stmt))
-            except Exception:
-                pass
+        await conn.run_sync(_sync_missing_columns)
     
     # Auto-seed initial realistic demo data if database is fresh
     try:

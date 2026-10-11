@@ -6,7 +6,8 @@ from typing import Optional, List, Dict, Any
 
 from app.database import get_db
 from app.models.campaign import Campaign, CampaignStatus
-from app.models.campaign_step import CampaignStep
+from app.models.campaign_step import CampaignStep, CampaignTarget
+from app.models.business import Business
 from app.models.send import Send
 from app.models.contact import Contact
 from app.campaigns.sender import execute_campaign_step, interpolate_template
@@ -22,11 +23,17 @@ class StepCreate(BaseModel):
 class CampaignCreate(BaseModel):
     name: str
     steps: List[StepCreate]
+    #: Optional explicit recipients — Apollo-style "select leads → Add to Sequence".
+    contact_ids: Optional[List[int]] = None
 
 class PreviewRequest(BaseModel):
     subject: str
     body: str
     sample_data: Optional[Dict[str, str]] = None
+
+
+class TargetAdd(BaseModel):
+    contact_ids: List[int] = []
 
 @router.get("")
 @router.get("/")
@@ -51,11 +58,22 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         open_rate = round((opened_count / sent_count * 100), 1) if sent_count > 0 else 0.0
         reply_rate = round((replied_count / sent_count * 100), 1) if sent_count > 0 else 0.0
 
+        # Explicit recipients (Apollo "prospects") plus total steps, so the UI
+        # can render "N prospects · M steps" without a second round-trip.
+        target_count = (await db.execute(
+            select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == c.id)
+        )).scalar() or 0
+        step_count = (await db.execute(
+            select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == c.id)
+        )).scalar() or 0
+
         result.append({
             "id": c.id,
             "name": c.name,
             "status": c.status,
             "total_targets": total_sends,
+            "contacts_selected": target_count,
+            "step_count": step_count,
             "sent_count": sent_count,
             "opened_count": opened_count,
             "open_rate": open_rate,
@@ -87,8 +105,92 @@ async def create_campaign(req: CampaignCreate, db: AsyncSession = Depends(get_db
         )
         db.add(step)
 
+    # Attach the explicitly selected recipients, if any.
+    added_targets = 0
+    for cid in dict.fromkeys(req.contact_ids or []):
+        db.add(CampaignTarget(campaign_id=campaign.id, contact_id=cid))
+        added_targets += 1
+
     await db.commit()
-    return {"id": campaign.id, "name": campaign.name, "status": campaign.status}
+    return {
+        "id": campaign.id,
+        "name": campaign.name,
+        "status": campaign.status,
+        "steps": len(req.steps),
+        "targets": added_targets,
+    }
+
+
+@router.post("/{campaign_id}/targets")
+async def add_campaign_targets(
+    campaign_id: int,
+    req: "TargetAdd",
+    db: AsyncSession = Depends(get_db),
+):
+    """Adds contacts to a campaign (the bulk "Add to Sequence" action).
+
+    Idempotent: re-adding an existing target is a no-op, so the UI can call
+    this on a selection without tracking what was already there.
+    """
+    campaign = await db.get(Campaign, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    existing_stmt = select(CampaignTarget.contact_id).where(
+        CampaignTarget.campaign_id == campaign_id)
+    existing = {row[0] for row in (await db.execute(existing_stmt)).all()}
+
+    added = 0
+    for cid in dict.fromkeys(req.contact_ids or []):
+        if cid in existing:
+            continue
+        db.add(CampaignTarget(campaign_id=campaign_id, contact_id=cid))
+        added += 1
+    await db.commit()
+
+    total_stmt = select(func.count(CampaignTarget.id)).where(
+        CampaignTarget.campaign_id == campaign_id)
+    total = (await db.execute(total_stmt)).scalar() or 0
+    return {"campaign_id": campaign_id, "added": added, "total_targets": total}
+
+
+@router.get("/{campaign_id}/targets")
+async def list_campaign_targets(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Lists a campaign's explicitly selected recipients."""
+    stmt = (
+        select(Contact, Business)
+        .join(Business, Contact.business_id == Business.id, isouter=True)
+        .join(CampaignTarget, CampaignTarget.contact_id == Contact.id)
+        .where(CampaignTarget.campaign_id == campaign_id)
+    )
+    res = await db.execute(stmt)
+    out = []
+    for contact, business in res.all():
+        out.append({
+            "contact_id": contact.id,
+            "name": " ".join(p for p in (contact.first_name, contact.last_name) if p) or None,
+            "email": contact.email,
+            "business_name": business.name if business else None,
+            "is_verified": bool(contact.is_verified),
+        })
+    return {"campaign_id": campaign_id, "targets": out}
+
+
+@router.delete("/{campaign_id}/targets/{contact_id}")
+async def remove_campaign_target(
+    campaign_id: int, contact_id: int, db: AsyncSession = Depends(get_db)
+):
+    """Removes one recipient from a campaign."""
+    stmt = select(CampaignTarget).where(
+        CampaignTarget.campaign_id == campaign_id,
+        CampaignTarget.contact_id == contact_id,
+    )
+    row = (await db.execute(stmt)).scalars().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Target not found")
+    await db.delete(row)
+    await db.commit()
+    return {"removed": True}
 
 
 @router.get("/{campaign_id}")
