@@ -25,6 +25,16 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE businesses ADD COLUMN icp_fit JSON;",
             "ALTER TABLE scrape_jobs ADD COLUMN result JSON;",
             "ALTER TABLE scrape_jobs ADD COLUMN icp_profile_id INTEGER;",
+            # Campaign deliverability columns (warmup/health gate).
+            "ALTER TABLE mailboxes ADD COLUMN health_score FLOAT DEFAULT 1.0;",
+            "ALTER TABLE mailboxes ADD COLUMN health_paused BOOLEAN DEFAULT 0;",
+            # Verification detail columns (rich verifier results).
+            "ALTER TABLE contacts ADD COLUMN verification_sub_status VARCHAR;",
+            "ALTER TABLE contacts ADD COLUMN verification_confidence FLOAT;",
+            "ALTER TABLE contacts ADD COLUMN verification_detail VARCHAR;",
+            "ALTER TABLE contacts ADD COLUMN mx_host VARCHAR;",
+            "ALTER TABLE contacts ADD COLUMN is_role_account BOOLEAN DEFAULT 0;",
+            "ALTER TABLE contacts ADD COLUMN is_free_email BOOLEAN DEFAULT 0;",
         ):
             try:
                 await conn.execute(text(stmt))
@@ -48,10 +58,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware for Next.js dashboard
+# CORS middleware for Next.js dashboard. Origins come from CORS_ORIGINS so a
+# production deployment names its dashboard explicitly instead of trusting
+# every website on the internet with the user's session.
+_cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

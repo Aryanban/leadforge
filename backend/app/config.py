@@ -2,10 +2,36 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 import os
 
+
+def _require_secret() -> str:
+    """Fail fast when the default dev secret reaches a real deployment.
+
+    A leaked/hardcoded JWT secret means anyone can forge auth tokens, so the
+    app refuses to boot with the placeholder outside local dev. Set
+    SECRET_KEY in the environment (generate with `openssl rand -hex 32`).
+    """
+    val = os.environ.get("SECRET_KEY", "")
+    if not val or val == "leadforge-secret-key-production-change-me":
+        if os.environ.get("ENV", "dev") == "production":
+            raise RuntimeError(
+                "SECRET_KEY must be set to a random value in production "
+                "(e.g. `openssl rand -hex 32`). Refusing to boot."
+            )
+        return "leadforge-secret-key-production-change-me"
+    if len(val) < 32:
+        raise RuntimeError("SECRET_KEY must be at least 32 characters.")
+    return val
+
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "LeadForge API"
     API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str = "leadforge-secret-key-production-change-me"
+    SECRET_KEY: str = _require_secret()
+
+    #: Comma-separated list of origins allowed to call the API from a
+    #: browser. "*" is convenient locally but lets any website drive your API
+    #: with the user's cookies, so production requires an explicit list.
+    CORS_ORIGINS: str = "*"
     
     # Database settings
     # Default to sqlite for instant local operation; can be overridden via DATABASE_URL in .env
