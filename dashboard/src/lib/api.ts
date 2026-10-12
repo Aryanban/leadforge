@@ -90,12 +90,22 @@ export interface CampaignItem {
   name: string;
   status: string;
   total_targets: number;
+  contacts_selected?: number;
+  step_count?: number;
   sent_count: number;
   opened_count: number;
   open_rate: number;
   replied_count: number;
   reply_rate: number;
   created_at: string | null;
+}
+
+export interface CampaignTargetItem {
+  contact_id: number;
+  name: string | null;
+  email: string | null;
+  business_name: string | null;
+  is_verified: boolean;
 }
 
 export interface MailboxItem {
@@ -323,8 +333,19 @@ export const api = {
   // Campaigns
   getCampaigns: () => request<CampaignItem[]>('/campaigns'),
   getCampaign: (id: number) => request<any>(`/campaigns/${id}`),
-  createCampaign: (data: { name: string; steps: Array<{ subject: string; body_text: string; body_html?: string; delay_days?: number }> }) =>
+  createCampaign: (data: { name: string; steps: Array<{ subject: string; body_text: string; body_html?: string; delay_days?: number }>; contact_ids?: number[] }) =>
     request('/campaigns', { method: 'POST', body: JSON.stringify(data) }),
+  addCampaignTargets: (campaignId: number, contact_ids: number[]) =>
+    request<{ campaign_id: number; added: number; total_targets: number }>(
+      `/campaigns/${campaignId}/targets`,
+      { method: 'POST', body: JSON.stringify({ contact_ids }) },
+    ),
+  getCampaignTargets: (campaignId: number) =>
+    request<{ campaign_id: number; targets: CampaignTargetItem[] }>(
+      `/campaigns/${campaignId}/targets`,
+    ),
+  removeCampaignTarget: (campaignId: number, contactId: number) =>
+    request(`/campaigns/${campaignId}/targets/${contactId}`, { method: 'DELETE' }),
   launchCampaign: (id: number) => request(`/campaigns/${id}/launch`, { method: 'POST' }),
   pauseCampaign: (id: number) => request(`/campaigns/${id}/pause`, { method: 'POST' }),
   previewTemplate: (subject: string, body: string) =>

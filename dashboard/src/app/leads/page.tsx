@@ -27,9 +27,10 @@ import {
   Copy,
   Check,
   FileText,
-  AlertTriangle
+  AlertTriangle,
+  Send
 } from "lucide-react";
-import { api, LeadItem } from "@/lib/api";
+import { api, LeadItem, CampaignItem } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
 
 export default function LeadsPage() {
@@ -72,6 +73,74 @@ export default function LeadsPage() {
     address: "",
     industry: "Real Estate Agency"
   });
+
+  // Apollo-style multi-select + bulk "Add to Sequence".
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [sequenceModalOpen, setSequenceModalOpen] = useState(false);
+  const [sequences, setSequences] = useState<CampaignItem[]>([]);
+  const [addingTo, setAddingTo] = useState<number | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+
+  // A contact id is what a sequence targets; a lead without one can't be added.
+  const contactIdFor = (lead: LeadItem): number | null =>
+    lead.primary_contact?.id ?? lead.contacts?.[0]?.id ?? null;
+
+  const selectableIds = leads.map(contactIdFor);
+  const selectableCount = selectableIds.filter((id): id is number => id !== null).length;
+  const selectableLoaded = !loading && leads.length > 0;
+
+  const toggleRow = (lead: LeadItem) => {
+    const cid = contactIdFor(lead);
+    if (cid === null) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(cid)) next.delete(cid);
+      else next.add(cid);
+      return next;
+    });
+  };
+
+  // Row-level select, but ignore clicks that land on a link/button/input so
+  // navigation and actions still work without toggling selection.
+  const onRowClick = (e: React.MouseEvent, lead: LeadItem) => {
+    const el = e.target as HTMLElement;
+    if (el.closest("a, button, input, label, select, textarea")) return;
+    toggleRow(lead);
+  };
+
+  const toggleAll = () => {
+    setSelected((prev) =>
+      prev.size === selectableCount
+        ? new Set()
+        : new Set(selectableIds.filter((id): id is number => id !== null)),
+    );
+  };
+
+  const openSequencePicker = async () => {
+    try {
+      setSequences(await api.getCampaigns());
+    } catch {
+      setSequences([]);
+    }
+    setSequenceModalOpen(true);
+  };
+
+  const addToSequence = async (campaignId: number) => {
+    try {
+      setAddingTo(campaignId);
+      const res = await api.addCampaignTargets(campaignId, Array.from(selected));
+      setBulkMessage(
+        `Added ${res.added} lead${res.added === 1 ? "" : "s"} — sequence now has ${res.total_targets} recipient${res.total_targets === 1 ? "" : "s"}.`,
+      );
+      setSequenceModalOpen(false);
+      setSelected(new Set());
+      setTimeout(() => setBulkMessage(null), 6000);
+    } catch (e: any) {
+      setBulkMessage(`Could not add: ${e.message}`);
+    } finally {
+      setAddingTo(null);
+    }
+  };
 
   const fetchLeads = async () => {
     try {
@@ -340,13 +409,54 @@ export default function LeadsPage() {
         </form>
       </div>
 
+      {/* Bulk Action Bar — appears when rows are selected (Apollo-style) */}
+      {selected.size > 0 && (
+        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-xs px-4 py-2.5 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center justify-center rounded-lg bg-blue-600 text-white text-xs font-bold h-6 min-w-6 px-2">
+              {selected.size}
+            </span>
+            <span className="text-sm font-semibold text-slate-800">
+              lead{selected.size === 1 ? "" : "s"} selected
+            </span>
+            <button
+              onClick={() => setSelected(new Set())}
+              className="text-xs font-medium text-slate-500 hover:text-slate-700 underline"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            {bulkMessage && (
+              <span className="text-xs font-medium text-emerald-700 hidden sm:inline">{bulkMessage}</span>
+            )}
+            <button
+              onClick={openSequencePicker}
+              className="inline-flex items-center justify-center rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-8 px-3 transition-colors shadow-xs"
+            >
+              <Send className="w-3.5 h-3.5 mr-1.5" />
+              Add to Sequence
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Leads Table */}
       <div className="rounded-2xl border border-slate-200/80 bg-white shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
               <tr>
-                <th className="px-5 py-3">Business & Address</th>
+                <th className="pl-5 pr-2 py-3 w-8">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all leads on this page"
+                    checked={selectableLoaded && selected.size === selectableCount}
+                    onChange={toggleAll}
+                    className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30"
+                  />
+                </th>
+                <th className="px-3 py-3">Business & Address</th>
                 <th className="px-3 py-3">Score & Status</th>
                 <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3">Phone & WhatsApp</th>
@@ -359,7 +469,7 @@ export default function LeadsPage() {
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-5 py-12 text-center text-slate-400">
+                  <td colSpan={9} className="px-5 py-12 text-center text-slate-400">
                     <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
                     Loading leads database...
                   </td>
@@ -373,7 +483,24 @@ export default function LeadsPage() {
                     const mapsUrl = lead.maps_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((lead.name + " " + (lead.address || "")).trim())}`;
 
                     return (
-                    <tr key={lead.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr
+                      key={lead.id}
+                      onClick={(e) => onRowClick(e, lead)}
+                      className={`cursor-pointer hover:bg-slate-50/80 transition-colors ${
+                        (contactIdFor(lead) && selected.has(contactIdFor(lead)!)) ? "bg-blue-50/60" : ""
+                      }`}
+                    >
+                      <td className="pl-5 pr-2 py-4 w-8">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${lead.name}`}
+                          checked={(() => { const cid = contactIdFor(lead); return cid !== null && selected.has(cid); })()}
+                          onChange={() => toggleRow(lead)}
+                          disabled={contactIdFor(lead) === null}
+                          title={contactIdFor(lead) === null ? "No contact yet — enrich this lead first" : undefined}
+                          className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30 disabled:opacity-40"
+                        />
+                      </td>
                       <td className="px-5 py-4 max-w-[260px]">
                         <div className="flex items-center gap-1.5">
                           <a
@@ -578,7 +705,7 @@ export default function LeadsPage() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={8} className="px-5 py-12 text-center text-slate-400">
+                  <td colSpan={9} className="px-5 py-12 text-center text-slate-400">
                     No leads found matching your criteria.
                   </td>
                 </tr>
@@ -1131,6 +1258,66 @@ export default function LeadsPage() {
                 className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-xs"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sequence Picker Modal — bulk "Add to Sequence" */}
+      {sequenceModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="font-bold text-base text-slate-900">Add to Sequence</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {selected.size} lead{selected.size === 1 ? "" : "s"} selected
+                </p>
+              </div>
+              <button
+                onClick={() => setSequenceModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {sequences.length === 0 ? (
+              <div className="text-sm text-slate-500 py-6 text-center">
+                No sequences yet. Create one from the Sequences page first.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {sequences.map((seq) => (
+                  <button
+                    key={seq.id}
+                    onClick={() => addToSequence(seq.id)}
+                    disabled={addingTo !== null}
+                    className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 px-4 py-3 text-left transition-colors disabled:opacity-50"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900 truncate">{seq.name}</div>
+                      <div className="text-[11px] text-slate-500">
+                        {(seq as any).total_targets ?? 0} recipient{((seq as any).total_targets ?? 0) === 1 ? "" : "s"}
+                      </div>
+                    </div>
+                    {addingTo === seq.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+                    ) : (
+                      <Send className="w-4 h-4 text-blue-600 shrink-0" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setSequenceModalOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs"
+              >
+                Cancel
               </button>
             </div>
           </div>
