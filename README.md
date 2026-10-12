@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-14%2F14%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Tests Passing](https://img.shields.io/badge/Tests-167%2F167%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -32,8 +32,8 @@ Modern B2B revenue and agency teams spend thousands of dollars annually on SaaS 
 4. **Generic AI Hallucinations**: Standard LLM outreach generators produce bland, templated pitches that trigger commercial spam filters.
 
 **LeadForge** resolves these challenges through a unified, self-hosted autonomous architecture:
-* **Turbo-Route Playwright Maps Scraper**: Bypasses heavy font and media assets to deliver **3x–5x scraping speedups** while extracting exact GPS coordinates and identifying unclaimed Google Business Profiles.
-* **Algorithmic XOR Deobfuscation & Waterfall Permutations**: Reverses Cloudflare `data-cfemail` tokens, synthesizes executive permutations (`{first}.{last}@`, `{first}@`), and conducts direct DNS MX + SMTP handshakes at zero cost.
+* **Concurrent HTTP Maps Scraper**: Speaks Google's internal protobuf `pb=` transport directly, so listings are parsed straight out of `APP_INITIALIZATION_STATE` with no browser in the loop — and a viewport-grid sweep fans queries out concurrently to blow past the ~20-results-per-query ceiling.
+* **Seed-First Email Discovery & Non-Blocking Verification**: Reverses Cloudflare `data-cfemail` tokens, harvests real addresses as *seed evidence*, then **learns each domain's actual format** instead of guessing. Verification runs in a thread pool, groups candidates per domain to reuse one MX connection, and classifies into a 20-status enum via a multi-probe catch-all sentinel — never defaulting to valid.
 * **Catch-All Sentinel & 80+ Spam Trigger Linter**: Identifies permissive mail servers and lints subject/body copy against 80+ commercial spam triggers before delivery.
 * **Algorithmic 1-on-1 AI Icebreakers**: Analyzes business reviews, sentiment ratings, and municipal pain points to craft tailored hooks.
 * **Native Model Context Protocol (MCP)**: Empowers autonomous AI agents (Google Antigravity, Claude, Cursor) to manage prospecting, enrichment, and cold campaigns end-to-end.
@@ -47,13 +47,13 @@ Modern B2B revenue and agency teams spend thousands of dollars annually on SaaS 
 | **Monthly Cost** | **$0 / Free Forever** | $99 / mo | $49 / mo | ~$50 / 10k leads | $149 / mo |
 | **Lead Limits** | **Unlimited** | 1,000 credits/mo | 500 searches/mo | Pay-per-record | 2,500 leads |
 | **Self-Hosted / Local Private Data** | **Yes (100% Local)** | No (SaaS Cloud) | No (SaaS Cloud) | No (SaaS Cloud) | No (SaaS Cloud) |
-| **Google Maps Turbo Scraping** | **Built-in (Route Interceptor)** | Add-on | Not included | API only | Not included |
+| **Google Maps Scraping** | **Built-in (HTTP `pb=` + Stealth fallback)** | Add-on | Not included | API only | Not included |
 | **Cloudflare `data-cfemail` Decoding** | **Yes (Native XOR cipher)** | No | No | No | No |
-| **Apollo-Style Email Permutations** | **Yes (`first.last@`, `first@`)** | Proprietary | Paid Add-on | No | No |
-| **Catch-All & Safe SMTP Verification** | **Yes (Direct DNS MX & Handshake)**| Paid | Yes | No | Add-on |
+| **Email Pattern Learning** | **Yes (per-domain inference from harvested seeds)** | Proprietary | Paid Add-on | No | No |
+| **Catch-All & Safe SMTP Verification** | **Yes (multi-probe catch-all, 20-status enum, never defaults to valid)** | Paid | Yes | No | Add-on |
 | **Cold Email Spam & Deliverability Linter**| **Yes (80+ words, 0-100 score)** | No | No | No | Included |
 | **Algorithmic 1-to-1 AI Icebreakers** | **Yes (Sentiment & pain points)** | Paid Add-on | No | No | Included |
-| **Multi-Step Sequences & Bounce Guard** | **Yes (Delay days, 550 auto-suppress)**| Included | Add-on | No | Included |
+| **Multi-Step Sequences & Bounce Guard** | **Yes (Delay days, hard/soft bounce auto-suppress)**| Included | Add-on | No | Included |
 | **AI Agent Native (MCP Server)** | **Yes (Claude, Cursor, AGY)** | No | No | No | No |
 | **Open-Source CRM Integration** | **Twenty CRM & Webhooks** | HubSpot / SF only | Zapier only | Webhooks only | Zapier only |
 
@@ -75,7 +75,7 @@ flowchart TD
     subgraph Backend ["Application Layer (FastAPI & Native MCP Server)"]
         API["FastAPI REST API (/api/v1)"]
         MCP["Native MCP Server (stdio JSON-RPC 2.0)"]
-        MapsScraper["Playwright Stealth Maps Scraper"]
+        MapsScraper["Concurrent HTTP + Stealth Fallback"]
         WaterfallEnricher["Waterfall Permutation Engine"]
         CloudflareDecoder["Cloudflare XOR Deobfuscator"]
         SMTPVerifier["DNS MX & Catch-All Probe"]
@@ -110,21 +110,34 @@ flowchart TD
 
 ## ⚡ Core Engineering Innovations
 
-### 1. Turbo Route Interception & Anti-Detection Web Automation
-* **Network Asset Interception**: Playwright requests intercept and abort unnecessary stylesheets, web fonts, tracking beacons, and media binaries (`**/*.{png,jpg,jpeg,svg,woff,woff2,ttf}`), achieving a **3x–5x reduction in scrape latency** and bandwidth consumption.
+### 1. Concurrent HTTP Maps Scraping & Anti-Detection Fallback
+* **Concurrent HTTP Maps Scraper (Primary Path)**: Reverse-engineers Google's internal `search?tbm=map&pb=...` protobuf endpoint — the same transport the Maps frontend itself uses. Parses the `APP_INITIALIZATION_STATE` payload directly, so it extracts **name, phone, address, rating, review count and coordinates with no browser at all**. A viewport-grid sweep fans queries out concurrently across a locality, which is how production tools scale past the ~20-results-per-query ceiling.
+* **Playwright Stealth Fallback**: If the HTTP path is blocked or returns an empty payload, a headless-Chromium scraper takes over. Route interception aborts stylesheets, web fonts, tracking beacons and media (`**/*.{png,jpg,jpeg,svg,woff,woff2,ttf}`) for a **3x–5x reduction in bandwidth**, plus humanized deceleration and viewport jitter to avoid bot fingerprinting.
 * **Humanized Deceleration & Viewport Jitter**: Simulates randomized mouse curves and natural scrolling velocities, avoiding bot fingerprinting.
 * **Unclaimed GBP Detection**: Evaluates DOM nodes for the canonical *"Claim this business"* anchor, immediately classifying listings with highest agency acquisition value.
 
-### 2. Cloudflare XOR Reverse Cipher & Waterfall Enrichment
+### 2. Seed-Driven Pattern Inference & Cloudflare XOR Deobfuscation
 * **Cloudflare Email Deobfuscation**: Corporate websites protected by Cloudflare mask emails using a single-byte XOR key in hex format (`<a data-cfemail="a1...">`). LeadForge reverses this cipher dynamically:
   $$\text{char}_i = \text{hex\_byte}_i \oplus \text{xor\_key}$$
-* **Executive Permutations**: Synthesizes corporate executive permutations (`{first}.{last}`, `{first}`, `{first_initial}{last}`, `{first}{last_initial}`) plus functional aliases (`contact@`, `sales@`, `info@`).
-* **Catch-All Sentinel**: Probes mail exchangers with high-entropy bogus email addresses (`random-uuid-xyz@domain.com`). If the server returns `250 OK`, the domain is flagged as **Catch-All**, alerting operators to prevent domain reputation damage.
+* **Seed Harvest First, Guess Second**: Instead of fabricating permutations from a *company* name (“Acme Realty Group” → `acme.realty@`), LeadForge first harvests **real** addresses already exposed on the site, then **learns that domain's actual format** from the seed set. A `john.doe@` on the team page tells us the domain is `{first}.{last}` — so we stop guessing and generate only what the evidence supports.
+* **Confidence-Blended Inference**: `infer_pattern()` scores each candidate format by observed dominance blended against a global prior, so one ambiguous seed never overrides what most domains actually do. Candidates are ranked, verified, and the walk stops at the first deliverable address.
 * **Direct Socket SMTP Handshake**: Resolves authoritative DNS MX records and conducts low-latency socket handshakes (`HELO` $\rightarrow$ `MAIL FROM` $\rightarrow$ `RCPT TO`) without sending actual messages, eliminating third-party API verification costs.
 
-### 3. Deliverability Intelligence & 80+ Spam Keyword Linter
-* **Algorithmic Copy Evaluation**: Scans email copy against a curated dictionary of **80+ commercial spam triggers** (urgency markers, financial guarantees, shady marketing clichés).
-* **Deliverability Scoring**: Computes a 0–100 spam health score by penalizing subject line length extremes, all-caps strings, exclamation densities, and excessive hyperlink ratios.
+### 3. Honest Deliverability Intelligence (Never Reports Unknown as Valid)
+* **20-State Normalized Enum**: Every verification returns a typed `VerificationResult` — `valid`, `invalid`, `catch_all`, `catch_all_unknown`, `disposable`, `role_account`, `free_email`, `greylisted`, `unknown`, `blocked`, `syntax_error`, `domain_error`, `no_mx`, `smtp_error`, `timeout`, `spamtrap`, `abuse`, `do_not_mail`, `mailbox_full`, `gibberish`, `possible_typo` — carrying a `confidence` score and the raw `smtp_detail` for auditing.
+* **The Critical Correctness Fix**: earlier versions returned `valid` on *every* SMTP failure. A blocked port 25, a greylisting server, or an anti-spam gateway all silently became “valid” — which is precisely how a sending domain gets burned. Those now resolve to `blocked` / `greylisted` / `unknown` and are routed to a retry queue, and are **never counted as valid**.
+* **Multi-Probe Catch-All Detection**: a single random probe cannot separate a catch-all from a block or a greylist. LeadForge sends a reachability control, multiple random probes, and a known-invalid control, then classifies `CATCH_ALL / NOT_CATCH_ALL / GREYLISTED_RETRY / BLOCKED / ANTISPAM_GATEWAY`.
+* **No-Probe MX Awareness**: Gmail, Zoho, Outlook and Yahoo accept-all on `RCPT TO` then reject after `DATA`. Probing them yields false “valid” results *and* gets your egress IP penalised, so they are never probed. This matters disproportionately in India, where a Gmail address is a legitimate and often the *only* business address.
+* **Role, Free, Disposable & Typo Detection**: `info@`/`sales@`/`support@` are flagged as group mailboxes and never counted as a “person found” (the usual cause of inflated lead counts and complaint spikes); webmail is treated as a quality signal rather than a rejection reason; typo'd domains receive a `did_you_mean` suggestion instead of being silently dropped.
+* **80+ Spam Keyword Linter**: Scores copy 0–100 against commercial spam triggers, subject-line extremes, all-caps density, exclamation ratios and hyperlink density.
+
+### 6. India-Specific Outreach Readiness
+* **TRAI-Accurate Phone Normalisation**: Trunk-zero STD codes resolve against a verified SDCA table (so `0481` → Kottayam and `0487` → Thrissur, not duplicates), landline vs. mobile is distinguished by subscriber-length rules, and everything is normalised to **E.164** `+91`. Foreign numbers are no longer mangled into `+91...`.
+* **Channel Routing**: Landlines route to voice/email; mobiles route to WhatsApp first — which is how Indian SMBs actually answer.
+* **Regulatory Advisor**: The app surfaces consent, DLT and TRAI guidance as **advisory information** and leaves every decision to the operator — LeadForge is self-hosted and does not gate or veto your sending.
+* **Hinglish & Festival-Aware Copy**: Generates regionally natural phrasing and suggests culturally appropriate timing windows.
+* **Source-Trust Scoring**: Weights leads by the observed reliability of each source (Google Maps vs. aggregator directories), so a scraped-aggregator lead never outranks a primary-source one.
+* **Warm WhatsApp Handoff**: Emits a pre-filled `wa.me` deep link so the operator can continue in the channel the lead will actually reply on.
 
 ### 4. Algorithmic 1-on-1 AI Outreach Icebreakers
 * **Review Sentiment Analysis**: Evaluates customer reviews, Google star ratings, municipal locations, and business categories.
@@ -135,7 +148,7 @@ flowchart TD
   * **🔥 HOT (75–100)**: Verified email, active website, top ratings ($\ge 4.5$), high reviews.
   * **⚡ WARM (45–74)**: Contact details present; email unverified or catch-all.
   * **❄️ COLD (<45)**: Limited contact footprint.
-* **Hard Bounce Suppression**: Detects `550` and `554` SMTP responses during campaigns and permanently suppresses contacts to prevent blacklisting.
+* **Classified Bounce Suppression**: SMTP responses are classified into **hard** (dead mailbox, domain gone, no-such-user → permanent suppression), **soft** (mailbox full, over-quota, greylisted → retry), and **policy** (blocked, content-filtered → *not* treated as a dead address). Suppression is enforced again at queue time, so a bounce that lands mid-batch stops the remaining sends.
 
 ---
 
@@ -144,7 +157,7 @@ flowchart TD
 | Dimension | Engineering Decision | Rationale |
 | :--- | :--- | :--- |
 | **Backend Framework** | FastAPI (Python 3.10+) | High-performance asynchronous execution, auto-generated OpenAPI documentation, and low-latency websocket streams. |
-| **Browser Automation** | Playwright Stealth + Route Interception | Full JavaScript execution for single-page Google Maps interfaces with asset-blocking for 3x–5x speed. |
+| **Maps Extraction** | HTTP protobuf `pb=` endpoint, Playwright Stealth fallback | Primary path parses `APP_INITIALIZATION_STATE` with no browser; fallback uses headless Chromium with asset-blocking. |
 | **Frontend Dashboard** | Next.js 15 (App Router) + Tailwind CSS | Modern, responsive interface with server-side rendering, real-time job status streaming, and instant search filtering. |
 | **Persistence Layer** | SQLAlchemy 2.0 Async + SQLite/PostgreSQL | Zero-configuration local development via SQLite with seamless production migration to PostgreSQL. |
 | **Agent Interface** | Model Context Protocol (MCP) SDK | First-class integration with modern AI coding assistants and autonomous agents. |
@@ -177,16 +190,16 @@ cd leadforge
 
 ---
 
-## 🧪 Automated Test Suite (14/14 Passing)
+## 🧪 Automated Test Suite (167/167 Passing)
 
-LeadForge includes a comprehensive Pytest test suite covering permutations, SMTP verification, lead scoring, spam checking, and icebreaker generation:
+LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
 ```bash
 # Run backend test suite:
 .venv/bin/pytest backend/tests
 ```
 
-All **14/14 tests pass synchronously** in under 0.5s.
+All **167/167 tests pass synchronously** in under 1s — no network, no browser, no external services required.
 
 ---
 
