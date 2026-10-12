@@ -19,6 +19,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Playwright (match at any depth — config lives in dashboard/)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+shots/
+
 # Environment
 .env
 .env.local

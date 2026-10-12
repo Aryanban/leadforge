@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { 
   Users, 
   Search, 
@@ -165,6 +165,21 @@ export default function LeadsPage() {
   useEffect(() => {
     fetchLeads();
   }, [page, industryFilter, hasEmailFilter]);
+
+  // Live search: debounced so typing doesn't fire a request per keystroke, but
+  // without requiring the user to press Enter (Apollo-style instant filter).
+  const searchMounted = useRef(false);
+  useEffect(() => {
+    if (!searchMounted.current) {
+      searchMounted.current = true;
+      return; // the fetch effect above already handles the initial load
+    }
+    const t = setTimeout(() => {
+      setPage(1);
+      fetchLeads();
+    }, 400);
+    return () => clearTimeout(t);
+  }, [search]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();

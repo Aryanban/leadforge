@@ -21,6 +21,25 @@ async def create_schema():
     yield
 
 
+@pytest.fixture(autouse=True)
+async def reset_db():
+    """Per-test isolation.
+
+    The temp DB and engine are session-scoped (module-level ``engine`` imported
+    at collection time), so rows written by one test would otherwise leak into
+    the next. Wipe every table before each test so dedupe/import assertions see
+    a clean slate regardless of execution order.
+    """
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        # Drop child tables first to satisfy FK constraints; SQLite is tolerant,
+        # but deleting in reverse dependency order is correct for all backends.
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(text(f"DELETE FROM {table.name}"))
+    yield
+
+
 @pytest.fixture
 async def db_session():
     async with async_session_maker() as session:

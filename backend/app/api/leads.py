@@ -13,6 +13,7 @@ from app.models.business import Business
 from app.models.contact import Contact
 from app.campaigns.sender import resolve_city
 from app.enricher.email_finder import calculate_lead_quality_score
+from app.dedupe.match import find_existing_business
 
 router = APIRouter()
 
@@ -443,6 +444,7 @@ async def import_leads_csv(
 
     imported = 0
     skipped = 0
+    updated = 0
 
     for row in reader:
         raw_name = (row.get(name_col) or "").strip()
@@ -456,33 +458,73 @@ async def import_leads_csv(
         raw_address = (row.get(address_col) or "").strip() if address_col else None
         raw_industry = (row.get(industry_col) or "").strip() if industry_col else "General"
 
-        # Create business
-        business = Business(
-            name=raw_name,
-            phone=raw_phone,
-            website=raw_website,
-            address=raw_address,
-            industry=raw_industry
-        )
-        db.add(business)
-        await db.flush()
+        # Dedupe: if this business already exists (by name/phone/domain),
+        # enrich the existing record instead of creating a duplicate.
+        lead = {
+            "name": raw_name,
+            "phone": raw_phone,
+            "email": raw_email,
+            "website": raw_website,
+            "address": raw_address,
+        }
+        existing = await find_existing_business(db, lead)
 
-        # Create contact if email or phone present
+        if existing is not None:
+            # Fill in any blanks on the existing record (idempotent re-import).
+            if raw_phone and not existing.phone:
+                existing.phone = raw_phone
+            if raw_website and not existing.website:
+                existing.website = raw_website
+            if raw_address and not existing.address:
+                existing.address = raw_address
+            if raw_industry and (not existing.industry or existing.industry == "General"):
+                existing.industry = raw_industry
+            business = existing
+            await db.flush()
+        else:
+            # Create business
+            business = Business(
+                name=raw_name,
+                phone=raw_phone,
+                website=raw_website,
+                address=raw_address,
+                industry=raw_industry
+            )
+            db.add(business)
+            await db.flush()
+
+        # Create contact if email or phone present — avoid duplicating a
+        # contact that already carries the same email for this business.
         contact_list = []
         if raw_email or raw_phone:
-            digits_only = "".join(filter(str.isdigit, raw_phone or ""))
-            wa_link = f"https://wa.me/{digits_only}" if digits_only else None
-            contact = Contact(
-                business_id=business.id,
-                first_name=raw_name.split()[0],
-                email=raw_email,
-                phone=raw_phone,
-                whatsapp_link=wa_link,
-                is_verified=False,
-                source="csv_import"
-            )
-            db.add(contact)
-            contact_list.append(contact)
+            existing_contact = None
+            if raw_email:
+                c_res = await db.execute(
+                    select(Contact).where(
+                        Contact.business_id == business.id,
+                        Contact.email == raw_email,
+                    )
+                )
+                existing_contact = c_res.scalars().first()
+
+            if existing_contact is not None:
+                if raw_phone and not existing_contact.phone:
+                    existing_contact.phone = raw_phone
+                contact_list.append(existing_contact)
+            else:
+                digits_only = "".join(filter(str.isdigit, raw_phone or ""))
+                wa_link = f"https://wa.me/{digits_only}" if digits_only else None
+                contact = Contact(
+                    business_id=business.id,
+                    first_name=raw_name.split()[0],
+                    email=raw_email,
+                    phone=raw_phone,
+                    whatsapp_link=wa_link,
+                    is_verified=False,
+                    source="csv_import"
+                )
+                db.add(contact)
+                contact_list.append(contact)
 
         # Calculate quality score
         score_info = calculate_lead_quality_score(business, contact_list)
@@ -492,14 +534,18 @@ async def import_leads_csv(
             "lead_badges": score_info["badges"],
             "imported_via": "csv"
         }
-        imported += 1
+        if existing is not None:
+            updated += 1
+        else:
+            imported += 1
 
     await db.commit()
     return {
         "status": "success",
         "imported": imported,
+        "updated": updated,
         "skipped": skipped,
-        "total_rows_processed": imported + skipped
+        "total_rows_processed": imported + updated + skipped
     }
 
 
