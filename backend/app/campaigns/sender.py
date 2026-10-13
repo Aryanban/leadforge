@@ -1,9 +1,11 @@
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate, make_msgid
 from typing import Optional, Dict, Any, Tuple
 import logging
 import asyncio
+import random
 import re
 from datetime import datetime
 from sqlalchemy import select, update
@@ -34,6 +36,28 @@ def interpolate_template(text: str, data: Dict[str, str]) -> str:
         placeholder = f"{{{{{key}}}}}"
         result = result.replace(placeholder, str(val or ""))
     return result
+
+
+def _domain_from_email(email: str) -> str:
+    """Returns the domain part of an address, for Message-ID generation."""
+    return (email or "").rsplit("@", 1)[-1].lower() or "localhost"
+
+
+def jitter_seconds() -> float:
+    """Randomized inter-send delay in seconds, clamped to the configured band.
+
+    A fixed sleep betrays blast software and gets the mailbox throttled by ISP
+    rate-limit heuristics; humans do not send on a metronome. Each send waits a
+    random duration in [SEND_JITTER_MIN_SECONDS, SEND_JITTER_MAX_SECONDS].
+    """
+    lo = float(getattr(settings, "SEND_JITTER_MIN_SECONDS", 20))
+    hi = float(getattr(settings, "SEND_JITTER_MAX_SECONDS", 60))
+    if hi < lo:
+        lo, hi = hi, lo
+    if lo <= 0 and hi <= 0:
+        return 0.0
+    return random.uniform(lo, hi)
+
 
 
 def resolve_city(business: Optional[Business]) -> str:
@@ -103,6 +127,11 @@ def send_single_email(
         from_name = f"{mailbox.first_name} {mailbox.last_name}".strip() if mailbox.first_name else mailbox.email
         msg["From"] = f"{from_name} <{mailbox.email}>"
         msg["To"] = to_email
+        # Date & Message-ID headers. Missing or malformed values are a spam
+        # signal at Gmail/Outlook/M365 — the MTA otherwise injects a
+        # local-time Date that can predate the message, which bulk filters flag.
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain=_domain_from_email(mailbox.email))
 
         tracking_base = settings.TRACKING_DOMAIN.rstrip("/")
 
@@ -115,9 +144,15 @@ def send_single_email(
             msg["List-Unsubscribe"] = f"<{unsub_url}>, <mailto:{mailbox.email}?subject=unsubscribe>"
             msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
-        # Inject open tracking pixel and unsubscribe link
+        # Open-tracking pixel — GATED OFF by default.
+        # A 1x1 remote image fetched from a third-party tracking domain is a
+        # commercial-newsletter signal at Gmail/Outlook/Yahoo (2026): it routes
+        # the message straight to Promotions/Spam. For cold outreach we default
+        # this OFF (OPEN_TRACKING_ENABLED=False) — you trade open-rate telemetry
+        # for the only cold metric that matters, the Primary inbox. Reply
+        # tracking (via a real reply to the mailbox) still works regardless.
         pixel_tag = ""
-        if send_id:
+        if send_id and getattr(settings, "OPEN_TRACKING_ENABLED", False):
             pixel_url = f"{tracking_base}/api/v1/campaigns/tracker/open/{send_id}"
             pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="" />'
 
@@ -177,6 +212,10 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
     failed_count = 0
     bounced_count = 0
 
+    # Single timestamp for the whole run. The mailbox warmup/ramp gate below
+    # (mailbox_age_days / rolling_24h_count) and the per-step delay math both
+    # read this, so it must be captured once, up front - not partway through.
+    now = datetime.utcnow()
     async with async_session_maker() as db:
         campaign = await db.get(Campaign, campaign_id)
         if not campaign or campaign.status != CampaignStatus.ACTIVE.value:
@@ -274,7 +313,6 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         for s in all_sends:
             sends_by_contact.setdefault(s.contact_id, []).append(s)
 
-        now = datetime.utcnow()
         queue_to_send: List[Tuple[Contact, Business, CampaignStep]] = []
 
         for contact, business in candidates:
@@ -342,7 +380,7 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
 
         mailbox_idx = 0
 
-        for contact, business, step in queue_to_send:
+        for idx, (contact, business, step) in enumerate(queue_to_send):
             mailbox = mailboxes[mailbox_idx % len(mailboxes)]
             mailbox_idx += 1
 
@@ -437,7 +475,12 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 failed_count += 1
 
             await db.commit()
-            await asyncio.sleep(settings.DEFAULT_DELAY_SECONDS)
+            # Randomized inter-send jitter (2026 playbook Rule 5). A constant
+            # delay betrays programmatic blasting and gets the mailbox
+            # throttled. Skip the wait after the final queued send so the run
+            # doesn't idle for a full jitter window after the last message.
+            if idx < len(queue_to_send) - 1:
+                await asyncio.sleep(jitter_seconds())
 
         return {
             "campaign_id": campaign_id,

@@ -51,6 +51,22 @@ class Settings(BaseSettings):
     DEFAULT_DELAY_SECONDS: int = 15
     MAX_EMAILS_PER_DAY_PER_MAILBOX: int = 50
 
+    # --- Cold-email deliverability (see README "Deliverability") -----------
+    # Open-tracking pixels are a PRIMARY-INBOX KILLER: a 1x1 remote image
+    # fetched from a third-party tracking domain is a commercial-newsletter
+    # signal at Gmail / Outlook / Yahoo (2026), and it routes the message to
+    # the Promotions or Spam tab. For cold outreach we default this OFF — you
+    # sacrifice open-rate telemetry and gain the only metric that matters for
+    # cold: landing in the Primary inbox. Enable only for warm/nurture flows
+    # where you already have a relationship and the Promotions tab is fine.
+    OPEN_TRACKING_ENABLED: bool = False
+    # Randomized inter-send jitter. A fixed sleep betrays blast software and
+    # gets the whole mailbox throttled; humans do not send on a metronome.
+    # Each send waits a random duration in [min, max] seconds. The 2026
+    # playbook recommends ~25-60s for a single warm mailbox.
+    SEND_JITTER_MIN_SECONDS: int = 20
+    SEND_JITTER_MAX_SECONDS: int = 60
+
     # Scraper & Enricher
     PLAYWRIGHT_HEADLESS: bool = True
     ENRICH_MAX_PAGES: int = 4
