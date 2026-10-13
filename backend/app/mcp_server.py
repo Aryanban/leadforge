@@ -24,14 +24,26 @@ from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
-from app.models.campaign import Campaign
-from app.models.campaign_step import CampaignStep
+from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign_step import CampaignStep, CampaignTarget
+from app.models.mailbox import Mailbox
+from app.models.send import Send
+from app.models.suppression import Suppression, PERMANENT_REASONS
 from app.scraper.maps_scraper import scrape_leads_and_save
 from app.enricher.email_finder import enrich_business_by_id
+from app.campaigns.sender import execute_campaign_step, test_smtp_connection
+from app.campaigns.suppression import is_suppressed, add_suppression
+from app.verifier.smtp_verifier import verify_email_async
+from app.verifier.email_status import should_send
 
 # Configure logging to stderr so stdout remains clean for JSON-RPC
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("leadforge-mcp")
+
+# Strong references to fire-and-forget campaign-dispatch tasks so the event loop
+# does not garbage-collect them mid-run (Python keeps only weak refs to running
+# asyncio tasks). Mirrors the API's BackgroundTasks launch, which also detaches.
+_BACKGROUND_TASKS = set()
 
 
 TOOLS_DEFINITIONS = [
@@ -158,6 +170,107 @@ TOOLS_DEFINITIONS = [
                 "industry": {"type": "string", "description": "Industry / niche"},
                 "city": {"type": "string", "description": "City or territory"}
             }
+        }
+    },
+
+    # --- Agent automation loop: targets -> launch -> monitor -> pause ------
+    {
+        "name": "leadforge_list_campaigns",
+        "description": "Lists all campaigns with status, step count, explicit recipient (target) count, and total sends.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "leadforge_get_campaign",
+        "description": "Gets one campaign: status, sequence steps, target count, and recent sends (reply/status flags).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "integer", "description": "Campaign ID"}},
+            "required": ["campaign_id"]
+        }
+    },
+    {
+        "name": "leadforge_add_campaign_targets",
+        "description": "Adds contacts (by ID) as explicit recipients of a campaign (Apollo 'Add to Sequence'). Idempotent; suppressed contacts are skipped. A campaign needs targets before launch or it is refused.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "campaign_id": {"type": "integer", "description": "Campaign ID"},
+                "contact_ids": {"type": "array", "items": {"type": "integer"}, "description": "Contact IDs to add"}
+            },
+            "required": ["campaign_id", "contact_ids"]
+        }
+    },
+    {
+        "name": "leadforge_launch_campaign",
+        "description": "Activates a campaign and dispatches its sequence in the background. Refuses to launch with 0 targets or 0 steps to avoid emailing the whole database. Honors suppression, warmup/health, daily limits, delays, and send jitter.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "integer", "description": "Campaign ID"}},
+            "required": ["campaign_id"]
+        }
+    },
+    {
+        "name": "leadforge_pause_campaign",
+        "description": "Pauses an active campaign; no sends go out until relaunched.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"campaign_id": {"type": "integer", "description": "Campaign ID"}},
+            "required": ["campaign_id"]
+        }
+    },
+
+    # --- Mailboxes ---------------------------------------------------------
+    {
+        "name": "leadforge_list_mailboxes",
+        "description": "Lists sending mailboxes with SMTP host/port, sent/daily-limit, active flag, and health score.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "leadforge_create_mailbox",
+        "description": "Adds an SMTP sending mailbox. Daily limit is capped at 50 for warmup safety. Optionally runs a live SMTP login test.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Mailbox email / login user"},
+                "password": {"type": "string", "description": "SMTP or app-specific password"},
+                "smtp_host": {"type": "string", "description": "e.g. smtp.gmail.com"},
+                "smtp_port": {"type": "integer", "description": "587 STARTTLS, 465 SSL", "default": 587},
+                "first_name": {"type": "string", "description": "Sender first name"},
+                "last_name": {"type": "string", "description": "Sender last name"},
+                "daily_limit": {"type": "integer", "description": "Max sends/day (capped 50)", "default": 50},
+                "test_connection": {"type": "boolean", "description": "Run a live SMTP login test", "default": True}
+            },
+            "required": ["email", "password", "smtp_host"]
+        }
+    },
+
+    # --- Verification & suppression ---------------------------------------
+    {
+        "name": "leadforge_verify_email",
+        "description": "Verifies an email via syntax/role/free classification, DNS MX, and SMTP handshake. Never coerces an unknown into valid.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"email": {"type": "string", "description": "Email to verify"}},
+            "required": ["email"]
+        }
+    },
+    {
+        "name": "leadforge_list_suppression",
+        "description": "Lists the global suppression list (addresses/domains never to be mailed) with reason and active/expired state.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "leadforge_add_suppression",
+        "description": "Adds an address (or whole domain if it starts with '@') to the global suppression list. Workspace-wide do-not-contact / unsubscribe control.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "identifier": {"type": "string", "description": "Email, or '@domain.com' for a whole domain"},
+                "reason": {"type": "string", "description": "unsubscribed, replied_stop, hard_bounce, soft_bounce, complaint, manual, import", "default": "manual"},
+                "detail": {"type": "string", "description": "Optional note"},
+                "domain_wide": {"type": "boolean", "description": "Treat identifier as a domain (auto-on when it starts with '@')"}
+            },
+            "required": ["identifier"]
         }
     }
 ]
@@ -319,7 +432,7 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             for idx, s in enumerate(steps_input):
                 step = CampaignStep(
                     campaign_id=camp.id,
-                    step_order=idx + 1,
+                    step_number=idx + 1,
                     subject=s["subject"],
                     body_text=s["body_text"],
                     body_html=s.get("body_html"),
@@ -421,6 +534,294 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"**Low-Friction Call-To-Action**: {info['call_to_action']}\n\n"
             f"*Variables exported*: `{{{{ai_icebreaker}}}}`, `{{{{compliment}}}}`, `{{{{pain_point}}}}`, `{{{{call_to_action}}}}`"
         )
+
+    # --- Agent automation loop: list -> inspect -> target -> launch -> pause --
+    elif name == "leadforge_list_campaigns":
+        async with async_session_maker() as db:
+            camps = (await db.execute(
+                select(Campaign).order_by(Campaign.created_at.desc())
+            )).scalars().all()
+
+            rows = []
+            for camp in camps:
+                steps = (await db.execute(
+                    select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == camp.id)
+                )).scalar() or 0
+                targets = (await db.execute(
+                    select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == camp.id)
+                )).scalar() or 0
+                sends = (await db.execute(
+                    select(func.count(Send.id)).where(Send.campaign_id == camp.id)
+                )).scalar() or 0
+                rows.append((camp, steps, targets, sends))
+
+        if not rows:
+            return ("### LeadForge Campaigns\n\nNo campaigns yet. "
+                    "Use `leadforge_create_campaign` to build one.")
+        md = [
+            f"### LeadForge Campaigns ({len(rows)})\n",
+            "| ID | Name | Status | Steps | Targets | Sends |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for camp, steps, targets, sends in rows:
+            name_clean = (camp.name or "").replace("|", "\\|")
+            md.append(f"| #{camp.id} | **{name_clean}** | {camp.status} | {steps} | {targets} | {sends} |")
+        return "\n".join(md)
+
+    elif name == "leadforge_get_campaign":
+        campaign_id = int(arguments["campaign_id"])
+        async with async_session_maker() as db:
+            camp = await db.get(Campaign, campaign_id)
+            if not camp:
+                return f"Campaign #{campaign_id} not found."
+
+            steps = (await db.execute(
+                select(CampaignStep).where(CampaignStep.campaign_id == campaign_id)
+                .order_by(CampaignStep.step_number.asc())
+            )).scalars().all()
+
+            targets = (await db.execute(
+                select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
+            )).scalar() or 0
+
+            sends = (await db.execute(
+                select(Send).where(Send.campaign_id == campaign_id)
+                .order_by(Send.created_at.desc()).limit(50)
+            )).scalars().all()
+
+            camp_name = camp.name
+            camp_status = camp.status
+
+        sent = sum(1 for s in sends if s.status == "sent")
+        bounced = sum(1 for s in sends if s.status == "bounced")
+        failed = sum(1 for s in sends if s.status == "failed")
+        replied = sum(1 for s in sends if s.replied)
+
+        lines = [
+            f"### Campaign #{campaign_id}: {camp_name}\n",
+            f"• **Status**: {camp_status}",
+            f"• **Targets**: {targets} explicit recipient(s)",
+            f"• **Recent Sends**: {len(sends)} (sent {sent} · bounced {bounced} · "
+            f"failed {failed} · replied {replied})\n",
+            "**Sequence Steps**:",
+        ]
+        if steps:
+            for s in steps:
+                delay = f" (+{s.delay_days}d)" if s.delay_days else ""
+                lines.append(f"- Step {s.step_number}{delay}: {s.subject}")
+        else:
+            lines.append("- *No steps configured*")
+
+        if sends:
+            lines.append("\n**Recent Sends**:")
+            for s in sends[:15]:
+                flag = " ↩ replied" if s.replied else (" ✉ opened" if s.opened else "")
+                err = f" — {s.error_message}" if s.error_message else ""
+                lines.append(f"- #{s.id}: `{s.status}`{flag}{err}")
+
+        return "\n".join(lines)
+
+    elif name == "leadforge_add_campaign_targets":
+        campaign_id = int(arguments["campaign_id"])
+        contact_ids = [int(c) for c in (arguments.get("contact_ids") or [])]
+        if not contact_ids:
+            return "No contact IDs provided."
+
+        async with async_session_maker() as db:
+            camp = await db.get(Campaign, campaign_id)
+            if not camp:
+                return f"Campaign #{campaign_id} not found."
+
+            existing = {row[0] for row in (await db.execute(
+                select(CampaignTarget.contact_id).where(CampaignTarget.campaign_id == campaign_id)
+            )).all()}
+
+            added = 0
+            skipped = 0
+            for cid in dict.fromkeys(contact_ids):
+                if cid in existing:
+                    continue
+                # Gate 1 of 4: never add an already-suppressed address as a target.
+                contact = (await db.execute(
+                    select(Contact).where(Contact.id == cid)
+                )).scalars().first()
+                if contact is None:
+                    continue
+                if await is_suppressed(db, contact.email):
+                    skipped += 1
+                    continue
+                db.add(CampaignTarget(campaign_id=campaign_id, contact_id=cid))
+                added += 1
+            await db.commit()
+
+            total = (await db.execute(
+                select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
+            )).scalar() or 0
+
+        return (f"Added {added} target(s) to campaign #{campaign_id} "
+                f"({skipped} skipped: suppressed). Total targets: {total}.")
+
+    elif name == "leadforge_launch_campaign":
+        campaign_id = int(arguments["campaign_id"])
+        async with async_session_maker() as db:
+            camp = await db.get(Campaign, campaign_id)
+            if not camp:
+                return f"Campaign #{campaign_id} not found."
+            steps = (await db.execute(
+                select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == campaign_id)
+            )).scalar() or 0
+            targets = (await db.execute(
+                select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
+            )).scalar() or 0
+            if steps == 0:
+                return (f"Campaign #{campaign_id} cannot launch: no sequence steps. "
+                        "Create steps with `leadforge_create_campaign` first.")
+            if targets == 0:
+                return (f"Campaign #{campaign_id} cannot launch: no explicit targets. "
+                        "Add recipients with `leadforge_add_campaign_targets` so we never "
+                        "mail leads the operator did not pick.")
+            camp.status = CampaignStatus.ACTIVE.value
+            camp_name = camp.name
+            await db.commit()
+        task = asyncio.ensure_future(execute_campaign_step(campaign_id))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        return (f"Campaign '{camp_name}' (#{campaign_id}) launched: {targets} target(s) "
+                f"across {steps} step(s). Sends dispatch in the background (suppression, "
+                "warmup/health, daily limits, delays, jitter). Poll `leadforge_get_campaign`.")
+
+    elif name == "leadforge_pause_campaign":
+        campaign_id = int(arguments["campaign_id"])
+        async with async_session_maker() as db:
+            camp = await db.get(Campaign, campaign_id)
+            if not camp:
+                return f"Campaign #{campaign_id} not found."
+            camp.status = CampaignStatus.PAUSED.value
+            camp_name = camp.name
+            await db.commit()
+        return (f"Campaign '{camp_name}' (#{campaign_id}) paused. "
+                "No sends go out until `leadforge_launch_campaign`.")
+
+    elif name == "leadforge_list_mailboxes":
+        async with async_session_maker() as db:
+            mailboxes = (await db.execute(
+                select(Mailbox).order_by(Mailbox.id.desc())
+            )).scalars().all()
+            rows = [(m.id, m.email, m.smtp_host, m.smtp_port, m.sent_today,
+                     m.daily_limit, bool(m.is_active), m.health_score,
+                     bool(getattr(m, "health_paused", False))) for m in mailboxes]
+        if not rows:
+            return ("### LeadForge Mailboxes\n\nNo sending mailboxes yet. "
+                    "Add one with `leadforge_create_mailbox` before launching.")
+        md = [
+            f"### LeadForge Mailboxes ({len(rows)})\n",
+            "| ID | Email | SMTP | Sent / Limit | State | Health |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for mid, email, host, port, sent, limit, active, health, paused in rows:
+            host_str = f"{host}:{port}" if host else "—"
+            state = "active" if active else "inactive"
+            if paused:
+                state += " · health-paused"
+            health_str = f"{health:.2f}" if health is not None else "—"
+            md.append(f"| #{mid} | {email} | {host_str} | {sent} / {limit} | {state} | {health_str} |")
+        return "\n".join(md)
+
+    elif name == "leadforge_create_mailbox":
+        email = (arguments.get("email") or "").strip()
+        password = arguments.get("password") or ""
+        smtp_host = (arguments.get("smtp_host") or "").strip()
+        smtp_port = int(arguments.get("smtp_port", 587))
+        first_name = arguments.get("first_name")
+        last_name = arguments.get("last_name")
+        daily_limit = min(int(arguments.get("daily_limit", 50)), 50)
+        test_connection = arguments.get("test_connection", True)
+        if not email or not smtp_host:
+            return "Both `email` and `smtp_host` are required."
+        if test_connection:
+            ok, msg = test_smtp_connection(smtp_host, smtp_port, email, password)
+            if not ok:
+                return (f"SMTP login test failed for {email} at {smtp_host}:{smtp_port}: {msg}\n"
+                        "Mailbox NOT saved. Fix credentials/host and retry, or pass "
+                        "`test_connection: false` to save without testing.")
+        async with async_session_maker() as db:
+            existing = (await db.execute(
+                select(Mailbox).where(Mailbox.email == email)
+            )).scalars().first()
+            if existing:
+                return f"A mailbox with email {email} already exists (ID: #{existing.id})."
+            mb = Mailbox(email=email, password=password, smtp_host=smtp_host,
+                         smtp_port=smtp_port, first_name=first_name,
+                         last_name=last_name, daily_limit=daily_limit, is_active=True)
+            db.add(mb)
+            await db.commit()
+            await db.refresh(mb)
+            mb_id = mb.id
+        note = " Live SMTP login test passed." if test_connection else ""
+        return (f"Mailbox {email} saved (ID: #{mb_id}) on {smtp_host}:{smtp_port}, "
+                f"daily limit {daily_limit} (capped 50 for warmup).{note}")
+
+    elif name == "leadforge_verify_email":
+        email = (arguments.get("email") or "").strip()
+        if not email:
+            return "An `email` to verify is required."
+        result = await verify_email_async(email)
+        verdict = "✓ safe to send" if should_send(result) else "✗ do not send"
+        lines = [
+            f"### Email Verification: {email}\n",
+            f"• **Status**: {result.status.value} ({result.sub_status})",
+            f"• **Confidence**: {result.confidence:.2f}",
+            f"• **Verdict**: {verdict}",
+        ]
+        if result.is_role:
+            lines.append("• **Role account**: yes (info@/sales@ style)")
+        if result.is_free:
+            lines.append("• **Free provider**: yes (gmail/yahoo style)")
+        if result.mx_host:
+            lines.append(f"• **MX host**: {result.mx_host}")
+        if result.detail:
+            lines.append(f"• **Detail**: {result.detail}")
+        return "\n".join(lines)
+
+    elif name == "leadforge_list_suppression":
+        async with async_session_maker() as db:
+            rows = (await db.execute(
+                select(Suppression).order_by(Suppression.id.desc()).limit(200)
+            )).scalars().all()
+            entries = [(r.identifier, r.reason, r.detail, r.is_active()) for r in rows]
+        if not entries:
+            return ("### LeadForge Suppression List\n\nThe suppression list is empty — "
+                    "no addresses are blocked workspace-wide yet.")
+        md = [
+            f"### LeadForge Suppression List ({len(entries)})\n",
+            "| Identifier | Reason | State | Detail |",
+            "| :--- | :--- | :--- | :--- |",
+        ]
+        for ident, reason, detail, active in entries:
+            state = "active" if active else "expired"
+            md.append(f"| `{ident}` | {reason} | {state} | {detail or '—'} |")
+        return "\n".join(md)
+
+    elif name == "leadforge_add_suppression":
+        identifier = (arguments.get("identifier") or "").strip()
+        reason = (arguments.get("reason") or "manual").strip()
+        detail = arguments.get("detail")
+        domain_wide = bool(arguments.get("domain_wide", False)) or identifier.startswith("@")
+        if not identifier:
+            return "An `identifier` (email or '@domain.com') is required."
+        if domain_wide and "@" not in identifier:
+            return ("For a whole-domain block, pass the domain as '@domain.com' "
+                    "so the blocked key is unambiguous.")
+        async with async_session_maker() as db:
+            newly = await add_suppression(db, identifier, reason, detail=detail,
+                                          domain_wide=domain_wide)
+            await db.commit()
+        scope = "whole domain" if domain_wide else "address"
+        key = (f"@{identifier.rsplit('@', 1)[-1]}" if domain_wide
+               else identifier.strip().lower())
+        verb = "Added" if newly else "Updated existing"
+        return (f"{verb} suppression: {scope} `{key}` (reason: {reason}) is now blocked "
+                "workspace-wide. It is enforced at the queue gate before any SMTP send.")
 
     else:
         raise ValueError(f"Unknown tool: {name}")
