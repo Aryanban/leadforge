@@ -172,6 +172,8 @@ flowchart TD
 * **Node.js**: `18+`
 * **npm** or **yarn**
 
+### Option A: One-Click Launcher (SQLite — zero config)
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/Aryanban/leadforge.git
@@ -218,6 +220,38 @@ override anything (Postgres URL, secrets, CORS, proxy list), copy
 (no variable interpolation inside the file). See `.env.example` for details.
 
 --- 
+
+## 🚀 How to Use LeadForge (End-to-End Workflow)
+
+Once the stack is up, open the dashboard at
+[`http://localhost:3000`](http://localhost:3000) and walk the pipeline left to
+right:
+
+| # | Page | What you do |
+| :--- | :--- | :--- |
+| 1 | **`/scrape`** | Enter a query like *"Dentists in Austin TX"* → concurrent Google Maps scrape saves listings, then auto-discovers public emails from the businesses' websites and directories. |
+| 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (JustDial, directories, web). |
+| 3 | **`/leads`** | Browse & search your database. Enrich individual leads, generate AI icebreakers, spam-check copy, import/export CSV, and push to Twenty CRM. SMTP-verified addresses are marked deliverable. |
+| 4 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — required before any campaign can send. Daily limit is capped at 50/day for warmup safety. |
+| 5 | **`/campaigns`** | Build a sequence: write steps (subject + body) using `{{business_name}}`, `{{first_name}}`, `{{city}}`… placeholders, preview the render, and run the deliverability/spam linter. |
+| 6 | **`/sequences`** | Apollo-style execution: select leads → **Add to Sequence** → **Launch** → monitor sends, bounces and replies → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
+
+**First-send checklist** — guardrails refuse to run until all three exist (by design):
+the launcher blocks campaigns without steps or recipients, and the sender
+blocks dispatch without a usable mailbox:
+
+1. ✅ At least one SMTP mailbox in `/settings`
+2. ✅ At least one sequence step in `/campaigns`
+3. ✅ At least one recipient added in `/sequences`
+
+Then hit **Launch**. Watch progress on `/sequences` or `/campaigns`.
+
+**Everything is also an API**: every dashboard action maps to a REST endpoint —
+interactive Swagger docs at [`http://localhost:8000/docs`](http://localhost:8000/docs),
+health check at [`http://localhost:8000/health`](http://localhost:8000/health).
+Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
+
+---
 
 ## 🧪 Automated Test Suite (169/169 Passing)
 
