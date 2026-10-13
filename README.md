@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-167%2F167%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Tests Passing](https://img.shields.io/badge/Tests-169%2F169%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -184,26 +184,63 @@ cd leadforge
 **What `./start.sh` does automatically**:
 1. Creates Python virtual environment (`.venv`) and installs all backend dependencies.
 2. Installs headless Chromium for Playwright scraping (`playwright install chromium`).
-3. Seeds the database with default schemas and templates.
+3. Creates the SQLite database (`leadforge.db`) and its schema automatically on first backend start — zero configuration, no seed step needed.
 4. Launches the **FastAPI Backend** on [`http://localhost:8000`](http://localhost:8000) ([Swagger Docs](http://localhost:8000/docs)).
 5. Launches the **Next.js 15 Dashboard** on [`http://localhost:3000`](http://localhost:3000).
 
----
+> All service ports are bound openly (backend `:8000`, dashboard `:3000`) so a
+> clone-and-run works on your machine and across a LAN with zero extra config.
+> Keep it off the public internet unless you put it behind a reverse proxy with
+> authentication — the API has no built-in auth (it is a single-user,
+> self-hosted tool).
 
-## 🧪 Automated Test Suite (167/167 Passing)
+### Option B: Docker Compose (Postgres + Redis + Celery)
+
+```bash
+docker compose up --build
+```
+
+Brings up Postgres, Redis, the FastAPI backend (`:8000`), a Celery worker, and
+the dashboard (`:3000`). Postgres/Redis only bind to `127.0.0.1` on the host;
+the app ports are open on every interface. Before exposing the stack beyond
+localhost, generate a real secret and lock CORS down:
+
+```bash
+SECRET_KEY=$(openssl rand -hex 32) ENV=production CORS_ORIGINS=https://your-domain.example docker compose up -d
+```
+
+### Configuration
+
+Configuration is **optional** — with no `.env` at all, LeadForge runs on a
+local SQLite file (`leadforge.db`), created automatically on first start. To
+override anything (Postgres URL, secrets, CORS, proxy list), copy
+`.env.example` to `backend/.env` and edit; every value is taken literally
+(no variable interpolation inside the file). See `.env.example` for details.
+
+--- 
+
+## 🧪 Automated Test Suite (169/169 Passing)
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
 ```bash
+# Install test dependencies (once):
+.venv/bin/pip install -r backend/requirements-dev.txt
+
 # Run backend test suite:
-.venv/bin/pytest backend/tests
+(cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **167/167 tests pass synchronously** in under 1s — no network, no browser, no external services required.
+All **169/169 tests pass synchronously** in under 1s — no network, no browser, no external services required.
 
 ---
 
 ## 🤖 MCP Server & CLI Usage
+
+The MCP server exposes **17 tools** covering the full agent automation loop:
+scrape → search → enrich → create campaign → add targets → launch → monitor →
+pause, plus mailboxes, email verification, spam scoring, AI icebreakers, and
+the global suppression list.
 
 LeadForge is a native **Model Context Protocol (MCP)** server, enabling AI coding assistants (Google Antigravity, Claude Code, Cursor) to drive lead generation autonomously.
 

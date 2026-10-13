@@ -1,5 +1,4 @@
 FROM node:20-alpine AS base
-
 # Install dependencies only when needed
 FROM base AS deps
 RUN apk add --no-cache libc6-compat
@@ -16,6 +15,11 @@ COPY . .
 
 # Next.js telemetry is disabled
 ENV NEXT_TELEMETRY_DISABLED 1
+
+# NEXT_PUBLIC_* values are INLINED at build time, so the API base URL must be
+# available as a build arg (docker-compose passes it). Falls back to localhost.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 RUN npm run build
 

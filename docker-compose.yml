@@ -1,4 +1,17 @@
-version: '3.8'
+# LeadForge full stack.
+#
+#   docker compose up --build
+#
+#   Backend API     http://localhost:8000  (docs: /docs, health: /health)
+#   Dashboard       http://localhost:3000
+#
+# App ports (8000/3000) are open on every interface so the stack works on a
+# LAN. Postgres/Redis bind to 127.0.0.1 only — they are implementation
+# details and must never face your network.
+#
+# Before exposing the API beyond localhost, generate a real secret:
+#   SECRET_KEY=$(openssl rand -hex 32) docker compose up -d
+# and set ENV=production + an explicit CORS_ORIGINS (see .env.example).
 
 services:
   postgres:
@@ -8,17 +21,17 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: leadforge
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   backend:
-    build: 
+    build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
@@ -28,6 +41,11 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-leadforge-secret-key-production-change-me}
+      - ENV=${ENV:-dev}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - TRACKING_DOMAIN=${TRACKING_DOMAIN:-http://localhost:8000}
+      - USE_CELERY=true
     depends_on:
       - postgres
       - redis
@@ -42,6 +60,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-leadforge-secret-key-production-change-me}
+      - ENV=${ENV:-dev}
+      - USE_CELERY=true
     depends_on:
       - postgres
       - redis
@@ -52,10 +73,11 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        # Inlined into the JS bundle at build time — must include /api/v1.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000/api
     depends_on:
       - backend
 
