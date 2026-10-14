@@ -8,6 +8,21 @@ from app.database import engine
 from app.models.business import Business
 from app.models.contact import Contact
 
+from app.workers.beat_schedule import BEAT_SCHEDULE
+
+celery_app.conf.beat_schedule = BEAT_SCHEDULE
+
+
+@celery_app.task
+def poll_replies_task():
+    """Periodic IMAP sweep of every active mailbox (Celery deployment)."""
+    from app.campaigns.reply_poller import poll_all_mailboxes
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(poll_all_mailboxes())
+    finally:
+        loop.close()
+
 @celery_app.task
 def run_scrape_task(query: str, max_results: int):
     # Run async function in sync context

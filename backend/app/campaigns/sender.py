@@ -119,8 +119,14 @@ def send_single_email(
     body_html: Optional[str] = None,
     send_id: Optional[int] = None,
     contact_id: Optional[int] = None,
+    message_id: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Sends an email via the provided Mailbox's SMTP configuration."""
+    """Sends an email via the provided Mailbox's SMTP configuration.
+
+    message_id: pre-generated RFC 5322 Message-ID (the caller stores it on the
+    Send row so the IMAP reply poller can attribute inbound replies). When
+    omitted a fresh one is generated.
+    """
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -131,7 +137,7 @@ def send_single_email(
         # signal at Gmail/Outlook/M365 — the MTA otherwise injects a
         # local-time Date that can predate the message, which bulk filters flag.
         msg["Date"] = formatdate(localtime=True)
-        msg["Message-ID"] = make_msgid(domain=_domain_from_email(mailbox.email))
+        msg["Message-ID"] = message_id or make_msgid(domain=_domain_from_email(mailbox.email))
 
         tracking_base = settings.TRACKING_DOMAIN.rstrip("/")
 
@@ -417,15 +423,31 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             }
 
             rendered_subject = interpolate_template(step.subject, data)
+            # A/B subject test. While undecided, split evenly by contact-id
+            # parity so each recipient always sees the same variant; once a
+            # winner is declared the loser stops sending. Open rate is NOT the
+            # metric here — opens require the (deliverability-killing) tracking
+            # pixel, so cold A/B is decided on replies, the only signal that
+            # survives with open tracking off.
+            use_variant = None
+            if getattr(step, "subject_b", None) and not getattr(step, "variant_winner", None):
+                use_variant = "b" if (contact.id or 0) % 2 == 1 else "a"
+            elif getattr(step, "subject_b", None) and getattr(step, "variant_winner", None) == "b":
+                use_variant = "b"
+            if use_variant == "b":
+                rendered_subject = interpolate_template(step.subject_b, data)
             rendered_body_text = interpolate_template(step.body_text, data)
             rendered_body_html = interpolate_template(step.body_html, data) if step.body_html else None
 
+            outbox_message_id = make_msgid(domain=_domain_from_email(mailbox.email))
             send_record = Send(
                 campaign_id=campaign_id,
                 step_id=step.id,
                 contact_id=contact.id,
                 mailbox_id=mailbox.id,
-                status="pending"
+                status="pending",
+                message_id=outbox_message_id,
+                variant_used=use_variant
             )
             db.add(send_record)
             await db.flush()
@@ -437,7 +459,8 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 body_text=rendered_body_text,
                 body_html=rendered_body_html,
                 send_id=send_record.id,
-                contact_id=contact.id
+                contact_id=contact.id,
+                message_id=outbox_message_id
             )
 
             # Classify the failure by SMTP semantics, not by substring

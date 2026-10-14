@@ -11,7 +11,11 @@ import io
 from app.database import get_db
 from app.models.business import Business
 from app.models.contact import Contact
+from app.models.send import Send
+from app.models.campaign import Campaign
+from app.models.campaign_step import CampaignStep
 from app.campaigns.sender import resolve_city
+from app.campaigns.suppression import is_suppressed, add_suppression
 from app.enricher.email_finder import calculate_lead_quality_score
 from app.dedupe.match import find_existing_business
 
@@ -576,3 +580,114 @@ async def get_lead_icebreaker(business_id: int, db: AsyncSession = Depends(get_d
         "business_name": business.name,
         **icebreaker
     }
+
+@router.get("/{business_id}/detail")
+async def get_lead_detail(business_id: int, db: AsyncSession = Depends(get_db)):
+    """Everything the Lead Database side-drawer needs in one round-trip.
+
+    Business + full contacts (verification detail, suppression state) + the
+    send timeline across every campaign that ever touched it.
+    """
+    business = await db.get(Business, business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    contacts = (await db.execute(
+        select(Contact).where(Contact.business_id == business_id)
+    )).scalars().all()
+    c_ids = [c.id for c in contacts]
+
+    contact_out = []
+    for c in contacts:
+        suppressed = await is_suppressed(db, c.email) if c.email else None
+        contact_out.append({
+            "id": c.id,
+            "first_name": c.first_name,
+            "last_name": c.last_name,
+            "title": c.title,
+            "email": c.email,
+            "phone": c.phone,
+            "whatsapp_link": c.whatsapp_link,
+            "social_links": c.social_links,
+            "is_verified": bool(c.is_verified),
+            "verification_status": c.verification_status,
+            "verification_sub_status": c.verification_sub_status,
+            "verification_confidence": c.verification_confidence,
+            "verification_detail": c.verification_detail,
+            "is_role_account": bool(c.is_role_account),
+            "is_free_email": bool(c.is_free_email),
+            "unsubscribed": bool(c.unsubscribed),
+            "suppressed": suppressed,
+            "source": c.source,
+        })
+
+    timeline = []
+    if c_ids:
+        rows = (await db.execute(
+            select(Send, Campaign, CampaignStep)
+            .outerjoin(Campaign, Campaign.id == Send.campaign_id)
+            .outerjoin(CampaignStep, CampaignStep.id == Send.step_id)
+            .where(Send.contact_id.in_(c_ids))
+            .order_by(Send.created_at.desc()).limit(100)
+        )).all()
+        for s, camp, step in rows:
+            contact = next((cc for cc in contacts if cc.id == s.contact_id), None)
+            timeline.append({
+                "send_id": s.id,
+                "campaign_id": s.campaign_id,
+                "campaign_name": camp.name if camp else None,
+                "step_subject": step.subject if step else None,
+                "status": s.status,
+                "opened": bool(s.opened),
+                "replied": bool(s.replied),
+                "reply_category": s.reply_category,
+                "variant_used": getattr(s, "variant_used", None),
+                "error_message": s.error_message,
+                "sent_at": s.sent_at.isoformat() if s.sent_at else None,
+                "contact_email": contact.email if contact else None,
+            })
+
+    maps_url = business.maps_url or (
+        f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote((business.name + ' ' + (business.address or '')).strip())}"
+    )
+    return {
+        "business": {
+            "id": business.id,
+            "name": business.name,
+            "industry": business.industry,
+            "phone": business.phone,
+            "website": business.website,
+            "address": business.address,
+            "rating": business.rating,
+            "reviews_count": business.reviews_count,
+            "maps_url": maps_url,
+        },
+        "contacts": contact_out,
+        "timeline": timeline,
+    }
+
+
+@router.post("/{business_id}/suppress")
+async def suppress_lead(business_id: int, db: AsyncSession = Depends(get_db)):
+    """Company-level do-not-contact: suppresses every email on this lead.
+
+    A "do not contact this company" request is per-company, not per-person —
+    so this loops all contacts, matching the poller's opt_out behaviour.
+    """
+    business = await db.get(Business, business_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    contacts = (await db.execute(
+        select(Contact).where(Contact.business_id == business_id)
+    )).scalars().all()
+    added = 0
+    for c in contacts:
+        if not c.email:
+            continue
+        if await add_suppression(db, c.email, "manual",
+                                 detail=f"suppressed via lead #{business_id}"):
+            added += 1
+        c.unsubscribed = True
+    await db.commit()
+    return {"business_id": business_id, "suppressed": added}
+

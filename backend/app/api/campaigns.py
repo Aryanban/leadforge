@@ -19,6 +19,9 @@ class StepCreate(BaseModel):
     body_text: str
     body_html: Optional[str] = None
     delay_days: int = 0
+    #: Optional A/B subject variant. While unset-or-winner-NULL the sequence
+    #: splits recipients evenly between subject and subject_b.
+    subject_b: Optional[str] = None
 
 class CampaignCreate(BaseModel):
     name: str
@@ -99,6 +102,7 @@ async def create_campaign(req: CampaignCreate, db: AsyncSession = Depends(get_db
             campaign_id=campaign.id,
             step_number=idx + 1,
             subject=step_data.subject,
+            subject_b=step_data.subject_b,
             body_text=step_data.body_text,
             body_html=step_data.body_html,
             delay_days=step_data.delay_days
@@ -245,6 +249,24 @@ async def launch_campaign(
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
+    # Same guard as the MCP launcher: a campaign must never mail the whole
+    # database. With an empty target set, execute_campaign_step falls back to
+    # legacy all-eligible behaviour, so launching a target-less campaign from
+    # the dashboard would email every contact in the workspace. Refuse instead.
+    steps = (await db.execute(
+        select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == campaign_id)
+    )).scalar() or 0
+    targets = (await db.execute(
+        select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
+    )).scalar() or 0
+    if steps == 0:
+        raise HTTPException(status_code=400, detail="Campaign has no sequence steps")
+    if targets == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Campaign has no recipients — add targets before launching",
+        )
+
     campaign.status = CampaignStatus.ACTIVE.value
     await db.commit()
 
@@ -384,3 +406,97 @@ async def india_warm_handoff(campaign_id: int, db: AsyncSession = Depends(get_db
     return {"campaign_id": campaign_id, "candidates": candidates,
             "note": "Advisory: LeadForge never auto-sends WhatsApp; open the "
                     "link and write a personal message."}
+
+#: Minimum sends per variant before an A/B winner may be declared.
+AB_MIN_SENDS_PER_VARIANT = 10
+
+
+def decide_ab_winner(a_sent: int, a_replied: int, b_sent: int, b_replied: int,
+                     *, min_sends: int = AB_MIN_SENDS_PER_VARIANT) -> Optional[str]:
+    """Reply-rate winner for an A/B subject test.
+
+    Returns "a", "b", or None (test still running). Ties stay undecided —
+    declaring a winner on a tie would flip the subject for no gain. Open rate
+    is deliberately NOT consulted: opens require the deliverability-killing
+    open-tracking pixel, so with tracking off open counts are all zero and
+    any open-based decision would be fiction.
+    """
+    if a_sent < min_sends or b_sent < min_sends:
+        return None
+    a_rate = a_replied / a_sent
+    b_rate = b_replied / b_sent
+    if b_rate == a_rate:
+        return None
+    return "b" if b_rate > a_rate else "a"
+
+
+@router.get("/{campaign_id}/step-stats")
+async def get_step_stats(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Per-step (and per-A/B-variant) performance for the sequence detail view.
+
+    Side effect, by design: when a still-running A/B test reaches the sample
+    threshold and a winner exists, it is finalised here AND after every send
+    batch, so both the reader and the sender converge on the same verdict
+    through decide_ab_winner.
+    """
+    campaign = await db.get(Campaign, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    steps = (await db.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == campaign_id)
+        .order_by(CampaignStep.step_number.asc())
+    )).scalars().all()
+
+    sends = (await db.execute(
+        select(Send).where(Send.campaign_id == campaign_id)
+    )).scalars().all()
+
+    by_step: Dict[int, List[Any]] = {}
+    for s in sends:
+        by_step.setdefault(s.step_id, []).append(s)
+
+    out = []
+    changed = False
+    for step in steps:
+        rows = [s for s in by_step.get(step.id, []) if getattr(s, "status", None) == "sent"]
+        a = [s for s in rows if (getattr(s, "variant_used", None) or "a") == "a"]
+        b = [s for s in rows if getattr(s, "variant_used", None) == "b"]
+        a_rep = sum(1 for s in a if s.replied)
+        b_rep = sum(1 for s in b if s.replied)
+
+        is_ab = bool(getattr(step, "subject_b", None))
+        winner = getattr(step, "variant_winner", None)
+        if is_ab and not winner:
+            winner = decide_ab_winner(len(a), a_rep, len(b), b_rep)
+            if winner:
+                step.variant_winner = winner
+                changed = True
+
+        def rate(n: int, d: int) -> float:
+            return round(n / d * 100, 1) if d else 0.0
+
+        variants = None
+        if is_ab:
+            variants = {
+                "a": {"sent": len(a), "replied": a_rep, "reply_rate": rate(a_rep, len(a))},
+                "b": {"sent": len(b), "replied": b_rep, "reply_rate": rate(b_rep, len(b))},
+                "winner": winner,
+            }
+
+        out.append({
+            "step_id": step.id,
+            "step_number": step.step_number,
+            "subject": step.subject,
+            "subject_b": getattr(step, "subject_b", None),
+            "sent": len(rows),
+            "replied": sum(1 for s in rows if s.replied),
+            "bounced": sum(1 for s in rows if getattr(s, "status", None) == "bounced"),
+            "failed": sum(1 for s in rows if getattr(s, "status", None) == "failed"),
+            "reply_rate": rate(sum(1 for s in rows if s.replied), len(rows)),
+            "variants": variants,
+        })
+    if changed:
+        await db.commit()
+    return {"campaign_id": campaign_id, "steps": out}
+

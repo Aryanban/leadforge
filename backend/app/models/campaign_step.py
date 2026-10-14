@@ -10,6 +10,13 @@ class CampaignStep(Base):
     campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"))
     step_number = Column(Integer)
     subject = Column(String)
+    #: Optional A/B variant of the subject line. While variant_winner is NULL,
+    #: recipients are split evenly (by contact id parity) between subject and
+    #: subject_b; once a winner is declared the loser is no longer sent.
+    subject_b = Column(String, nullable=True)
+    #: "a" | "b" once the A/B test has a statistically meaningful winner,
+    #: NULL otherwise (including for steps that are not A/B tests).
+    variant_winner = Column(String, nullable=True)
     body_text = Column(Text)
     body_html = Column(Text, nullable=True)
     delay_days = Column(Integer, default=0) # Days to wait after previous step

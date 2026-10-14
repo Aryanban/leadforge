@@ -17,6 +17,13 @@ class Mailbox(Base):
     sent_today = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
 
+    #: Inbound (IMAP) settings for reply detection. imap_host defaults to the
+    #: smtp host with the smtp->imap swap (smtp.gmail.com -> imap.gmail.com)
+    #: when not set explicitly; NULL disables polling for this mailbox.
+    imap_host = Column(String, nullable=True)
+    imap_port = Column(Integer, default=993)
+    imap_last_polled_at = Column(DateTime(timezone=True), nullable=True)
+
     #: Last computed reputation score in [0, 1]; refreshed whenever a
     #: campaign step runs. Human review resets it via the dashboard.
     health_score = Column(Float, default=1.0)

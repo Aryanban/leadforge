@@ -102,3 +102,34 @@ async def delete_mailbox(mailbox_id: int, db: AsyncSession = Depends(get_db)):
     await db.execute(stmt)
     await db.commit()
     return {"status": "deleted", "id": mailbox_id}
+
+
+class IMAPUpdate(BaseModel):
+    imap_host: Optional[str] = None
+    imap_port: Optional[int] = None
+
+
+@router.post("/{mailbox_id}/imap")
+async def update_imap(mailbox_id: int, req: IMAPUpdate, db: AsyncSession = Depends(get_db)):
+    """Sets (or clears) the inbound IMAP host for reply detection.
+
+    An empty imap_host enables the smtp->imap auto-swap on the next poll;
+    pass imap_host explicitly when the provider's IMAP host differs.
+    """
+    mailbox = await db.get(Mailbox, mailbox_id)
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Mailbox not found")
+    if req.imap_host is not None:
+        mailbox.imap_host = req.imap_host.strip() or None
+    if req.imap_port is not None:
+        mailbox.imap_port = req.imap_port
+    await db.commit()
+    return {"id": mailbox_id, "imap_host": mailbox.imap_host, "imap_port": mailbox.imap_port}
+
+
+@router.post("/{mailbox_id}/poll-replies")
+async def poll_replies_now(mailbox_id: int, db: AsyncSession = Depends(get_db)):
+    """Triggers an immediate IMAP sweep for one mailbox (the Poll Now button)."""
+    from app.campaigns.reply_poller import poll_mailbox
+    result = await poll_mailbox(mailbox_id)
+    return {"mailbox_id": mailbox_id, **result}
