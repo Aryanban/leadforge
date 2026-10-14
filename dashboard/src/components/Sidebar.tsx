@@ -15,14 +15,17 @@ import {
   PanelLeftOpen,
   MailCheck,
   BookOpen,
+  Inbox,
+  Building2,
+  Activity,
 } from "lucide-react";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
 type NavGroup = { title: string; items: NavItem[] };
 
 /**
- * Apollo-style navigation: grouped sections (Engage / Prospect / Setup)
- * rather than a flat list, so someone switching from Apollo finds their
+ * Apollo-style navigation: grouped sections (Engage / Prospect / Deliverability
+ * / Setup) rather than a flat list, so someone switching from Apollo finds their
  * bearings immediately. Collapsible rail for focus mode.
  */
 const NAV_GROUPS: NavGroup[] = [
@@ -31,7 +34,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/sequences", label: "Sequences", icon: Send },
-      { href: "/campaigns", label: "Campaigns", icon: MailCheck },
+      { href: "/inbox", label: "Inbox", icon: Inbox },
     ],
   },
   {
@@ -40,7 +43,12 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/find", label: "AI Lead Finder", icon: Target },
       { href: "/scrape", label: "Scrape Leads", icon: Search },
       { href: "/leads", label: "Lead Database", icon: Users },
+      { href: "/companies", label: "Companies", icon: Building2 },
     ],
+  },
+  {
+    title: "Deliverability",
+    items: [{ href: "/email-health", label: "Email Health", icon: Activity }],
   },
   {
     title: "Setup",

@@ -1,0 +1,161 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { Activity, Loader2, RefreshCw, Mail, AlertTriangle, ShieldCheck } from "lucide-react";
+import { api, MailboxItem } from "@/lib/api";
+
+/**
+ * Email Health — Apollo's Email Health tab, self-hosted edition.
+ * Every number is real engine state: rolling 24h budgets, warmup ramps
+ * (new mailboxes start at 10/day, ramp over 14 days), reputation scores,
+ * and health-paused mailboxes (held out of rotation until reviewed).
+ */
+export default function EmailHealthPage() {
+  const [mailboxes, setMailboxes] = useState<MailboxItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [pollingId, setPollingId] = useState<number | null>(null);
+  const [pollMessage, setPollMessage] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setMailboxes(await api.getMailboxes());
+    } catch {
+      setMailboxes([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const pollNow = async (id: number) => {
+    setPollingId(id);
+    try {
+      const res = await api.pollReplies(id);
+      setPollMessage(
+        res.error
+          ? `Poll failed: ${res.error}`
+          : `Scanned ${res.seen ?? 0} · ${res.matched ?? 0} matched · ${res.replies ?? 0} new repl${res.replies === 1 ? "y" : "ies"}${res.opt_outs ? ` · ${res.opt_outs} opt-out(s) suppressed` : ""}`,
+      );
+    } catch (e: any) {
+      setPollMessage(e.message || "Poll failed.");
+    } finally {
+      setPollingId(null);
+    }
+  };
+
+  const rampStage = (mb: MailboxItem) => {
+    const created = mb.created_at ? new Date(mb.created_at) : null;
+    if (!created) return "unknown age";
+    const days = Math.max(0, Math.floor((Date.now() - created.getTime()) / 86400000));
+    return days < 14 ? `ramping · day ${days}/14` : "fully warmed";
+  };
+
+  const healthPct = (mb: MailboxItem) => Math.round((mb.health_score ?? 1) * 100);
+  const healthColor = (pct: number) =>
+    pct >= 90 ? "bg-emerald-500" : pct >= 75 ? "bg-amber-400" : "bg-red-500";
+
+  return (
+    <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Email Health</h1>
+        <p className="text-sm text-slate-500 mt-0.5">
+          Mailbox reputation, warmup progress, and daily budgets. Health-paused mailboxes are held
+          out of rotation until reviewed.
+        </p>
+      </div>
+
+      {pollMessage && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-medium text-blue-800">
+          {pollMessage}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="text-center py-12 text-slate-400">
+          <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
+          Loading mailboxes...
+        </div>
+      ) : mailboxes.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-12 text-center">
+          <Mail className="w-8 h-8 text-slate-300 mx-auto mb-3" />
+          <h3 className="text-sm font-bold text-slate-700">No mailboxes yet</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Add your first sending mailbox in{" "}
+            <a href="/settings" className="text-blue-600 font-semibold hover:underline">Settings</a>.
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {mailboxes.map((mb) => {
+            const pct = healthPct(mb);
+            const used = mb.sent_today ?? 0;
+            const limit = mb.daily_limit ?? 50;
+            const usedPct = Math.min(100, Math.round((used / Math.max(1, limit)) * 100));
+            return (
+              <div key={mb.id} className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold text-slate-900 truncate">{mb.email}</p>
+                    <p className="text-[11px] text-slate-500">{mb.smtp_host}:{mb.smtp_port}</p>
+                  </div>
+                  {mb.health_paused ? (
+                    <span className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-red-50 border border-red-200 px-2 py-0.5 text-[11px] font-bold text-red-700">
+                      <AlertTriangle className="w-3 h-3" /> health-paused
+                    </span>
+                  ) : mb.is_active ? (
+                    <span className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[11px] font-bold text-emerald-700">
+                      <ShieldCheck className="w-3 h-3" /> active
+                    </span>
+                  ) : (
+                    <span className="shrink-0 rounded-lg bg-slate-50 border border-slate-200 px-2 py-0.5 text-[11px] font-bold text-slate-500">
+                      inactive
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1.5">
+                    <span className="font-semibold flex items-center gap-1">
+                      <Activity className="w-3 h-3" /> Reputation
+                    </span>
+                    <span className="tabular-nums font-bold text-slate-700">{pct}%</span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div className={`h-full rounded-full ${healthColor(pct)}`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1.5">
+                    <span className="font-semibold">Daily budget</span>
+                    <span className="tabular-nums">
+                      <span className="font-bold text-slate-700">{used}</span> / {limit}
+                    </span>
+                  </div>
+                  <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${usedPct}%` }} />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-[11px] text-slate-500 capitalize">{rampStage(mb)}</span>
+                  <button
+                    onClick={() => pollNow(mb.id)}
+                    disabled={pollingId === mb.id}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-50"
+                  >
+                    {pollingId === mb.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                    Poll replies
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

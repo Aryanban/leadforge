@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { 
   Users, 
   Search, 
@@ -28,9 +28,12 @@ import {
   Check,
   FileText,
   AlertTriangle,
-  Send
+  Send,
+  X,
+  ShieldAlert,
+  BookmarkPlus
 } from "lucide-react";
-import { api, LeadItem, CampaignItem } from "@/lib/api";
+import { api, LeadItem, CampaignItem, LeadDetailResponse, SavedView } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
 
 export default function LeadsPage() {
@@ -81,6 +84,14 @@ export default function LeadsPage() {
   const [addingTo, setAddingTo] = useState<number | null>(null);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
 
+  // Apollo-style detail drawer + saved views (dynamic lists).
+  const [drawerLeadId, setDrawerLeadId] = useState<number | null>(null);
+  const [drawer, setDrawer] = useState<LeadDetailResponse | null>(null);
+  const [drawerLoading, setDrawerLoading] = useState(false);
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [viewName, setViewName] = useState("");
+  const [viewMessage, setViewMessage] = useState<string | null>(null);
+
   // A contact id is what a sequence targets; a lead without one can't be added.
   const contactIdFor = (lead: LeadItem): number | null =>
     lead.primary_contact?.id ?? lead.contacts?.[0]?.id ?? null;
@@ -100,13 +111,88 @@ export default function LeadsPage() {
     });
   };
 
-  // Row-level select, but ignore clicks that land on a link/button/input so
-  // navigation and actions still work without toggling selection.
+  // Row click opens the detail drawer (selection stays on the checkbox so
+  // link/button clicks and bulk selection keep working exactly as before).
   const onRowClick = (e: React.MouseEvent, lead: LeadItem) => {
     const el = e.target as HTMLElement;
     if (el.closest("a, button, input, label, select, textarea")) return;
-    toggleRow(lead);
+    openDrawer(lead.id);
   };
+
+  const openDrawer = async (businessId: number) => {
+    setDrawerLeadId(businessId);
+    setDrawerLoading(true);
+    setDrawer(null);
+    setViewMessage(null);
+    try {
+      setDrawer(await api.getLeadDetail(businessId));
+    } catch {
+      setDrawer(null);
+    } finally {
+      setDrawerLoading(false);
+    }
+  };
+
+  const suppressDrawerLead = async () => {
+    if (drawerLeadId === null) return;
+    try {
+      const res = await api.suppressLead(drawerLeadId);
+      setViewMessage(`Company suppressed — ${res.suppressed} email(s) blocked workspace-wide.`);
+      setDrawer(await api.getLeadDetail(drawerLeadId));
+    } catch {
+      setViewMessage("Could not suppress this lead.");
+    }
+  };
+
+  // Saved views (Apollo dynamic lists): persist the current filter shape,
+  // re-apply it in one click.
+  const loadSavedViews = useCallback(async () => {
+    try {
+      setSavedViews(await api.listSavedViews());
+    } catch {
+      setSavedViews([]);
+    }
+  }, []);
+
+  const currentFilters = () => ({
+    ...(search ? { search } : {}),
+    ...(industryFilter ? { industry: industryFilter } : {}),
+    ...(hasEmailFilter !== "all" ? { has_email: hasEmailFilter === "true" } : {}),
+  });
+
+  const applyView = (v: SavedView) => {
+    const f = v.filters as Record<string, unknown>;
+    setSearch(typeof f.search === "string" ? f.search : "");
+    setIndustryFilter(typeof f.industry === "string" ? f.industry : "");
+    setHasEmailFilter(typeof f.has_email === "boolean" ? String(f.has_email) : "all");
+    setPage(1);
+  };
+
+  const saveCurrentView = async () => {
+    if (!viewName.trim()) return;
+    try {
+      const v = await api.saveView(viewName.trim(), currentFilters());
+      setSavedViews((prev) => [v, ...prev]);
+      setViewMessage(`Saved view "${v.name}".`);
+      setViewName("");
+      setTimeout(() => setViewMessage(null), 4000);
+    } catch (e: any) {
+      setViewMessage(e.message || "Could not save view.");
+    }
+  };
+
+  const deleteView = async (id: number) => {
+    try {
+      await api.deleteSavedView(id);
+      setSavedViews((prev) => prev.filter((v) => v.id !== id));
+    } catch {
+      /* ignore — the row is stale either way */
+    }
+  };
+
+  useEffect(() => {
+    loadSavedViews();
+  }, [loadSavedViews]);
 
   const toggleAll = () => {
     setSelected((prev) =>
@@ -422,6 +508,48 @@ export default function LeadsPage() {
             </button>
           </div>
         </form>
+      </div>
+
+      {/* Saved views (Apollo dynamic lists) + inline save */}
+      <div className="flex items-center gap-2 flex-wrap -mt-2">
+        {savedViews.map((v) => (
+          <span
+            key={v.id}
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white pl-2.5 pr-1 py-1"
+          >
+            <button
+              onClick={() => applyView(v)}
+              className="text-[11px] font-semibold text-slate-600 hover:text-blue-600 transition-colors"
+            >
+              {v.name}
+            </button>
+            <button
+              onClick={() => deleteView(v.id)}
+              className="p-0.5 rounded text-slate-300 hover:text-red-500"
+              aria-label={`Delete view ${v.name}`}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </span>
+        ))}
+        <span className="inline-flex items-center gap-1">
+          <input
+            value={viewName}
+            onChange={(e) => setViewName(e.target.value)}
+            placeholder="Save current filters as view…"
+            className="h-7 w-52 rounded-lg border border-slate-200 bg-white px-2 text-[11px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-300"
+          />
+          <button
+            onClick={saveCurrentView}
+            disabled={!viewName.trim()}
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-40 transition-colors"
+          >
+            <BookmarkPlus className="w-3 h-3" /> Save
+          </button>
+        </span>
+        {viewMessage && !drawerLeadId && (
+          <span className="text-[11px] font-medium text-blue-700">{viewMessage}</span>
+        )}
       </div>
 
       {/* Bulk Action Bar — appears when rows are selected (Apollo-style) */}
@@ -1334,6 +1462,161 @@ export default function LeadsPage() {
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lead detail drawer — Apollo's contact/account side panel */}
+      {drawerLeadId !== null && (
+        <div className="fixed inset-0 z-40 flex justify-end">
+          <div className="absolute inset-0 bg-slate-900/30" onClick={() => setDrawerLeadId(null)} />
+          <div className="relative w-full max-w-lg h-full bg-white border-l border-slate-200 shadow-xl flex flex-col">
+            <div className="h-14 shrink-0 border-b border-slate-200 flex items-center gap-3 px-5">
+              <h2 className="text-sm font-bold text-slate-900 truncate">
+                {drawer?.business.name ?? `Lead #${drawerLeadId}`}
+              </h2>
+              <button
+                onClick={() => setDrawerLeadId(null)}
+                aria-label="Close"
+                className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              {drawerLoading ? (
+                <div className="text-center py-12 text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
+                  Loading lead...
+                </div>
+              ) : !drawer ? (
+                <p className="text-sm text-slate-500">Could not load this lead.</p>
+              ) : (
+                <>
+                  {viewMessage && (
+                    <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-medium text-blue-800">
+                      {viewMessage}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {drawer.business.phone && (
+                      <a
+                        href={`tel:${drawer.business.phone}`}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                      >
+                        <Phone className="w-3 h-3" /> {drawer.business.phone}
+                      </a>
+                    )}
+                    {drawer.business.website && (
+                      <a
+                        href={drawer.business.website}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                      >
+                        <Globe className="w-3 h-3" /> Website
+                      </a>
+                    )}
+                    <a
+                      href={drawer.business.maps_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                    >
+                      <MapPin className="w-3 h-3" /> Maps
+                    </a>
+                    <button
+                      onClick={suppressDrawerLead}
+                      className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50"
+                    >
+                      <ShieldAlert className="w-3 h-3" /> Suppress company
+                    </button>
+                  </div>
+
+                  <section>
+                    <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">
+                      Contacts ({drawer.contacts.length})
+                    </h3>
+                    <div className="space-y-2">
+                      {drawer.contacts.length === 0 && (
+                        <p className="text-xs text-slate-400">No contacts — enrich this lead first.</p>
+                      )}
+                      {drawer.contacts.map((c) => (
+                        <div key={c.id} className="rounded-xl border border-slate-200 p-3.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[13px] font-semibold text-slate-900">
+                              {[c.first_name, c.last_name].filter(Boolean).join(" ") || "Unnamed"}
+                            </span>
+                            {c.is_verified && (
+                              <span className="rounded-lg bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                                verified
+                              </span>
+                            )}
+                            {c.is_role_account && (
+                              <span className="rounded-lg bg-slate-50 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                                role
+                              </span>
+                            )}
+                            {c.suppressed && (
+                              <span className="rounded-lg bg-red-50 border border-red-200 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
+                                suppressed ({c.suppressed})
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1.5 space-y-0.5 text-[11px] text-slate-500">
+                            {c.email && <p className="font-mono">{c.email}</p>}
+                            {c.title && <p>{c.title}</p>}
+                            {c.verification_sub_status && (
+                              <p className="text-slate-400">
+                                verification: {c.verification_sub_status}
+                                {c.verification_confidence !== null
+                                  ? ` · confidence ${Math.round(c.verification_confidence * 100)}%`
+                                  : ""}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section>
+                    <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2">
+                      Send history ({drawer.timeline.length})
+                    </h3>
+                    <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-64 overflow-y-auto">
+                      {drawer.timeline.length === 0 && (
+                        <p className="text-xs text-slate-400 p-3">No sends yet.</p>
+                      )}
+                      {drawer.timeline.map((t) => (
+                        <div key={t.send_id} className="px-3.5 py-2.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[12px] font-semibold text-slate-800 truncate">
+                              {t.step_subject || t.campaign_name || `Campaign #${t.campaign_id}`}
+                            </span>
+                            <span className="rounded-lg bg-slate-50 border border-slate-200 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                              {t.status}
+                            </span>
+                            {t.replied && (
+                              <span className="rounded-lg bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                                replied{t.reply_category ? ` · ${t.reply_category.replace("_", " ")}` : ""}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            {t.contact_email}
+                            {t.sent_at ? ` · ${new Date(t.sent_at).toLocaleString()}` : ""}
+                            {t.error_message ? ` · ${t.error_message}` : ""}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </>
+              )}
             </div>
           </div>
         </div>

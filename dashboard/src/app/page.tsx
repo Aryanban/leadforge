@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { 
   Users, 
@@ -15,48 +15,57 @@ import {
   Sparkles,
   Phone,
   MapPin,
-  ExternalLink
+  ExternalLink,
+  ListChecks,
+  AlertTriangle,
+  Info
 } from "lucide-react";
-import { api, DashboardStats } from "@/lib/api";
+import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Legend
+} from "recharts";
+import { api, DashboardStats, TaskItem, TimeSeriesResponse } from "@/lib/api";
 import { IndiaReadiness } from "@/components/IndiaKit";
 
 export default function Home() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [series, setSeries] = useState<TimeSeriesResponse | null>(null);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await api.getStats();
+      // Real data only — an offline/empty backend shows empty states, never
+      // fake demo numbers (old behaviour lied to the operator about their
+      // actual outreach volume).
+      const [data, ts, taskRes] = await Promise.all([
+        api.getStats(),
+        api.getTimeseries(30),
+        api.getTasks(),
+      ]);
       setStats(data);
+      setSeries(ts);
+      setTasks(taskRes.tasks ?? []);
     } catch (err) {
-      console.warn("Could not fetch real-time stats, using placeholder/cached data:", err);
-      // Fallback demo state so page always renders beautifully
-      setStats({
-        total_leads: 6,
-        total_contacts: 6,
-        verified_contacts: 6,
-        emails_sent: 24,
-        emails_opened: 11,
-        open_rate: 45.8,
-        active_campaigns: 1,
-        recent_leads: [
-          { id: 1, name: "Balaji Properties & Developers", industry: "Real Estate Agency", phone: "+91 98112 34567", email: "rajesh@balajiproperties.example.in", is_verified: true, rating: 4.8, created_at: new Date().toISOString() },
-          { id: 2, name: "Aggarwal Real Estate & Builders", industry: "Property Consultant", phone: "+91 98731 22334", email: "vikram@aggarwalestates.example.in", is_verified: true, rating: 4.9, created_at: new Date().toISOString() },
-          { id: 3, name: "Gupta & Sons Property Advisors", industry: "Real Estate Agency", phone: "+91 99100 44556", email: "manoj@guptaproperties.example.in", is_verified: true, rating: 4.7, created_at: new Date().toISOString() },
-        ],
-        recent_jobs: [
-          { id: 1, query: "Real Estate Agents & Property Dealers Rohini Delhi", status: "completed", total_found: 6, leads_saved: 6, created_at: new Date().toISOString() }
-        ]
-      });
+      console.warn("Could not fetch dashboard data:", err);
+      setStats(null);
+      setSeries(null);
+      setTasks([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
 
   return (
     <div className="space-y-8 max-w-6xl mx-auto">
@@ -91,6 +100,70 @@ export default function Home() {
 
       {/* India readiness: auth, quiet hours, festival hooks — advisory only */}
       <IndiaReadiness />
+
+      {/* Tasks — Apollo home's actionable checklist, computed from real state */}
+      {tasks.length > 0 && (
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+            <ListChecks className="w-3.5 h-3.5" /> Needs attention
+          </h2>
+          <div className="space-y-1.5">
+            {tasks.map((t) => (
+              <Link
+                key={t.key}
+                href={t.href}
+                className="flex items-center gap-2.5 rounded-xl px-3 py-2 hover:bg-slate-50 transition-colors group"
+              >
+                {t.severity === "high" ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                ) : (
+                  <Info className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                )}
+                <span className="text-[13px] text-slate-700 flex-1 truncate">{t.label}</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-blue-500 shrink-0" />
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 30-day activity chart — real per-day send activity */}
+      {series && series.totals.sent > 0 && (
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Outreach activity · last {series.period_days} days
+            </h2>
+            <div className="flex items-center gap-3 text-[11px] text-slate-500">
+              <span><span className="font-bold text-slate-700">{series.totals.sent}</span> sent</span>
+              <span><span className="font-bold text-slate-700">{series.totals.replied}</span> replied</span>
+              <span className="font-bold text-slate-700">{series.totals.reply_rate}% reply rate</span>
+            </div>
+          </div>
+          <div className="h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={series.days} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: "#94a3b8" }}
+                  tickFormatter={(v: string) => v.slice(5)}
+                  interval="preserveStartEnd"
+                />
+                <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} allowDecimals={false} />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 12, border: "1px solid #e2e8f0" }}
+                  labelStyle={{ color: "#64748b" }}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="sent" stroke="#2563eb" strokeWidth={2} dot={false} name="Sent" />
+                <Line type="monotone" dataKey="replied" stroke="#059669" strokeWidth={2} dot={false} name="Replied" />
+                <Line type="monotone" dataKey="bounced" stroke="#dc2626" strokeWidth={2} dot={false} name="Bounced" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

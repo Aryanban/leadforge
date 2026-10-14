@@ -1,5 +1,135 @@
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1').replace(/\/$/, '');
 
+// --- Apollo-parity types -----------------------------------------------------
+
+export interface TimeSeriesPoint {
+  date: string;
+  sent: number;
+  opened: number;
+  replied: number;
+  bounced: number;
+}
+
+export interface TimeSeriesResponse {
+  days: TimeSeriesPoint[];
+  totals: { sent: number; opened: number; replied: number; bounced: number; reply_rate: number; open_rate: number };
+  period_days: number;
+}
+
+export interface TaskItem {
+  key: string;
+  label: string;
+  count: number;
+  severity: "high" | "medium" | "info";
+  href: string;
+}
+
+export interface InboxItem {
+  send_id: number;
+  category: "interested" | "not_interested" | "opt_out" | "out_of_office" | "other";
+  replied_at: string | null;
+  reply_body: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  business_name: string | null;
+  campaign_id: number;
+  campaign_name: string | null;
+  step_subject: string | null;
+  mailbox_id: number | null;
+}
+
+export interface InboxResponse {
+  items: InboxItem[];
+  counts: Record<string, number>;
+}
+
+export interface StepStat {
+  step_id: number;
+  step_number: number;
+  subject: string;
+  subject_b: string | null;
+  sent: number;
+  replied: number;
+  bounced: number;
+  failed: number;
+  reply_rate: number;
+  variants: null | {
+    a: { sent: number; replied: number; reply_rate: number };
+    b: { sent: number; replied: number; reply_rate: number };
+    winner: "a" | "b" | null;
+  };
+}
+
+export interface LeadContactDetail {
+  id: number;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+  whatsapp_link: string | null;
+  social_links: Record<string, string> | null;
+  is_verified: boolean;
+  verification_status: string | null;
+  verification_sub_status: string | null;
+  verification_confidence: number | null;
+  verification_detail: string | null;
+  is_role_account: boolean;
+  is_free_email: boolean;
+  unsubscribed: boolean;
+  suppressed: string | null;
+  source: string | null;
+}
+
+export interface LeadTimelineEntry {
+  send_id: number;
+  campaign_id: number;
+  campaign_name: string | null;
+  step_subject: string | null;
+  status: string;
+  opened: boolean;
+  replied: boolean;
+  reply_category: string | null;
+  variant_used: string | null;
+  error_message: string | null;
+  sent_at: string | null;
+  contact_email: string | null;
+}
+
+export interface LeadDetailResponse {
+  business: {
+    id: number;
+    name: string;
+    industry: string | null;
+    phone: string | null;
+    website: string | null;
+    address: string | null;
+    rating: number | null;
+    reviews_count: number | null;
+    maps_url: string;
+  };
+  contacts: LeadContactDetail[];
+  timeline: LeadTimelineEntry[];
+}
+
+export interface SavedView {
+  id: number;
+  name: string;
+  filters: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export interface SuppressionEntry {
+  id: number;
+  identifier: string;
+  reason: string;
+  detail: string | null;
+  is_domain: boolean;
+  active: boolean;
+  expires_at: string | null;
+  created_at: string | null;
+}
+
 export interface DashboardStats {
   total_leads: number;
   total_contacts: number;
@@ -394,4 +524,43 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ numbers }),
     }),
+
+  // --- Apollo parity: analytics, tasks, inbox, saved lists, suppression ----
+  getTimeseries: (days = 30) =>
+    request<TimeSeriesResponse>(`/analytics/timeseries?days=${days}`),
+  getTasks: () => request<{ tasks: TaskItem[] }>("/analytics/tasks"),
+  listInbox: (category?: string) =>
+    request<InboxResponse>(`/inbox${category ? `?category=${encodeURIComponent(category)}` : ""}`),
+  setReplyCategory: (sendId: number, category: string) =>
+    request<{ send_id: number; category: string }>(`/inbox/${sendId}/category`, {
+      method: "POST",
+      body: JSON.stringify({ category }),
+    }),
+  getStepStats: (campaignId: number) =>
+    request<{ campaign_id: number; steps: StepStat[] }>(`/campaigns/${campaignId}/step-stats`),
+  getLeadDetail: (businessId: number) => request<LeadDetailResponse>(`/leads/${businessId}/detail`),
+  suppressLead: (businessId: number) =>
+    request<{ business_id: number; suppressed: number }>(`/leads/${businessId}/suppress`, { method: "POST" }),
+  listSavedViews: () => request<SavedView[]>(`/lists`),
+  saveView: (name: string, filters: Record<string, unknown>) =>
+    request<SavedView>("/lists", { method: "POST", body: JSON.stringify({ name, filters }) }),
+  deleteSavedView: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/lists/${id}`, { method: "DELETE" }),
+  listSuppression: (activeOnly = false) =>
+    request<{ items: SuppressionEntry[]; total: number }>(`/suppression${activeOnly ? "?active_only=true" : ""}`),
+  addSuppression: (data: { identifier: string; reason?: string; detail?: string; domain_wide?: boolean }) =>
+    request<{ added: boolean; identifier: string; reason: string }>("/suppression", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateMailboxImap: (id: number, imap_host: string | null, imap_port?: number) =>
+    request<{ id: number; imap_host: string | null; imap_port: number }>(`/mailboxes/${id}/imap`, {
+      method: "POST",
+      body: JSON.stringify({ imap_host, imap_port }),
+    }),
+  pollReplies: (mailboxId: number) =>
+    request<{ mailbox_id: number; seen?: number; matched?: number; replies?: number; opt_outs?: number; error?: string }>(
+      `/mailboxes/${mailboxId}/poll-replies`,
+      { method: "POST" },
+    ),
 };

@@ -1,23 +1,21 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 import {
   Send,
   Plus,
+  Loader2,
+  Save,
+  Eye,
   Trash2,
   Clock,
-  Mail,
-  Sparkles,
-  Save,
-  Loader2,
-  Eye,
   Users,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, CampaignItem } from "@/lib/api";
+import { SequenceDetail } from "@/components/SequenceDetail";
 import { FestivalHook } from "@/components/IndiaKit";
 
-type Step = { subject: string; body_text: string; delay_days: number };
+type Step = { subject: string; subject_b: string; body_text: string; delay_days: number };
 
 const VARIABLES = [
   "{{business_name}}",
@@ -28,30 +26,66 @@ const VARIABLES = [
   "{{ai_icebreaker}}",
 ];
 
+const STATUS_TABS = [
+  { key: "all", label: "All" },
+  { key: "active", label: "Active" },
+  { key: "paused", label: "Paused" },
+  { key: "draft", label: "Draft" },
+  { key: "completed", label: "Completed" },
+];
+
+const STATUS_STYLE: Record<string, string> = {
+  active: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  paused: "bg-amber-50 text-amber-700 border-amber-200",
+  draft: "bg-slate-50 text-slate-600 border-slate-200",
+  completed: "bg-blue-50 text-blue-700 border-blue-200",
+};
+
 /**
- * Sequence builder — Apollo's step timeline in miniature.
+ * Sequences — the Apollo "Sequences" surface in one page.
  *
- * Apollo's defining pattern is a vertical list of email steps separated by
- * "wait N days" connectors. We reproduce that shape so the mental model
- * transfers, but every step is plain text you own (no token limits, no
- * per-send pricing).
+ * Previously split across /campaigns (list + detail) and /sequences (builder
+ * only), which confused the mental model. Now: a stat-tabbed table (Apollo's
+ * status tabs) where a row opens the detail slide-over, and "New Sequence"
+ * opens the step builder (Apollo's vertical timeline: steps separated by
+ * "wait N days" connectors). Every step is plain text you own.
  */
 export default function SequencesPage() {
-  const router = useRouter();
+  const [campaigns, setCampaigns] = useState<CampaignItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("all");
+  const [detailId, setDetailId] = useState<number | null>(null);
+
+  // Builder state
+  const [builderOpen, setBuilderOpen] = useState(false);
   const [name, setName] = useState("");
   const [steps, setSteps] = useState<Step[]>([
-    { subject: "Quick question about {{business_name}}", body_text: "", delay_days: 0 },
+    { subject: "Quick question about {{business_name}}", subject_b: "", body_text: "", delay_days: 0 },
   ]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [previewIdx, setPreviewIdx] = useState<number | null>(null);
   const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null);
 
+  const load = useCallback(async () => {
+    try {
+      setCampaigns(await api.getCampaigns());
+    } catch {
+      setCampaigns([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
   const updateStep = (idx: number, patch: Partial<Step>) =>
     setSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
 
   const addStep = () =>
-    setSteps((prev) => [...prev, { subject: "", body_text: "", delay_days: 3 }]);
+    setSteps((prev) => [...prev, { subject: "", subject_b: "", body_text: "", delay_days: 3 }]);
 
   const removeStep = (idx: number) =>
     setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
@@ -72,191 +106,316 @@ export default function SequencesPage() {
   };
 
   const save = async () => {
-    if (!name.trim()) {
-      setError("Give the sequence a name.");
-      return;
-    }
-    if (steps.some((s) => !s.subject.trim() || !s.body_text.trim())) {
-      setError("Every step needs a subject and a body.");
-      return;
-    }
+    setSaving(true);
+    setError(null);
     try {
-      setSaving(true);
-      setError(null);
-      await api.createCampaign({ name: name.trim(), steps });
-      router.push("/campaigns");
+      await api.createCampaign({
+        name: name.trim() || `Sequence ${new Date().toLocaleDateString()}`,
+        steps: steps.map((s) => ({
+          subject: s.subject,
+          subject_b: s.subject_b.trim() || undefined,
+          body_text: s.body_text,
+          delay_days: s.delay_days,
+        })),
+      });
+      setBuilderOpen(false);
+      setName("");
+      setSteps([{ subject: "Quick question about {{business_name}}", subject_b: "", body_text: "", delay_days: 0 }]);
+      await load();
     } catch (e: any) {
-      setError(e.message || "Could not save the sequence.");
+      setError(e.message || "Could not save sequence.");
     } finally {
       setSaving(false);
     }
   };
 
+  const filtered = campaigns.filter((c) => tab === "all" || c.status === tab);
+  const tabCount = (key: string) =>
+    key === "all" ? campaigns.length : campaigns.filter((c) => c.status === key).length;
+
   return (
-    <div className="space-y-6 max-w-3xl mx-auto">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+    <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">New Sequence</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Sequences</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Build a multi-step follow-up. Each step sends only if the lead hasn&apos;t
-            replied — replies and bounces stop the sequence automatically.
+            Multi-step cold outreach. Click a sequence to launch, pause, or inspect performance.
           </p>
         </div>
         <button
-          onClick={save}
-          disabled={saving}
-          className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold h-9 px-4 shadow-xs"
+          onClick={() => setBuilderOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 text-white px-4 py-2.5 text-sm font-semibold hover:bg-blue-700 transition-colors shadow-xs"
         >
-          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-          Save Sequence
+          <Plus className="w-4 h-4" /> New Sequence
         </button>
       </div>
 
-      {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-800">
-          {error}
-        </div>
-      )}
+      <FestivalHook />
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-        <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-          Sequence name
-        </label>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Rohini Realtors — 3-step intro"
-          className="mt-1.5 w-full h-10 px-3.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-        />
-      </div>
-
-{/* Step timeline */}
-      <div className="space-y-1">
-        {steps.map((step, idx) => (
-          <div key={idx}>
-            {/* Wait connector between steps (Apollo's signature) */}
-            {idx > 0 && (
-              <div className="flex items-center gap-2 py-2.5 pl-1">
-                <div className="w-7 flex justify-center">
-                  <Clock className="w-4 h-4 text-slate-300" />
-                </div>
-                <span className="text-[11px] font-semibold text-slate-500">Wait</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={step.delay_days}
-                  onChange={(e) => updateStep(idx, { delay_days: Number(e.target.value) })}
-                  className="w-16 h-7 px-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                />
-                <span className="text-[11px] font-semibold text-slate-500">
-                  day(s) after the previous email
-                </span>
-              </div>
-            )}
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-blue-50 text-blue-700 text-[11px] font-bold">
-                    {idx + 1}
-                  </span>
-                  <span className="text-[13px] font-bold text-slate-800">Email step {idx + 1}</span>
-                  {idx === 0 && (
-                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
-                      starts the sequence
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => doPreview(idx)}
-                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-blue-700 px-2 py-1 rounded-md hover:bg-slate-50"
-                  >
-                    <Eye className="w-3.5 h-3.5" /> Preview
-                  </button>
-                  {steps.length > 1 && (
-                    <button
-                      onClick={() => removeStep(idx)}
-                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-400 hover:text-red-600 px-2 py-1 rounded-md hover:bg-red-50"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> Remove
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <input
-                value={step.subject}
-                onChange={(e) => updateStep(idx, { subject: e.target.value })}
-                placeholder="Subject line"
-                className="w-full h-10 px-3.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-              />
-
-              <textarea
-                value={step.body_text}
-                onChange={(e) => updateStep(idx, { body_text: e.target.value })}
-                placeholder={"Hi {{first_name}},\n\nSaw {{business_name}} in {{city}}…"}
-                rows={7}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-[13px] leading-relaxed text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 resize-y"
-              />
-
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-0.5">
-                  + insert
-                </span>
-                {VARIABLES.map((v) => (
-                  <button
-                    key={v}
-                    onClick={() => insertVar(idx, v)}
-                    className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-[10px] font-mono text-slate-600 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200"
-                  >
-                    {v}
-                  </button>
-                ))}
-                {idx === 0 && <FestivalHook />}
-              </div>
-
-              {previewIdx === idx && preview && (
-                <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-3.5 space-y-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700">
-                    Rendered with sample lead data
-                  </span>
-                  <div className="text-[13px] font-bold text-slate-900">{preview.subject}</div>
-                  <div className="text-[12px] text-slate-700 whitespace-pre-wrap leading-relaxed border-t border-blue-100 pt-2">
-                    {preview.body}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {STATUS_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold border transition-colors ${
+              tab === t.key
+                ? "bg-slate-900 text-white border-slate-900"
+                : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+            }`}
+          >
+            {t.label}
+            <span className={tab === t.key ? "text-slate-300" : "text-slate-400"}>
+              {tabCount(t.key)}
+            </span>
+          </button>
         ))}
       </div>
 
-      <button
-        onClick={addStep}
-        className="w-full rounded-2xl border-2 border-dashed border-slate-200 py-3.5 text-xs font-semibold text-slate-500 hover:border-blue-300 hover:text-blue-700 hover:bg-blue-50/40 inline-flex items-center justify-center gap-1.5"
-      >
-        <Plus className="w-4 h-4" /> Add follow-up step
-      </button>
-
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 flex items-start gap-3">
-        <Users className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
-        <p className="text-[11px] text-slate-500 leading-relaxed">
-          Saving creates the sequence as a <strong>draft</strong>. Next, pick leads on the{" "}
-          <a href="/leads" className="text-blue-600 font-semibold hover:underline">
-            Lead Database
-          </a>{" "}
-          and choose <strong>Add to Sequence</strong> — a sequence only ever emails the leads you
-          explicitly selected.
-        </p>
+      <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-500">
+              <th className="px-5 py-3 font-semibold">Name</th>
+              <th className="px-4 py-3 font-semibold">Status</th>
+              <th className="px-4 py-3 font-semibold text-right">Steps</th>
+              <th className="px-4 py-3 font-semibold text-right">Recipients</th>
+              <th className="px-4 py-3 font-semibold text-right">Sent</th>
+              <th className="px-4 py-3 font-semibold text-right">Replied</th>
+              <th className="px-4 py-3 font-semibold text-right">Reply rate</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {loading ? (
+              <tr>
+                <td colSpan={7} className="px-5 py-12 text-center text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
+                  Loading sequences...
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-5 py-12 text-center">
+                  <p className="text-sm text-slate-500">
+                    {campaigns.length === 0
+                      ? "No sequences yet. Build one with New Sequence, then add recipients from the Lead Database."
+                      : `No ${tab} sequences.`}
+                  </p>
+                </td>
+              </tr>
+            ) : (
+              filtered.map((c) => (
+                <tr
+                  key={c.id}
+                  onClick={() => setDetailId(c.id)}
+                  className="cursor-pointer hover:bg-slate-50/80 transition-colors"
+                >
+                  <td className="px-5 py-3.5">
+                    <span className="text-sm font-bold text-slate-900">{c.name}</span>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <span
+                      className={`rounded-lg border px-2 py-0.5 text-[11px] font-semibold capitalize ${
+                        STATUS_STYLE[c.status] ?? STATUS_STYLE.draft
+                      }`}
+                    >
+                      {c.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-600 tabular-nums">{c.step_count}</td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-600 tabular-nums">
+                    {c.contacts_selected}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-600 tabular-nums">{c.sent_count}</td>
+                  <td className="px-4 py-3.5 text-right text-sm text-slate-600 tabular-nums">{c.replied_count}</td>
+                  <td className="px-4 py-3.5 text-right text-sm font-semibold text-slate-900 tabular-nums">
+                    {c.reply_rate}%
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
 
-      <p className="text-[11px] text-slate-400 flex flex-wrap items-center gap-1.5">
-        <Mail className="w-3.5 h-3.5" /> A step is skipped automatically for leads who replied,
-        bounced, or unsubscribed.
-        <Send className="w-3.5 h-3.5 ml-1" /> Sends rotate across your mailboxes under the warmup
-        and reputation limits.
-      </p>
+      {/* Builder dialog — Apollo's vertical step timeline in miniature */}
+      {builderOpen && (
+        <div className="fixed inset-0 z-30 flex items-start justify-center p-6 overflow-y-auto">
+          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setBuilderOpen(false)} />
+          <div className="relative w-full max-w-2xl my-8 rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="border-b border-slate-200 px-6 py-4 flex items-center gap-3">
+              <h2 className="text-lg font-bold text-slate-900">New Sequence</h2>
+              <button
+                onClick={() => setBuilderOpen(false)}
+                aria-label="Close"
+                className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400"
+              >
+                <Trash2 className="w-4 h-4 rotate-45" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Sequence name</label>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Q4 Dentist Outreach"
+                  className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                />
+              </div>
+
+              {steps.map((s, idx) => (
+                <div key={idx} className="rounded-xl border border-slate-200 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-lg bg-blue-50 border border-blue-200 px-2 py-0.5 text-[11px] font-bold text-blue-700">
+                      Step {idx + 1}
+                    </span>
+                    {idx > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-slate-500">
+                        <Clock className="w-3 h-3" /> wait {s.delay_days}d
+                      </span>
+                    )}
+                    <button
+                      onClick={() => removeStep(idx)}
+                      disabled={steps.length <= 1}
+                      className="ml-auto p-1 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 disabled:opacity-30 disabled:hover:bg-transparent"
+                      aria-label={`Remove step ${idx + 1}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Subject</label>
+                    <input
+                      value={s.subject}
+                      onChange={(e) => updateStep(idx, { subject: e.target.value })}
+                      placeholder="Subject line"
+                      className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Variant B subject <span className="font-normal text-slate-400">(optional A/B test)</span>
+                    </label>
+                    <input
+                      value={s.subject_b}
+                      onChange={(e) => updateStep(idx, { subject_b: e.target.value })}
+                      placeholder="Second subject line for a 50/50 split test"
+                      className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Body</label>
+                    <textarea
+                      value={s.body_text}
+                      onChange={(e) => updateStep(idx, { body_text: e.target.value })}
+                      rows={5}
+                      placeholder="Email body. Use {{business_name}}, {{first_name}}, {{city}}..."
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                    />
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {VARIABLES.map((v) => (
+                        <button
+                          key={v}
+                          onClick={() => insertVar(idx, v)}
+                          className="rounded-lg border border-slate-200 px-1.5 py-0.5 text-[10px] font-mono text-slate-500 hover:border-blue-300 hover:text-blue-600 transition-colors"
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {idx > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Delay</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={s.delay_days}
+                          onChange={(e) => updateStep(idx, { delay_days: Math.max(0, parseInt(e.target.value) || 0) })}
+                          className="w-16 h-8 px-2 rounded-lg border border-slate-200 text-sm text-center"
+                        />
+                        <span className="text-[11px] text-slate-500">days</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => doPreview(idx)}
+                      className="ml-auto inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600"
+                    >
+                      <Eye className="w-3 h-3" /> Preview
+                    </button>
+                  </div>
+
+                  {previewIdx === idx && preview && (
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-1.5">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Preview (sample data)</p>
+                      <p className="text-[13px] font-semibold text-slate-900">{preview.subject}</p>
+                      <pre className="text-[12px] text-slate-600 whitespace-pre-wrap font-sans">{preview.body}</pre>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <button
+                onClick={addStep}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-700"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add follow-up step
+              </button>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 flex items-start gap-2.5">
+                <Users className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Saving creates the sequence as a <strong>draft</strong>. Next, pick leads on the{" "}
+                  <a href="/leads" className="text-blue-600 font-semibold hover:underline">
+                    Lead Database
+                  </a>{" "}
+                  and choose <strong>Add to Sequence</strong>. Launch refuses a sequence with no
+                  recipients — by design.
+                </p>
+              </div>
+
+              {error && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-medium text-red-700">
+                  {error}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-slate-200 px-6 py-4 flex justify-end gap-2">
+              <button
+                onClick={() => setBuilderOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={save}
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold text-xs hover:bg-blue-700 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                Save sequence
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {detailId !== null && (
+        <SequenceDetail
+          campaignId={detailId}
+          onClose={() => {
+            setDetailId(null);
+            load();
+          }}
+        />
+      )}
     </div>
   );
 }
