@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-169%2F169%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Tests Passing](https://img.shields.io/badge/Tests-191%2F191%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -224,27 +224,29 @@ override anything (Postgres URL, secrets, CORS, proxy list), copy
 ## 🚀 How to Use LeadForge (End-to-End Workflow)
 
 Once the stack is up, open the dashboard at
-[`http://localhost:3000`](http://localhost:3000) and walk the pipeline left to
-right:
+[`http://localhost:3000`](http://localhost:3000) and walk the pipeline:
 
 | # | Page | What you do |
 | :--- | :--- | :--- |
 | 1 | **`/scrape`** | Enter a query like *"Dentists in Austin TX"* → concurrent Google Maps scrape saves listings, then auto-discovers public emails from the businesses' websites and directories. |
 | 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (JustDial, directories, web). |
-| 3 | **`/leads`** | Browse & search your database. Enrich individual leads, generate AI icebreakers, spam-check copy, import/export CSV, and push to Twenty CRM. SMTP-verified addresses are marked deliverable. |
-| 4 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — required before any campaign can send. Daily limit is capped at 50/day for warmup safety. |
-| 5 | **`/campaigns`** | Build a sequence: write steps (subject + body) using `{{business_name}}`, `{{first_name}}`, `{{city}}`… placeholders, preview the render, and run the deliverability/spam linter. |
-| 6 | **`/sequences`** | Apollo-style execution: select leads → **Add to Sequence** → **Launch** → monitor sends, bounces and replies → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
+| 3 | **`/leads`** | Browse & search your database. Click any row to open the **detail drawer**: contacts, verification badges, full send history, one-click company suppression. Save current filters as **saved views** (Apollo dynamic lists) and bulk-select → Add to Sequence. |
+| 4 | **`/companies`** | The Accounts view: one row per company with contact coverage (total vs verified), rating, and location. |
+| 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — required before any campaign can send. Daily limit is capped at 50/day for warmup safety. |
+| 6 | **`/sequences`** | Apollo-style execution: stat-tabbed list (Active/Paused/Draft/Completed) → build sequences with `{{first_name}}`-style variables, **A/B subject variants** (winner auto-declared on reply rate once both variants clear 10 sends), select leads → **Add to Sequence** → **Launch** → monitor per-step performance → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
+| 7 | **`/inbox`** | Inbound replies detected by the IMAP reply poller (every 5 min, or "Poll now" on Email Health). Thread-attributed via stored Message-IDs; categorized Interested / Not interested / Opt-out / Away / Needs triage. **A "stop" reply auto-suppresses the address workspace-wide** — compliance gate 4 of 4. Humans can re-categorize. |
+| 8 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, and per-mailbox reply polling. |
 
 **First-send checklist** — guardrails refuse to run until all three exist (by design):
 the launcher blocks campaigns without steps or recipients, and the sender
 blocks dispatch without a usable mailbox:
 
 1. ✅ At least one SMTP mailbox in `/settings`
-2. ✅ At least one sequence step in `/campaigns`
-3. ✅ At least one recipient added in `/sequences`
+2. ✅ At least one sequence step in `/sequences`
+3. ✅ At least one recipient added in `/sequences` (or via the Lead Database)
 
-Then hit **Launch**. Watch progress on `/sequences` or `/campaigns`.
+Then hit **Launch**. Watch progress on `/sequences`, replies land in `/inbox`,
+and mailbox health lives on `/email-health`.
 
 **Everything is also an API**: every dashboard action maps to a REST endpoint —
 interactive Swagger docs at [`http://localhost:8000/docs`](http://localhost:8000/docs),
@@ -253,7 +255,7 @@ Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
 
 ---
 
-## 🧪 Automated Test Suite (169/169 Passing)
+## 🧪 Automated Test Suite (191/191 Passing)
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
@@ -265,7 +267,7 @@ LeadForge includes a comprehensive Pytest suite covering email status/role/free/
 (cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **169/169 tests pass synchronously** in under 1s — no network, no browser, no external services required.
+All **191/191 tests pass synchronously** in under 1s — no network, no browser, no external services required.
 
 ---
 
