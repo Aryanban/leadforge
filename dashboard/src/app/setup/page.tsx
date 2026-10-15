@@ -29,6 +29,10 @@ export default function SetupPage() {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  // Inline quick settings (TRACKING_DOMAIN / PROXY_LIST) — live apply + .env persist.
+  const [editValue, setEditValue] = useState<Record<string, string>>({});
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -43,6 +47,32 @@ export default function SetupPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const saveSetting = async (key: string) => {
+    setSavingKey(key);
+    setSaveMsg(null);
+    try {
+      const res = await api.updateSetupSetting(key, editValue[key] ?? "");
+      setSaveMsg(
+        `${res.label} saved — ${res.persisted ? "persists across restarts" : "applied for this session"}` +
+          (res.restart_required ? " · restart the backend for this one to take effect" : ""),
+      );
+      await load();
+    } catch (e: any) {
+      setSaveMsg(e.message || "That value isn't valid — check the format.");
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const rerunWizard = () => {
+    try {
+      localStorage.removeItem("leadforge.setup.v1");
+    } catch {
+      /* private mode */
+    }
+    window.location.reload();
+  };
 
   const mcpSnippet =
     '{\n  "mcpServers": {\n    "leadforge": {\n      "command": "/absolute/path/to/leadforge/.venv/bin/python",\n      "args": ["-m", "app.mcp_server"],\n      "cwd": "/absolute/path/to/leadforge/backend"\n    }\n  }\n}';
@@ -66,6 +96,14 @@ export default function SetupPage() {
           Everything you need to make LeadForge fully functional, in one place.
         </p>
       </div>
+
+      <button
+        onClick={rerunWizard}
+        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50/60 px-4 py-2.5 text-sm font-semibold text-blue-700 hover:bg-blue-50 transition-colors"
+      >
+        <Sparkles className="w-4 h-4" />
+        Run the guided setup wizard (recommended for first-time users)
+      </button>
 
       {loading ? (
         <div className="text-center py-12 text-slate-400">
@@ -155,6 +193,54 @@ export default function SetupPage() {
               <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">{status.ai_note}</p>
             </div>
           </div>
+
+          {/* Quick settings — deploy-critical values, editable in place */}
+          <section className="space-y-3" id="quick-settings">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-slate-500">
+              Quick settings — saved for you, no need to edit files
+            </h2>
+            {saveMsg && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800">
+                {saveMsg}
+              </div>
+            )}
+            <div className="rounded-2xl border border-slate-200 bg-white divide-y divide-slate-100">
+              {(["TRACKING_DOMAIN", "PROXY_LIST"] as const).map((key) => {
+                const cfg = status.runtime_settings?.[key];
+                if (!cfg) return null;
+                return (
+                  <div key={key} className="p-4 space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[13px] font-semibold text-slate-900">{cfg.label}</span>
+                      <code className="text-[10px] font-mono text-slate-400">{key}</code>
+                      {cfg.restart_required && (
+                        <span className="rounded bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                          restart needed
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={editValue[key] ?? cfg.value}
+                        onChange={(e) => setEditValue((prev) => ({ ...prev, [key]: e.target.value }))}
+                        placeholder={cfg.placeholder}
+                        className="flex-1 h-9 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-xs font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                        aria-label={cfg.label}
+                      />
+                      <button
+                        onClick={() => saveSetting(key)}
+                        disabled={savingKey === key}
+                        className="inline-flex items-center gap-1 rounded-xl bg-slate-900 text-white px-3.5 h-9 text-xs font-semibold hover:bg-slate-800 disabled:opacity-50"
+                      >
+                        {savingKey === key && <Loader2 className="w-3 h-3 animate-spin" />}
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
 
           {/* Mailboxes */}
           <section className="space-y-3">

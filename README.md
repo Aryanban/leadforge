@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-193%2F193%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Tests Passing](https://img.shields.io/badge/Tests-196%2F196%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -230,7 +230,7 @@ how to fix it:
 
 | # | Page | What you do |
 | :--- | :--- | :--- |
-| 0 | **`/setup`** | **Connections hub** — readiness checklist (mailbox, IMAP, tracking domain, proxies, secret), mailbox overview, every environment variable with its exact purpose, a copy-paste MCP config, and the confirmation that **no AI API key is needed** (icebreakers and scoring are generated on-device). |
+| 0 | **`/setup`** | **Connections hub + guided wizard.** First-time visitors get a 3-step wizard in plain English: pick your email provider (Gmail/Outlook/Zoho/Yahoo presets fill every server setting and explain exactly where to find an app password), connect + live-test the mailbox, optionally set your public URL. Afterwards the hub shows a readiness checklist, mailbox overview, every environment variable with its purpose, **editable quick settings** (public URL + proxies — saved for you, no file editing), a copy-paste MCP config, and the confirmation that **no AI API key is needed**. |
 | 1 | **`/scrape`** | Enter a query like *"Dentists in Austin TX"* → concurrent Google Maps scrape saves listings, then auto-discovers public emails from the businesses' websites and directories. |
 | 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (JustDial, directories, web). |
 | 3 | **`/leads`** | Browse & search your database. Click any row to open the **detail drawer**: contacts, verification badges, full send history, one-click company suppression. Save current filters as **saved views** (Apollo dynamic lists) and bulk-select → Add to Sequence. |
@@ -238,9 +238,13 @@ how to fix it:
 | 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — the only hard requirement for sending. Daily limit is capped at 50/day for warmup safety. |
 | 6 | **`/sequences`** | Apollo-style execution: stat-tabbed list (Active/Paused/Draft/Completed) → build sequences with `{{first_name}}`-style variables, **A/B subject variants** (winner auto-declared on reply rate once both variants clear 10 sends), select leads → **Add to Sequence** → **Launch** → monitor per-step performance → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
 | 7 | **`/inbox`** | Inbound replies detected by the IMAP reply poller (every 5 min, or "Poll now" on Email Health). Thread-attributed via stored Message-IDs; categorized Interested / Not interested / Opt-out / Away / Needs triage. **A "stop" reply auto-suppresses the address workspace-wide** — compliance gate 4 of 4. Humans can re-categorize. |
-| 8 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, and per-mailbox reply polling. |
+| 8 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, per-mailbox **IMAP settings editor** (reply-detection host/port, empty = auto-derive from SMTP), and one-click reply polling. |
 
 ### What you need to provide (and what you don't)
+
+> **Non-technical?** Start the app and the **setup wizard** walks you through
+> it: pick your provider → paste your email + app password → done. You never
+> touch a server setting unless you're deploying publicly.
 
 **Required:**
 1. ✅ **One SMTP mailbox** — email + app password + SMTP host (Gmail, Zoho, Outlook, any provider). Add it in `/settings` (with a live connection test). This is the *only* hard requirement.
@@ -271,7 +275,7 @@ Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
 
 ---
 
-## 🧪 Automated Test Suite (193/193 Passing)
+## 🧪 Automated Test Suite (196/196 Passing)
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
@@ -283,7 +287,7 @@ LeadForge includes a comprehensive Pytest suite covering email status/role/free/
 (cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **193/193 tests pass synchronously** in under 1s — no network, no browser, no external services required.
+All **196/196 tests pass synchronously** in under 1s — no network, no browser, no external services required.
 
 ---
 

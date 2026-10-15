@@ -15,6 +15,12 @@ export default function EmailHealthPage() {
   const [loading, setLoading] = useState(true);
   const [pollingId, setPollingId] = useState<number | null>(null);
   const [pollMessage, setPollMessage] = useState<string | null>(null);
+  // Inline IMAP editor (reply detection host/port override).
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [imapHost, setImapHost] = useState("");
+  const [imapPort, setImapPort] = useState(993);
+  const [imapSaving, setImapSaving] = useState(false);
+  const [imapError, setImapError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -51,6 +57,28 @@ export default function EmailHealthPage() {
     if (!created) return "unknown age";
     const days = Math.max(0, Math.floor((Date.now() - created.getTime()) / 86400000));
     return days < 14 ? `ramping · day ${days}/14` : "fully warmed";
+  };
+
+  const startImapEdit = (mb: MailboxItem) => {
+    setEditingId(mb.id);
+    setImapHost(mb.imap_host ?? "");
+    setImapPort(mb.imap_port ?? 993);
+    setImapError(null);
+  };
+
+  const saveImap = async () => {
+    if (editingId === null) return;
+    setImapSaving(true);
+    setImapError(null);
+    try {
+      await api.updateMailboxImap(editingId, imapHost.trim() || null, imapPort);
+      setEditingId(null);
+      await load();
+    } catch (e: any) {
+      setImapError(e.message || "Could not save IMAP settings.");
+    } finally {
+      setImapSaving(false);
+    }
   };
 
   const healthPct = (mb: MailboxItem) => Math.round((mb.health_score ?? 1) * 100);
@@ -142,15 +170,68 @@ export default function EmailHealthPage() {
 
                 <div className="flex items-center justify-between pt-1">
                   <span className="text-[11px] text-slate-500 capitalize">{rampStage(mb)}</span>
-                  <button
-                    onClick={() => pollNow(mb.id)}
-                    disabled={pollingId === mb.id}
-                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-50"
-                  >
-                    {pollingId === mb.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                    Poll replies
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => (editingId === mb.id ? setEditingId(null) : startImapEdit(mb))}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600"
+                    >
+                      IMAP settings
+                    </button>
+                    <button
+                      onClick={() => pollNow(mb.id)}
+                      disabled={pollingId === mb.id}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-50"
+                    >
+                      {pollingId === mb.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                      Poll replies
+                    </button>
+                  </div>
                 </div>
+
+                {editingId === mb.id && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-3 space-y-2">
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      Where should reply detection read from? Leave <strong>empty</strong> to
+                      auto-derive from your SMTP host (smtp.gmail.com → imap.gmail.com), or
+                      enter a custom IMAP host below.
+                    </p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <input
+                        value={imapHost}
+                        onChange={(e) => setImapHost(e.target.value)}
+                        placeholder="imap.example.com (auto if empty)"
+                        className="col-span-2 h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono bg-white"
+                        aria-label="IMAP host"
+                      />
+                      <input
+                        type="number"
+                        value={imapPort}
+                        onChange={(e) => setImapPort(parseInt(e.target.value) || 993)}
+                        className="h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono text-center bg-white"
+                        aria-label="IMAP port"
+                      />
+                    </div>
+                    {imapError && (
+                      <p className="text-[11px] font-medium text-red-600">{imapError}</p>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={saveImap}
+                        disabled={imapSaving}
+                        className="inline-flex items-center gap-1 rounded-lg bg-blue-600 text-white px-3 py-1.5 text-[11px] font-semibold hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {imapSaving && <Loader2 className="w-3 h-3 animate-spin" />}
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setEditingId(null)}
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

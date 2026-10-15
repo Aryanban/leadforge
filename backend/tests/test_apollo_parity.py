@@ -198,7 +198,8 @@ async def test_setup_status_shape(client):
     assert res.status_code == 200
     body = res.json()
     assert isinstance(body["ready"], bool)
-    assert set(body) == {"ready", "db_type", "api_url", "checks", "mailboxes", "env_keys", "ai_note"}
+    assert set(body) == {"ready", "db_type", "api_url", "checks", "mailboxes", "env_keys", "ai_note", "runtime_settings"}
+    assert {"TRACKING_DOMAIN", "PROXY_LIST", "CORS_ORIGINS"} <= set(body["runtime_settings"])
     keys = {c["key"] for c in body["checks"]}
     assert {"mailbox", "imap", "tracking", "proxies", "secret"} <= keys
     # No mailboxes in the test DB -> the one required check fails.
@@ -221,3 +222,62 @@ async def test_setup_status_ready_after_mailbox(client):
     body = res.json()
     assert body["ready"] is True
     assert any(m["email"] == "setup@example.test" for m in body["mailboxes"])
+
+
+@pytest.mark.asyncio
+async def test_provider_presets(client):
+    res = await client.get("/api/v1/setup/providers")
+    assert res.status_code == 200
+    providers = res.json()["providers"]
+    ids = {p["id"] for p in providers}
+    assert {"gmail", "outlook", "zoho", "yahoo", "custom"} <= ids
+    for p in providers:
+        if p["id"] != "custom":
+            assert p["smtp_host"].startswith("smtp.")
+            # Outlook's IMAP host is outlook.office365.com, not imap.*
+            assert p["imap_host"].startswith(("imap.", "outlook."))
+        assert p["howto"]  # plain-English instructions, never empty
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_validation(client):
+    bad_url = await client.put("/api/v1/setup/settings",
+                               json={"key": "TRACKING_DOMAIN", "value": "api.example.com"})
+    assert bad_url.status_code == 422
+
+    bad_cors = await client.put("/api/v1/setup/settings",
+                                json={"key": "CORS_ORIGINS", "value": "app.example.com"})
+    assert bad_cors.status_code == 422
+
+    unknown = await client.put("/api/v1/setup/settings",
+                               json={"key": "SECRET_KEY", "value": "x"})
+    assert unknown.status_code == 404  # secrets are not runtime-editable
+
+
+@pytest.mark.asyncio
+async def test_runtime_setting_applies_and_persists(client, tmp_path, monkeypatch):
+    from app.api import setup as setup_mod
+    from app.config import settings as cfg
+
+    monkeypatch.setattr(setup_mod, "_ENV_FILE", tmp_path / ".env")
+    original = cfg.TRACKING_DOMAIN
+    try:
+        res = await client.put("/api/v1/setup/settings",
+                               json={"key": "TRACKING_DOMAIN", "value": "https://api.example.com/"})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["value"] == "https://api.example.com"  # trailing slash stripped
+        assert body["persisted"] is True
+        assert body["restart_required"] is False
+        # applied live, not just on disk
+        assert cfg.TRACKING_DOMAIN == "https://api.example.com"
+        # persisted for the next boot
+        assert "TRACKING_DOMAIN=https://api.example.com" in (tmp_path / ".env").read_text()
+        # writing again replaces instead of duplicating
+        await client.put("/api/v1/setup/settings",
+                         json={"key": "TRACKING_DOMAIN", "value": "https://v2.example.com"})
+        env_text = (tmp_path / ".env").read_text()
+        assert env_text.count("TRACKING_DOMAIN=") == 1
+        assert "https://v2.example.com" in env_text
+    finally:
+        cfg.TRACKING_DOMAIN = original

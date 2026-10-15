@@ -29,6 +29,13 @@ export interface SetupEnvKey {
   note: string;
 }
 
+export interface SetupRuntimeSetting {
+  value: string;
+  label: string;
+  placeholder: string;
+  restart_required: boolean;
+}
+
 export interface SetupStatus {
   ready: boolean;
   db_type: string;
@@ -37,6 +44,17 @@ export interface SetupStatus {
   mailboxes: SetupMailbox[];
   env_keys: SetupEnvKey[];
   ai_note: string;
+  runtime_settings: Record<string, SetupRuntimeSetting>;
+}
+
+export interface ProviderPreset {
+  id: string;
+  label: string;
+  smtp_host: string;
+  smtp_port: number;
+  imap_host: string;
+  imap_port: number;
+  howto: string;
 }
 
 // --- Apollo-parity types -----------------------------------------------------
@@ -287,6 +305,8 @@ export interface MailboxItem {
   daily_limit: number;
   sent_today: number;
   is_active: boolean;
+  imap_host?: string | null;
+  imap_port?: number;
   health_score?: number | null;
   health_paused?: boolean | null;
   created_at?: string | null;
@@ -603,4 +623,10 @@ export const api = {
       { method: "POST" },
     ),
   getSetupStatus: () => request<SetupStatus>("/setup/status"),
+  getProviderPresets: () => request<{ providers: ProviderPreset[] }>("/setup/providers"),
+  updateSetupSetting: (key: string, value: string) =>
+    request<{ key: string; value: string; persisted: boolean; restart_required: boolean; label: string }>(
+      "/setup/settings",
+      { method: "PUT", body: JSON.stringify({ key, value }) },
+    ),
 };

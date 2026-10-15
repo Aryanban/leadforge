@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar } from "@/components/TopBar";
+import { FirstRunWizard } from "@/components/FirstRunWizard";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -24,6 +25,8 @@ export default function RootLayout({
           <TopBar />
           <main className="flex-1 overflow-y-auto bg-slate-50/60 p-6">{children}</main>
         </div>
+        {/* First-run setup: shows only while a required connection is missing */}
+        <FirstRunWizard />
       </body>
     </html>
   );

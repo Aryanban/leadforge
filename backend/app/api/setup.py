@@ -9,9 +9,11 @@ Deliberately read-only: every action (add mailbox, set IMAP, test SMTP,
 poll replies) lives on the existing endpoints this page links to.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +25,92 @@ router = APIRouter()
 
 #: The placeholder the app refuses to boot with when ENV=production.
 PLACEHOLDER_SECRET = "leadforge-secret-key-production-change-me"
+
+#: Where runtime settings are persisted. Tests monkeypatch this to a tmp file
+#: so the real backend/.env is never touched by the suite.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+#: Settings the dashboard may change at runtime, with plain-language rules.
+#: - TRACKING_DOMAIN applies immediately (read per-send for unsubscribe links).
+#: - PROXY_LIST applies immediately (read per request by the scraper).
+#: - CORS_ORIGINS is baked into the middleware at boot -> restart required.
+RUNTIME_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "TRACKING_DOMAIN": {
+        "label": "Public backend URL (unsubscribe links)",
+        "placeholder": "https://api.yourdomain.com",
+        "restart_required": False,
+    },
+    "PROXY_LIST": {
+        "label": "Rotating proxies for scraping",
+        "placeholder": "http://user:pass@ip:port,http://user:pass@ip2:port",
+        "restart_required": False,
+    },
+    "CORS_ORIGINS": {
+        "label": "Allowed dashboard origins",
+        "placeholder": "https://app.yourdomain.com",
+        "restart_required": True,
+    },
+}
+
+#: Non-technical provider presets: SMTP/IMAP hosts + exactly where the app
+#: password lives. Sourced from the Connections wizard so a first-time user
+#: never has to know what a "host" is.
+PROVIDERS: List[Dict[str, Any]] = [
+    {
+        "id": "gmail",
+        "label": "Gmail / Google Workspace",
+        "smtp_host": "smtp.gmail.com",
+        "smtp_port": 587,
+        "imap_host": "imap.gmail.com",
+        "imap_port": 993,
+        "howto": "Open myaccount.google.com → Security → 2-Step Verification (turn it on) → "
+                 "App passwords → create one for 'Mail'. Paste the 16-character password here "
+                 "(your normal Google password will NOT work).",
+    },
+    {
+        "id": "outlook",
+        "label": "Outlook / Hotmail / Microsoft 365",
+        "smtp_host": "smtp.office365.com",
+        "smtp_port": 587,
+        "imap_host": "outlook.office365.com",
+        "imap_port": 993,
+        "howto": "Microsoft 365: admin must enable 'SMTP AUTH' (Microsoft 365 admin center → "
+                 "Users → your user → Mail → 'Manage email apps'). Personal Outlook: enable "
+                 "two-step verification then create an app password at account.microsoft.com.",
+    },
+    {
+        "id": "zoho",
+        "label": "Zoho Mail",
+        "smtp_host": "smtp.zoho.com",
+        "smtp_port": 465,
+        "imap_host": "imap.zoho.com",
+        "imap_port": 993,
+        "howto": "Zoho Mail → Settings → Mail Accounts → IMAP → enable IMAP; use your Zoho "
+                 "account password or an app-specific password (accounts.zoho.com → "
+                 "Security → App Passwords).",
+    },
+    {
+        "id": "yahoo",
+        "label": "Yahoo Mail",
+        "smtp_host": "smtp.mail.yahoo.com",
+        "smtp_port": 465,
+        "imap_host": "imap.mail.yahoo.com",
+        "imap_port": 993,
+        "howto": "Turn on two-step verification in account security, then create an app "
+                 "password at login.yahoo.com → Account Security → Generate app password. "
+                 "Paste that here (not your Yahoo password).",
+    },
+    {
+        "id": "custom",
+        "label": "Other provider (custom SMTP)",
+        "smtp_host": "",
+        "smtp_port": 587,
+        "imap_host": "",
+        "imap_port": 993,
+        "howto": "Your provider's docs will list an 'SMTP host' and 'port' (often "
+                 "smtp.yourdomain.com:587) — paste them below. Use an app password if 2FA is on.",
+    },
+]
 
 
 @router.get("/status")
@@ -153,4 +241,99 @@ async def setup_status(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
             "Icebreakers, scoring and copy are generated on-device from industry "
             "templates — no LLM API key or external AI service is required."
         ),
+        # Current values of the settings the Connections page can edit in-place.
+        "runtime_settings": {
+            key: {
+                "value": str(getattr(settings, key, "")),
+                "label": spec["label"],
+                "placeholder": spec["placeholder"],
+                "restart_required": spec["restart_required"],
+            }
+            for key, spec in RUNTIME_SETTINGS.items()
+        },
+    }
+
+
+class SettingUpdate(BaseModel):
+    key: str
+    value: str
+
+
+@router.get("/providers")
+async def list_providers() -> Dict[str, Any]:
+    """SMTP/IMAP presets with plain-English 'where is my app password' help.
+
+    Sourced server-side so the wizard and the Settings page speak with one
+    voice; a non-technical user picks their provider and never touches a host
+    field (the preset fills SMTP/IMAP hosts and ports).
+    """
+    return {"providers": PROVIDERS}
+
+
+def _persist_env_file(key: str, value: str) -> None:
+    """Writes KEY=value into backend/.env, preserving every other line.
+
+    Only called for the RUNTIME_SETTINGS allowlist — the app never touches
+    secrets or arbitrary keys. The file lives next to the backend package so
+    it works for bare-metal runs and inside the Docker image alike.
+    """
+    line = f"{key}={value}"
+    lines: List[str] = []
+    if _ENV_FILE.exists():
+        lines = _ENV_FILE.read_text(encoding="utf-8").splitlines()
+    replaced = False
+    for i, existing in enumerate(lines):
+        if existing.split("=", 1)[0].strip() == key:
+            lines[i] = line
+            replaced = True
+            break
+    if not replaced:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(line)
+    _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@router.put("/settings")
+async def update_runtime_setting(req: SettingUpdate) -> Dict[str, Any]:
+    """Applies a runtime setting: live immediately + persisted to .env.
+
+    The dashboard writes nothing to disk itself; this is the single, validated
+    door. Validation is deliberately strict for TRACKING_DOMAIN — a typo here
+    breaks every unsubscribe link a recipient might click.
+    """
+    spec = RUNTIME_SETTINGS.get(req.key)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"'{req.key}' is not editable at runtime")
+
+    value = (req.value or "").strip()
+    if req.key == "TRACKING_DOMAIN":
+        if value and not value.startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=422,
+                detail="The public URL must start with http:// or https://",
+            )
+        value = value.rstrip("/")
+    elif req.key == "CORS_ORIGINS" and value and value != "*":
+        for origin in [o.strip() for o in value.split(",") if o.strip()]:
+            if not origin.startswith(("http://", "https://")):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"'{origin}' is not a valid origin — use e.g. https://app.example.com",
+                )
+
+    setattr(settings, req.key, value if value else ("*" if req.key == "CORS_ORIGINS" else ""))
+    try:
+        _persist_env_file(req.key, value)
+        persisted = True
+    except OSError:  # read-only fs (rare) — live apply still worked
+        persisted = False
+
+    return {
+        "key": req.key,
+        "value": getattr(settings, req.key),
+        "persisted": persisted,
+        "restart_required": bool(spec["restart_required"]),
+        "label": spec["label"],
     }

@@ -36,6 +36,9 @@ async def list_mailboxes(db: AsyncSession = Depends(get_db)):
             "daily_limit": m.daily_limit,
             "sent_today": m.sent_today,
             "is_active": m.is_active,
+            # Inbound (reply detection) settings for the IMAP editor.
+            "imap_host": getattr(m, "imap_host", None),
+            "imap_port": getattr(m, "imap_port", 993),
             # Warmup/health state for the dashboard health bars. getattr keeps
             # old databases (pre-migration) serving instead of 500ing.
             "health_score": getattr(m, "health_score", 1.0),
