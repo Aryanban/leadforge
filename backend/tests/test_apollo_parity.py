@@ -190,3 +190,34 @@ async def test_lead_detail_and_suppress(client):
     res = await client.post(f"/api/v1/leads/{bid}/suppress")
     assert res.status_code == 200
     assert res.json()["business_id"] == bid
+
+
+@pytest.mark.asyncio
+async def test_setup_status_shape(client):
+    res = await client.get("/api/v1/setup/status")
+    assert res.status_code == 200
+    body = res.json()
+    assert isinstance(body["ready"], bool)
+    assert set(body) == {"ready", "db_type", "api_url", "checks", "mailboxes", "env_keys", "ai_note"}
+    keys = {c["key"] for c in body["checks"]}
+    assert {"mailbox", "imap", "tracking", "proxies", "secret"} <= keys
+    # No mailboxes in the test DB -> the one required check fails.
+    assert body["ready"] is False
+    mailbox_check = next(c for c in body["checks"] if c["key"] == "mailbox")
+    assert mailbox_check["required"] is True
+    assert mailbox_check["ok"] is False
+    assert mailbox_check["href"] == "/settings"
+
+
+@pytest.mark.asyncio
+async def test_setup_status_ready_after_mailbox(client):
+    await client.post("/api/v1/mailboxes/", json={
+        "email": "setup@example.test",
+        "password": "pw",
+        "smtp_host": "smtp.example.test",
+        "smtp_port": 587,
+    })
+    res = await client.get("/api/v1/setup/status")
+    body = res.json()
+    assert body["ready"] is True
+    assert any(m["email"] == "setup@example.test" for m in body["mailboxes"])

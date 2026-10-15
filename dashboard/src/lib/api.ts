@@ -2,6 +2,45 @@ const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/
 
 // --- Apollo-parity types -----------------------------------------------------
 
+export interface SetupCheck {
+  key: string;
+  label: string;
+  required: boolean;
+  ok: boolean;
+  detail: string;
+  href: string | null;
+}
+
+export interface SetupMailbox {
+  id: number;
+  email: string;
+  smtp_host: string;
+  smtp_port: number;
+  daily_limit: number;
+  is_active: boolean;
+  imap_host: string | null;
+  imap_port: number;
+  health_paused: boolean;
+}
+
+export interface SetupEnvKey {
+  key: string;
+  required: boolean;
+  note: string;
+}
+
+export interface SetupStatus {
+  ready: boolean;
+  db_type: string;
+  api_url: string;
+  checks: SetupCheck[];
+  mailboxes: SetupMailbox[];
+  env_keys: SetupEnvKey[];
+  ai_note: string;
+}
+
+// --- Apollo-parity types -----------------------------------------------------
+
 export interface TimeSeriesPoint {
   date: string;
   sent: number;
@@ -563,4 +602,5 @@ export const api = {
       `/mailboxes/${mailboxId}/poll-replies`,
       { method: "POST" },
     ),
+  getSetupStatus: () => request<SetupStatus>("/setup/status"),
 };

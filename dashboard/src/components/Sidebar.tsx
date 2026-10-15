@@ -18,6 +18,7 @@ import {
   Inbox,
   Building2,
   Activity,
+  Plug,
 } from "lucide-react";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
@@ -52,7 +53,10 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     title: "Setup",
-    items: [{ href: "/settings", label: "Mailboxes & Setup", icon: Settings }],
+    items: [
+      { href: "/setup", label: "Connections", icon: Plug },
+      { href: "/settings", label: "Mailboxes & Settings", icon: Settings },
+    ],
   },
 ];
 

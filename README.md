@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-191%2F191%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Tests Passing](https://img.shields.io/badge/Tests-193%2F193%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -224,18 +224,34 @@ override anything (Postgres URL, secrets, CORS, proxy list), copy
 ## 🚀 How to Use LeadForge (End-to-End Workflow)
 
 Once the stack is up, open the dashboard at
-[`http://localhost:3000`](http://localhost:3000) and walk the pipeline:
+[`http://localhost:3000`](http://localhost:3000) and start at **Connections**
+(`/setup`) — one page that shows exactly what's connected, what's missing, and
+how to fix it:
 
 | # | Page | What you do |
 | :--- | :--- | :--- |
+| 0 | **`/setup`** | **Connections hub** — readiness checklist (mailbox, IMAP, tracking domain, proxies, secret), mailbox overview, every environment variable with its exact purpose, a copy-paste MCP config, and the confirmation that **no AI API key is needed** (icebreakers and scoring are generated on-device). |
 | 1 | **`/scrape`** | Enter a query like *"Dentists in Austin TX"* → concurrent Google Maps scrape saves listings, then auto-discovers public emails from the businesses' websites and directories. |
 | 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (JustDial, directories, web). |
 | 3 | **`/leads`** | Browse & search your database. Click any row to open the **detail drawer**: contacts, verification badges, full send history, one-click company suppression. Save current filters as **saved views** (Apollo dynamic lists) and bulk-select → Add to Sequence. |
 | 4 | **`/companies`** | The Accounts view: one row per company with contact coverage (total vs verified), rating, and location. |
-| 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — required before any campaign can send. Daily limit is capped at 50/day for warmup safety. |
+| 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — the only hard requirement for sending. Daily limit is capped at 50/day for warmup safety. |
 | 6 | **`/sequences`** | Apollo-style execution: stat-tabbed list (Active/Paused/Draft/Completed) → build sequences with `{{first_name}}`-style variables, **A/B subject variants** (winner auto-declared on reply rate once both variants clear 10 sends), select leads → **Add to Sequence** → **Launch** → monitor per-step performance → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
 | 7 | **`/inbox`** | Inbound replies detected by the IMAP reply poller (every 5 min, or "Poll now" on Email Health). Thread-attributed via stored Message-IDs; categorized Interested / Not interested / Opt-out / Away / Needs triage. **A "stop" reply auto-suppresses the address workspace-wide** — compliance gate 4 of 4. Humans can re-categorize. |
 | 8 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, and per-mailbox reply polling. |
+
+### What you need to provide (and what you don't)
+
+**Required:**
+1. ✅ **One SMTP mailbox** — email + app password + SMTP host (Gmail, Zoho, Outlook, any provider). Add it in `/settings` (with a live connection test). This is the *only* hard requirement.
+2. ✅ **A SECRET_KEY in `backend/.env`** — but only when `ENV=production` (`openssl rand -hex 32`). Local dev works with the placeholder.
+
+**Optional but recommended:**
+3. **IMAP access** for the mailbox (same app password usually works) — enables automatic reply detection. `smtp.*` hosts auto-swap to `imap.*`; others are one field in the API/dashboard.
+4. **`TRACKING_DOMAIN`** in `backend/.env` — set it to your public URL when deployed remotely, otherwise unsubscribe links point to localhost and break for recipients.
+5. **`PROXY_LIST`** — rotating proxies if you plan sustained Google Maps volume (direct egress rate-limits quickly).
+
+**Not needed at all:** AI/LLM API keys (icebreakers, scoring and copy are on-device templates), external verification services (real DNS MX + SMTP handshake), or any paid enrichment APIs.
 
 **First-send checklist** — guardrails refuse to run until all three exist (by design):
 the launcher blocks campaigns without steps or recipients, and the sender
@@ -255,7 +271,7 @@ Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
 
 ---
 
-## 🧪 Automated Test Suite (191/191 Passing)
+## 🧪 Automated Test Suite (193/193 Passing)
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
@@ -267,7 +283,7 @@ LeadForge includes a comprehensive Pytest suite covering email status/role/free/
 (cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **191/191 tests pass synchronously** in under 1s — no network, no browser, no external services required.
+All **193/193 tests pass synchronously** in under 1s — no network, no browser, no external services required.
 
 ---
 

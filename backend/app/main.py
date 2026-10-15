@@ -7,7 +7,7 @@ import logging
 
 from app.config import settings
 from typing import Optional, Any, Dict, List
-from app.api import scraper, leads, enricher, campaigns, analytics, mailboxes, icp, inbox, lists, suppression
+from app.api import scraper, leads, enricher, campaigns, analytics, mailboxes, icp, inbox, lists, suppression, setup
 from app.campaigns import tracker
 from app.database import Base, engine
 from app.seeds import seed_initial_data_if_empty
@@ -134,6 +134,7 @@ app.include_router(icp.router, prefix=f"{settings.API_V1_STR}/icp", tags=["ICP &
 app.include_router(inbox.router, prefix=f"{settings.API_V1_STR}/inbox", tags=["Inbox"])
 app.include_router(lists.router, prefix=f"{settings.API_V1_STR}/lists", tags=["Saved Lists"])
 app.include_router(suppression.router, prefix=f"{settings.API_V1_STR}/suppression", tags=["Suppression"])
+app.include_router(setup.router, prefix=f"{settings.API_V1_STR}/setup", tags=["Setup"])
 
 # Aliases without /v1 for backwards compatibility (/api/...)
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics Legacy"])
@@ -146,6 +147,7 @@ app.include_router(icp.router, prefix="/api/icp", tags=["ICP & Discovery Legacy"
 app.include_router(inbox.router, prefix="/api/inbox", tags=["Inbox Legacy"])
 app.include_router(lists.router, prefix="/api/lists", tags=["Saved Lists Legacy"])
 app.include_router(suppression.router, prefix="/api/suppression", tags=["Suppression Legacy"])
+app.include_router(setup.router, prefix="/api/setup", tags=["Setup Legacy"])
 
 @app.get("/health")
 async def health_check():
