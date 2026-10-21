@@ -213,6 +213,9 @@ async def get_leads(
             })
 
     leads_data = []
+    #: Business ids whose persisted score was stale and has just been
+    #: recomputed.
+    stale_score_ids: List[int] = []
     for b in businesses:
         b_contacts = contacts_map.get(b.id, [])
         primary_contact = b_contacts[0] if b_contacts else None
@@ -246,9 +249,12 @@ async def get_leads(
         lead_score = score_info["score"]
         lead_tier = score_info["tier"]
         lead_badges = score_info["badges"]
-        # Keep the column in sync so it can be sorted/filtered in SQL.
+        # Keep the column in sync so it can be sorted/filterable in SQL. Only
+        # when it actually changed: this endpoint is a GET, and taking the
+        # database's write lock on every page view is pure overhead.
         if b.score != lead_score:
             b.score = lead_score
+            stale_score_ids.append(b.id)
 
         # India source-trust: surfaces *why* a lead's score was adjusted —
         # self-listed directories (JustDial/IndiaMART) carry shared/stale
@@ -294,7 +300,9 @@ async def get_leads(
         })
 
     # Persist the refreshed scores so they are sortable/filterable in SQL.
-    await db.commit()
+    # A read that has nothing to write must not take the write lock.
+    if stale_score_ids:
+        await db.commit()
 
     return {
         "total": total,

@@ -46,37 +46,65 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
     res = await db.execute(stmt)
     campaigns = res.scalars().all()
 
-    result = []
-    for c in campaigns:
-        # Aggregate send stats
+    # Three grouped aggregates instead of three queries per campaign. The
+    # endpoint used to issue 4N queries (1 for the list, 3 per campaign), so
+    # a 50-campaign list was 151 round-trips.
+    campaign_ids = [c.id for c in campaigns]
+
+    send_stats: Dict[int, tuple] = {}
+    target_counts: Dict[int, int] = {}
+    step_counts: Dict[int, int] = {}
+
+    if campaign_ids:
         sends_stmt = select(
+            Send.campaign_id,
             func.count(Send.id),
             func.count(Send.id).filter(Send.status == "sent"),
             func.count(Send.id).filter(Send.opened == True),
-            func.count(Send.id).filter(Send.replied == True)
-        ).where(Send.campaign_id == c.id)
-        
-        s_res = await db.execute(sends_stmt)
-        total_sends, sent_count, opened_count, replied_count = s_res.one()
+            func.count(Send.id).filter(Send.replied == True),
+        ).where(Send.campaign_id.in_(campaign_ids)).group_by(Send.campaign_id)
+        for cid, total, sent_c, opened_c, replied_c in (await db.execute(sends_stmt)).all():
+            send_stats[cid] = (total or 0, sent_c or 0, opened_c or 0, replied_c or 0)
+
+        targets_stmt = (
+            select(CampaignTarget.campaign_id, func.count(CampaignTarget.id))
+            .where(CampaignTarget.campaign_id.in_(campaign_ids))
+            .group_by(CampaignTarget.campaign_id)
+        )
+        target_counts = {
+            cid: count for cid, count in (await db.execute(targets_stmt)).all()
+        }
+
+        steps_stmt = (
+            select(CampaignStep.campaign_id, func.count(CampaignStep.id))
+            .where(CampaignStep.campaign_id.in_(campaign_ids))
+            .group_by(CampaignStep.campaign_id)
+        )
+        step_counts = {
+            cid: count for cid, count in (await db.execute(steps_stmt)).all()
+        }
+
+    result = []
+    for c in campaigns:
+        total_sends, sent_count, opened_count, replied_count = send_stats.get(
+            c.id, (0, 0, 0, 0)
+        )
 
         open_rate = round((opened_count / sent_count * 100), 1) if sent_count > 0 else 0.0
         reply_rate = round((replied_count / sent_count * 100), 1) if sent_count > 0 else 0.0
 
         # Explicit recipients (Apollo "prospects") plus total steps, so the UI
         # can render "N prospects · M steps" without a second round-trip.
-        target_count = (await db.execute(
-            select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == c.id)
-        )).scalar() or 0
-        step_count = (await db.execute(
-            select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == c.id)
-        )).scalar() or 0
+        target_count = target_counts.get(c.id, 0)
+        step_count = step_counts.get(c.id, 0)
 
         result.append({
             "id": c.id,
             "name": c.name,
             "status": c.status,
-            "total_targets": total_sends,
+            "total_targets": target_count,
             "contacts_selected": target_count,
+            "total_sends": total_sends,
             "step_count": step_count,
             "sent_count": sent_count,
             "opened_count": opened_count,

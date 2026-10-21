@@ -196,11 +196,18 @@ def _sync_fts(sync_conn) -> None:
             existing = None
         if not existing:
             sync_conn.execute(text(_FTS_CREATE))
-        for ddl in _FTS_DDL:
-            sync_conn.execute(text(ddl))
     except Exception as exc:
         logger.info("full-text search index unavailable (%s) - using LIKE fallback", exc)
         return
+
+    # Each trigger is created independently: a trigger that fails to create
+    # must not take the others down with it, and a missing trigger only
+    # means the index drifts (the backfill below repairs it).
+    for ddl in _FTS_DDL:
+        try:
+            sync_conn.execute(text(ddl))
+        except Exception as exc:
+            logger.warning("full-text search trigger failed: %s", exc)
 
     # Backfill: the triggers only fire on new writes, so an existing
     # database needs a rebuild. 'rebuild' is a no-op when already in sync.

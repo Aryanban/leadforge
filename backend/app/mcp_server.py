@@ -16,7 +16,7 @@ import logging
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Any, List, Optional, Sequence, Set
 
 # Ensure backend directory is in python search path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
