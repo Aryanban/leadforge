@@ -40,6 +40,11 @@ class Business(Base):
     #: extra_data, so the lead list can sort/filter on it in SQL.
     score = Column(Integer, nullable=True, index=True)
 
+    #: When this lead was last enriched. Without it the "enrich everything"
+    #: action had no way to tell a lead that had been enriched from one that
+    #: had not, so it re-enriched the same newest rows on every run.
+    enriched_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

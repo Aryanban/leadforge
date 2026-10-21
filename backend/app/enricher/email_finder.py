@@ -7,9 +7,9 @@ import urllib.parse
 from urllib.parse import urlparse, urljoin
 from urllib.robotparser import RobotFileParser
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Any, Optional
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from app.database import async_session_maker
 from app.models.business import Business
@@ -1318,6 +1318,9 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
         base_extra["lead_tier"] = lead_scoring["tier"]
         base_extra["lead_badges"] = lead_scoring["badges"]
         business.extra_data = base_extra
+        # Record that this lead has been enriched, so "enrich everything" can
+        # skip it next time instead of re-enriching the same newest rows.
+        business.enriched_at = datetime.now(timezone.utc)
 
         if icp_profile is not None:
             business.icp_fit = {
@@ -1347,10 +1350,25 @@ async def enrich_all_pending_businesses(limit: int = 50) -> int:
     """
     Enriches all businesses across the web and their websites to uncover missing
     emails, phone numbers, and WhatsApp contacts.
+
+    It now targets leads that have actually NOT been enriched. It used to
+    take the newest N rows by id, so running it twice re-enriched exactly
+    the same leads - burning the same crawl budget and SMTP probes - and
+    never reached the older leads that still had no email at all.
     """
     count = 0
     async with async_session_maker() as db:
-        stmt = select(Business).order_by(Business.id.desc()).limit(limit)
+        stmt = (
+            select(Business)
+            .where(
+                or_(
+                    Business.enriched_at.is_(None),
+                    Business.enriched_at < datetime.now(timezone.utc) - timedelta(days=30),
+                )
+            )
+            .order_by(Business.enriched_at.asc().nullsfirst())
+            .limit(limit)
+        )
         res = await db.execute(stmt)
         businesses = res.scalars().all()
 

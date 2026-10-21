@@ -560,3 +560,83 @@ def test_a_directory_lead_never_outranks_a_live_gbp_lead():
         assert _score(directory) < live, (
             f"a {directory} lead must score below a live Google Maps lead"
         )
+
+
+# --------------------------------------------------------------------------
+# Demo data must be distinguishable from real leads
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_seeded_demo_leads_are_flagged(client):
+    """A fresh database says "83 businesses in your database".
+
+    Those 83 are the sample rows a new install is seeded with. If the UI
+    cannot tell sample data from leads the user actually found, the very
+    first screen of the product makes a false claim.
+    """
+    from app.database import async_session_maker as _maker
+    from app.models.business import Business as _B
+
+    async with _maker() as db:
+        db.add(_B(
+            name="Demo Property Advisors",
+            phone="+91 98111 00000",
+            industry="Real Estate",
+            source="google_maps_seed",
+            extra_data={"query": "demo", "seeded": True},
+        ))
+        db.add(_B(
+            name="A Real Scraped Lead",
+            phone="+91 98111 11111",
+            industry="Real Estate",
+            source="google_maps_http",
+            extra_data={"query": "dentists in Pune"},
+        ))
+        await db.commit()
+
+    res = await client.get("/api/v1/leads?limit=50")
+    leads = {lead["name"]: lead for lead in res.json()["leads"]}
+
+    assert leads["Demo Property Advisors"]["is_demo"] is True
+    assert leads["A Real Scraped Lead"]["is_demo"] is False
+
+
+@pytest.mark.asyncio
+async def test_enrich_all_targets_leads_that_were_never_enriched():
+    """"Enrich everything" must not re-enrich the same newest rows.
+
+    It used to take the newest N rows by id, so a second run did exactly the
+    same work again - the same crawl budget and the same SMTP probes - and
+    the older leads that had never been enriched were never reached.
+    """
+    from app.database import async_session_maker as _maker
+    from app.models.business import Business as _B
+    from app.enricher.email_finder import enrich_all_pending_businesses
+
+    async with _maker() as db:
+        old = _B(name="Never Enriched", source="google_maps_http")
+        done = _B(name="Already Enriched", source="google_maps_http",
+                 enriched_at=datetime.now(timezone.utc))
+        db.add_all([old, done])
+        await db.commit()
+        old_id, done_id = old.id, done.id
+
+    # The function enriches for real, so stub the per-lead work and assert
+    # on which rows it selected.
+    import app.enricher.email_finder as ef
+    seen = []
+
+    async def _fake_enrich(business_id: int):
+        seen.append(business_id)
+        return {"emails_found": 0}
+
+    original = ef.enrich_business_by_id
+    ef.enrich_business_by_id = _fake_enrich
+    try:
+        count = await enrich_all_pending_businesses(limit=50)
+    finally:
+        ef.enrich_business_by_id = original
+
+    assert count == 1, f"expected exactly one unenriched lead, got {count}"
+    assert seen == [old_id], f"should have enriched the never-enriched lead, got {seen}"
+    assert done_id not in seen

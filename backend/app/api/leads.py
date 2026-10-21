@@ -235,6 +235,13 @@ async def get_leads(
         is_claimed = extra.get("is_claimed", True)
         operational_status = extra.get("operational_status", "Operational")
         price_tier = extra.get("price_tier")
+        #: Demo rows are the sample businesses a fresh database is seeded with.
+        #: Without this flag the overview says "83 businesses in your
+        #: database" and a new user cannot tell sample data from leads they
+        #: actually found.
+        is_demo = bool(extra.get("seeded")) or (
+            b.source == "google_maps_seed" and not b.enriched_at
+        )
 
         # The lead score is computed LIVE, never read from the enrichment-time
         # cache.
@@ -285,6 +292,7 @@ async def get_leads(
             "latitude": b.latitude,
             "longitude": b.longitude,
             "is_claimed": is_claimed,
+            "is_demo": is_demo,
             "operational_status": operational_status,
             "price_tier": price_tier,
             "lead_score": lead_score,
