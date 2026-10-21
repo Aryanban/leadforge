@@ -31,6 +31,8 @@ server), not `next dev`, against a live API with real data.
 [critical] select-name     nodes=1    routes=1      "Select element must have an accessible name"
 ```
 
+**Total: 22 violation types / 106 nodes across ten routes.**
+
 **48 of the 53 contrast failures were one class**: `text-slate-400`
 (`#94a3b8`) on white is **2.56:1** where WCAG AA needs **4.5:1**. Tailwind's
 `slate-400` is a common "muted label" colour and it simply is not readable —
@@ -58,6 +60,24 @@ the content.
 | Form labels | The unlabelled `<select>` now has a real `<label>` |
 | Heading order | Headings are sequential on every route |
 | `main` / `h1` | Exactly one `<main>` and one `<h1>` per page — now asserted by a test |
+
+### After this pass
+
+**0 violations of any impact — critical, serious, moderate or minor — on all
+ten routes.** Verified independently, not just by the agent that did the work.
+
+| Route | Before (types/nodes) | After |
+|---|---|---|
+| `/` | 2 / 10 | **0 / 0** |
+| `/leads` | 1 / 5 | **0 / 0** |
+| `/find` | 2 / 12 | **0 / 0** |
+| `/sequences` | 2 / 10 | **0 / 0** |
+| `/inbox` | 3 / 11 | **0 / 0** |
+| `/scrape` | 4 / 13 | **0 / 0** |
+| `/settings` | 2 / 14 | **0 / 0** |
+| `/companies` | 2 / 10 | **0 / 0** |
+| `/email-health` | 2 / 10 | **0 / 0** |
+| `/setup` | 2 / 11 | **0 / 0** |
 
 ### The gate
 
@@ -97,36 +117,52 @@ Measured on a **500,000-lead** database.
 
 ### The dashboard
 
-| Route | Load | FCP | LCP | CLS | API calls |
-|---|---|---|---|---|---|
-| `/` | 661 ms | 44 ms | 44 ms | **0.214** | 5 |
-| `/leads` | 600 ms | 24 ms | 52 ms | **0.28** | 3 |
-| `/find` | 581 ms | 40 ms | 40 ms | 0 | 1 |
-| `/sequences` | 566 ms | 24 ms | 24 ms | **0.087** | 3 |
-| `/inbox` | 564 ms | 24 ms | 24 ms | 0 | 2 |
-| `/scrape` | 567 ms | 24 ms | 24 ms | 0.006 | 2 |
-| `/settings` | **1196 ms** | 28 ms | 28 ms | 0.011 | 3 |
-| `/companies` | 565 ms | 24 ms | 88 ms | 0.031 | 2 |
-| `/email-health` | 569 ms | 24 ms | 24 ms | 0 | 2 |
-| `/setup` | 574 ms | 24 ms | 68 ms | 0 | 2 |
+| Route | Load before | Load after | CLS before | CLS after |
+|---|---|---|---|---|
+| `/` | 661 ms | 579 ms | **0.214** | **0** |
+| `/leads` | 600 ms | 614 ms | **0.28** | **0** |
+| `/find` | 566 ms | 565 ms | 0 | **0** |
+| `/sequences` | 566 ms | 565 ms | **0.087** | **0** |
+| `/inbox` | 565 ms | 563 ms | 0 | **0** |
+| `/scrape` | 565 ms | 574 ms | 0.003 | **0** |
+| `/settings` | **1196 ms** | **564 ms** | 0.011 | **0.001** |
+| `/companies` | 565 ms | 586 ms | 0.031 | **0** |
+| `/email-health` | — | 563 ms | — | **0** |
+| `/setup` | — | 569 ms | — | **0** |
 
-**Two problems that only a real browser could find:**
+**Three problems that only a real browser could find:**
 
 1. **CLS 0.21–0.28 on the two most-used pages.** The pages rendered a short
    "Loading your lead database…" placeholder and then swapped in a much
    taller table, pushing everything down under the user's cursor. Google
    treats CLS > 0.1 as poor. The fix is a skeleton whose dimensions match the
-   real content.
+   real content — verified adversarially by delaying every API response by
+   700 ms, which still gives CLS 0.
 
 2. **`/settings` took twice as long as every other route** (1196 ms vs
-   ~570 ms) — sequential awaits that could run concurrently.
+   ~570 ms). The cause was not a sequential await: the page fired a DNS
+   probe for SPF/DKIM/DMARC, which did **13 sequential blocking TXT
+   lookups** — up to ~39 seconds of a frozen event loop. Fixed in the backend
+   (concurrent lookups, off the event loop) and made an explicit per-mailbox
+   action in the UI.
+
+3. **The lead table was unusable on a phone.** Nine columns crushed into
+   390 px wrapped their headers onto three lines and overlapped their
+   contents. Below `md` it is now a card list.
+
 
 ### Bundle
 
 `recharts` and its d3 dependencies were ending up in the **shared** chunk, so
 every route — the inbox, the scraper, the settings page — downloaded a
-charting library that only the overview ever renders. The chart now lives in
-its own module and is loaded on demand.
+charting library that only the overview ever renders. Measured over the wire:
+
+| | JS per route |
+|---|---|
+| Before | 319 KB |
+| After | **207 KB** |
+
+A 112 KB (35%) reduction on *every* route, not just the overview.
 
 ---
 
@@ -136,12 +172,13 @@ These came from reading the rendered screens, not from any tool.
 
 ### The lead table is unusable on a phone
 
-The table is `min-w-[1560px]` inside a 356 px container on a 390 px phone.
-The user sees a checkbox, a truncated name and a sliver of the score — the
-phone number, the email and the actions are all off-screen behind a
+The table was `min-w-[1560px]` inside a 356 px container on a 390 px phone.
+The user saw a checkbox, a truncated name and a sliver of the score — the
+phone number, the email and the actions were all off-screen behind a
 horizontal scroll with no affordance. **A lead database that cannot show you
-a phone number on a phone is not a lead database.** Below `md` the table
-becomes a card list.
+a phone number on a phone is not a lead database.** Below `md` it is now a
+card list carrying the same information: name, address, score, category,
+rating, phone, WhatsApp, website, email and the actions.
 
 ### Two search boxes doing the same thing
 
