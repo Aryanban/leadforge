@@ -100,6 +100,11 @@ async def get_leads(
     desc: bool = True,
     min_score: Optional[int] = Query(None, ge=0, le=100),
     source: Optional[str] = None,
+    include_demo: bool = Query(
+        True,
+        description="Include the sample rows a fresh database is seeded with. "
+                    "Set false to see only the leads the operator actually found.",
+    ),
     db: AsyncSession = Depends(get_db)
 ):
     offset = (page - 1) * limit
@@ -173,6 +178,11 @@ async def get_leads(
     if source:
         stmt = stmt.where(Business.source == source)
         count_stmt = count_stmt.where(Business.source == source)
+    if not include_demo:
+        stmt = stmt.where(or_(Business.is_demo == False, Business.is_demo.is_(None)))
+        count_stmt = count_stmt.where(
+            or_(Business.is_demo == False, Business.is_demo.is_(None))
+        )
 
     total_res = await db.execute(count_stmt)
     total = total_res.scalar() or 0
