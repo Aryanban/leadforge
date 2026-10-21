@@ -1130,10 +1130,21 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
         # Addresses we already verified as part of the permutation batch - do
         # not open a second connection to the same MX to confirm them again.
         pre_verified: Dict[str, Any] = dict(batch)
+        # Existing contacts for this business, fetched once instead of one
+        # SELECT per discovered address.
+        existing_by_email: Dict[str, Contact] = {}
+        if all_emails:
+            for contact in (await db.execute(
+                select(Contact).where(
+                    Contact.business_id == business.id,
+                    Contact.email.in_(list(all_emails)),
+                )
+            )).scalars().all():
+                if contact.email:
+                    existing_by_email[contact.email.lower()] = contact
+
         for email in all_emails:
-            stmt = select(Contact).where(Contact.business_id == business.id, Contact.email == email)
-            res = await db.execute(stmt)
-            existing_contact = res.scalars().first()
+            existing_contact = existing_by_email.get(email.lower())
 
             # Use the rich result, not the (bool, str) shim, so sub-status,
             # confidence, MX host and role/free flags are persisted. The shim

@@ -262,13 +262,36 @@ async def poll_mailbox(mailbox_id: int) -> Dict[str, int]:
         return out
     now = datetime.now(timezone.utc)
     async with async_session_maker() as db:
+        # Resolve every inbound reply to its Send row in ONE query. The loop
+        # used to issue a SELECT per inbound message, so a mailbox with 50
+        # new replies cost 50 round-trips every five minutes.
+        targets: List[str] = []
+        for _num, refs, _subject, _body, _auto, _headers in inbound:
+            target_id = next((r for r in refs if r in known_ids), None)
+            if target_id:
+                targets.append(target_id)
+        if not targets:
+            return out
+
+        send_rows = (await db.execute(
+            select(Send).where(Send.message_id.in_(targets))
+        )).scalars().all()
+        sends_by_message_id = {s.message_id: s for s in send_rows if s.message_id}
+
+        # The opt-out path needs the contact; fetch them in one go too.
+        contact_ids = {s.contact_id for s in send_rows if s.contact_id}
+        contacts_by_id = {}
+        if contact_ids:
+            for contact in (await db.execute(
+                select(Contact).where(Contact.id.in_(contact_ids))
+            )).scalars().all():
+                contacts_by_id[contact.id] = contact
+
         for _num, refs, subject, body, _auto, headers in inbound:
             target_id = next((r for r in refs if r in known_ids), None)
             if not target_id:
                 continue
-            send = (await db.execute(
-                select(Send).where(Send.message_id == target_id)
-            )).scalars().first()
+            send = sends_by_message_id.get(target_id)
             if not send or send.replied:
                 continue
             # Pass the headers so ``Auto-Submitted`` / ``X-Auto-Reply`` are
@@ -281,7 +304,7 @@ async def poll_mailbox(mailbox_id: int) -> Dict[str, int]:
             send.reply_body = authored_text(body)[:500]
             known_ids.discard(target_id)
             if is_opt_out:
-                contact = await db.get(Contact, send.contact_id)
+                contact = contacts_by_id.get(send.contact_id)
                 if contact is not None and contact.email:
                     await add_suppression(db, contact.email, "replied_stop",
                                           detail=f"campaign {send.campaign_id}")

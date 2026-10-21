@@ -46,13 +46,16 @@ async def list_replies(
         stmt = stmt.where(Send.reply_category == category)
     res = await db.execute(stmt)
 
-    counts = {}
-    for cat in CATEGORIES:
-        c = (await db.execute(
-            select(func.count(Send.id)).where(
-                Send.replied == True, Send.reply_category == cat)
-        )).scalar() or 0
-        counts[cat] = c
+    counts = {cat: 0 for cat in CATEGORIES}
+    # One grouped query instead of one COUNT per category.
+    count_rows = (await db.execute(
+        select(Send.reply_category, func.count(Send.id))
+        .where(Send.replied == True)
+        .group_by(Send.reply_category)
+    )).all()
+    for category, count in count_rows:
+        if category:
+            counts[category] = count
 
     items = []
     for send, contact, business, campaign, step in res.all():

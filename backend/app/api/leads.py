@@ -655,7 +655,9 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
     new_rows: List[dict] = []
     existing_rows: List[dict] = []
     for item in chunk:
-        (existing_rows if item["business"] is not None else new_rows).append(item)
+        # A row is "existing" when it matched a business already in the
+        # database; the matched row itself is fetched in bulk below.
+        (existing_rows if item["business_id"] is not None else new_rows).append(item)
 
     # --- bulk insert the new businesses -----------------------------------
     if new_rows:
@@ -744,8 +746,35 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
 
     # --- update the rows that matched an existing business ----------------
     if existing_rows:
+        # One query for the whole chunk's matched businesses, instead of one
+        # `db.get` per matched row.
+        matched_ids = [item["business_id"] for item in existing_rows if item["business_id"]]
+        existing_by_id = {}
+        if matched_ids:
+            for b in (await db.execute(
+                select(Business).where(Business.id.in_(matched_ids))
+            )).scalars().all():
+                existing_by_id[b.id] = b
+
+        for item in existing_rows:
+            business = existing_by_id.get(item["business_id"])
+            if business is None:
+                continue
+            # Fill in any blanks on the existing record (idempotent re-import).
+            if item["raw_phone"] and not business.phone:
+                business.phone = item["raw_phone"]
+            if item["raw_website"] and not business.website:
+                business.website = item["raw_website"]
+            if item["raw_address"] and not business.address:
+                business.address = item["raw_address"]
+            if item["raw_industry"] and (
+                not business.industry or business.industry == "General"
+            ):
+                business.industry = item["raw_industry"]
+            item["business"] = business
+
         # One query for the whole chunk's contacts, instead of one per row.
-        business_ids = [item["business_id"] for item in existing_rows]
+        business_ids = [item["business_id"] for item in existing_rows if item["business_id"]]
         contacts_by_business: Dict[int, List[Contact]] = {}
         if business_ids:
             rows_c = (await db.execute(
@@ -917,36 +946,35 @@ async def import_leads_csv(
         matched_id = _match(lead)
 
         if matched_id is not None:
-            # Fill in any blanks on the existing record (idempotent re-import).
-            existing = await db.get(Business, matched_id)
-            if existing is not None:
-                if raw_phone and not existing.phone:
-                    existing.phone = raw_phone
-                if raw_website and not existing.website:
-                    existing.website = raw_website
-                if raw_address and not existing.address:
-                    existing.address = raw_address
-                if raw_industry and (not existing.industry or existing.industry == "General"):
-                    existing.industry = raw_industry
-                business = existing
-                business_id = existing.id
-                updated += 1
-            else:
-                business = None
-                business_id = None
+            # The existing row is fetched in bulk by the chunk flusher - one
+            # query for the whole chunk instead of one per matched row.
+            pending.append({
+                "business": None,
+                "business_id": matched_id,
+                "lead": lead,
+                "email": raw_email,
+                "phone": raw_phone,
+                "industry": raw_industry,
+                "raw_phone": raw_phone,
+                "raw_website": raw_website,
+                "raw_address": raw_address,
+                "raw_industry": raw_industry,
+            })
+            updated += 1
         else:
-            business = None
-            business_id = None
+            pending.append({
+                "business": None,
+                "business_id": None,
+                "lead": lead,
+                "email": raw_email,
+                "phone": raw_phone,
+                "industry": raw_industry,
+                "raw_phone": raw_phone,
+                "raw_website": raw_website,
+                "raw_address": raw_address,
+                "raw_industry": raw_industry,
+            })
             imported += 1
-
-        pending.append({
-            "business": business,
-            "business_id": business_id,
-            "lead": lead,
-            "email": raw_email,
-            "phone": raw_phone,
-            "industry": raw_industry,
-        })
 
         if len(pending) >= CHUNK_SIZE:
             await _flush_import_chunk(db, pending, index)
