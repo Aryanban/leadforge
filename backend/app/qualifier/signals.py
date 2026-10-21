@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import Any, Dict, List, Optional
 
@@ -127,7 +128,7 @@ async def _probe_website_health(url: str, timeout: float = 10.0) -> Dict[str, An
                       "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
             response = await client.get(url)
             out["ssl_valid"] = str(response.url).startswith("https://") and response.url.is_secure
             out["final_status_code"] = response.status_code
@@ -182,20 +183,29 @@ async def _probe_facebook_ads(business_name: str, country: str = "IN", timeout: 
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
-            response = await client.get(url)
-            if response.status_code != 200:
-                return {"running_ads": None, "ad_count": None}
-            text = response.text
-            counts = re.findall(r"\"ad_count\"\s*:\s*(\d+)", text)
-            if counts:
-                n = int(counts[0])
-                return {"running_ads": n > 0, "ad_count": n}
-            # Some page variants embed a different key
-            counts = re.findall(r"active_ads\D{0,40}(\d+)", text)
-            if counts:
-                n = int(counts[0])
-                return {"running_ads": n > 0, "ad_count": n}
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+            # The Ad Library page is multi-megabyte of markup and all we
+            # want is two numbers in it. Streaming and stopping at the first
+            # match turns a multi-MB download into a few KB - this runs once
+            # per enriched lead, so the saving is multiplied by the whole
+            # corpus.
+            buffer = ""
+            async with client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    return {"running_ads": None, "ad_count": None}
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    match = re.search(r"\"ad_count\"\s*:\s*(\d+)", buffer)
+                    if match:
+                        n = int(match.group(1))
+                        return {"running_ads": n > 0, "ad_count": n}
+                    # Some page variants embed a different key
+                    match = re.search(r"active_ads\D{0,40}(\d+)", buffer)
+                    if match:
+                        n = int(match.group(1))
+                        return {"running_ads": n > 0, "ad_count": n}
+                    if len(buffer) > 2_000_000:
+                        break
             return {"running_ads": None, "ad_count": None}
     except Exception:
         return {"running_ads": None, "ad_count": None}
@@ -205,11 +215,29 @@ async def probe_business_health(business: Any, country: str = "IN") -> Dict[str,
     """
     Runs the network-dependent probes for a lead and returns a patch to merge into
     business.extra_data so scoring stays offline and repeatable.
+
+    The website probe and the Facebook Ad Library probe are independent
+    network calls, so they run concurrently. Sequentially they cost the sum
+    of both timeouts (up to ~22 seconds per lead); concurrently it is the
+    slower of the two.
     """
-    patch: Dict[str, Any] = {}
     website = getattr(business, "website", None)
-    if website:
-        patch.update(await _probe_website_health(website))
-    ads = await _probe_facebook_ads(getattr(business, "name", "") or "", country=country)
-    patch.update(ads)
+    name = getattr(business, "name", "") or ""
+
+    site_probe, ads_probe = await asyncio.gather(
+        _probe_website_health(website) if website else _empty_probe(),
+        _probe_facebook_ads(name, country=country),
+        return_exceptions=True,
+    )
+
+    patch: Dict[str, Any] = {}
+    if isinstance(site_probe, dict):
+        patch.update(site_probe)
+    if isinstance(ads_probe, dict):
+        patch.update(ads_probe)
     return patch
+
+
+async def _empty_probe() -> Dict[str, Any]:
+    """A no-op probe result, so both branches can be awaited uniformly."""
+    return {}

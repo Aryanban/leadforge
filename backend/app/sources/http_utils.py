@@ -81,14 +81,26 @@ def _proxy_pool() -> List[Optional[str]]:
 
 
 def looks_blocked(html: Optional[str]) -> bool:
-    """True when the response is an interstitial/captcha rather than content."""
+    """True when the response is an interstitial/captcha rather than content.
+
+    The size heuristic used to be "any body under 2 KB is a block stub".
+    That is wrong in both directions and expensive: many legitimate pages
+    are tiny (a minimal one-page site, a JSON endpoint, an Instagram/FB
+    login wall), so every one of them was retried four times with
+    exponential backoff - ~7-9 seconds per URL - and then **discarded**.
+    The social finder alone cost 6.9s per lead and returned nothing.
+
+    A block page is identified by what it *says*, not by how small it is.
+    The size check stays only as a guard for a body that is clearly empty.
+    """
     if not html:
         return True
-    # A block stub is tiny; a real listing page is never under ~2 KB.
-    if len(html) < 2048:
-        return True
     sample = html[:20000].lower()
-    return any(marker in sample for marker in BLOCK_MARKERS)
+    if any(marker in sample for marker in BLOCK_MARKERS):
+        return True
+    # A body that is essentially empty is not content either - but keep the
+    # threshold low so small-but-real pages are never thrown away.
+    return len(html.strip()) < 32
 
 
 async def fetch_html(
@@ -114,61 +126,67 @@ async def fetch_html(
     attempts = max(1, retries + 1)
     last_reason = "unknown"
 
-    for attempt in range(attempts):
-        chosen_proxy = proxy or random.choice(pool)
-        headers = {
-            # Deterministic rotation keyed on the attempt index, so the same
-            # attempt is reproducible in tests while still varying in practice.
-            "User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)],
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
-            # Directories serve different markup to bots that omit these.
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        }
-        try:
-            async with httpx.AsyncClient(
-                timeout=timeout,
-                follow_redirects=True,
-                verify=False,
-                headers=headers,
-                proxy=chosen_proxy,
-            ) as client:
-                response = await client.get(url)
+    # One client for the whole retry loop. A client per attempt meant a new
+    # TLS handshake and no connection reuse on every single request - the
+    # single cheapest performance win in this module.
+    client = httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={},
+        proxy=pool[0],
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
+    try:
+        for attempt in range(attempts):
+            chosen_proxy = proxy or random.choice(pool)
+            headers = {
+                # Deterministic rotation keyed on the attempt index, so the same
+                # attempt is reproducible in tests while still varying in practice.
+                "User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)],
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+                # Directories serve different markup to bots that omit these.
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            }
+            try:
+                response = await client.get(url, headers=headers, proxy=chosen_proxy)
 
-            if response.status_code == 200:
-                body = response.text
-                if looks_blocked(body):
-                    last_reason = "blocked_page"
+                if response.status_code == 200:
+                    body = response.text
+                    if looks_blocked(body):
+                        last_reason = "blocked_page"
+                    else:
+                        return body
+                elif response.status_code in (403, 429, 503):
+                    # Retryable: rate limit or a client fingerprint we can change.
+                    last_reason = f"http_{response.status_code}"
+                elif 400 <= response.status_code < 500:
+                    # A genuine client error (404/410/gone) will not fix itself.
+                    logger.debug(f"fetch_html {url} -> HTTP {response.status_code} (not retrying)")
+                    return None
                 else:
-                    return body
-            elif response.status_code in (403, 429, 503):
-                # Retryable: rate limit or a client fingerprint we can change.
-                last_reason = f"http_{response.status_code}"
-            elif 400 <= response.status_code < 500:
-                # A genuine client error (404/410/gone) will not fix itself.
-                logger.debug(f"fetch_html {url} -> HTTP {response.status_code} (not retrying)")
-                return None
-            else:
-                last_reason = f"http_{response.status_code}"
+                    last_reason = f"http_{response.status_code}"
 
-        except Exception as e:
-            last_reason = f"{type(e).__name__}"
+            except Exception as e:
+                last_reason = f"{type(e).__name__}"
 
-        if attempt < attempts - 1:
-            delay = backoff ** attempt + random.uniform(0, 0.5)
-            logger.debug(f"fetch_html {url} attempt {attempt + 1} failed ({last_reason}); retry in {delay:.1f}s")
-            await asyncio.sleep(delay)
+            if attempt < attempts - 1:
+                delay = backoff ** attempt + random.uniform(0, 0.5)
+                logger.debug(f"fetch_html {url} attempt {attempt + 1} failed ({last_reason}); retry in {delay:.1f}s")
+                await asyncio.sleep(delay)
 
-    logger.debug(f"fetch_html {url} gave up after {attempts} attempts ({last_reason})")
-    return None
+        logger.debug(f"fetch_html {url} gave up after {attempts} attempts ({last_reason})")
+        return None
+    finally:
+        await client.aclose()
 
 
 def slugify(value: str) -> str:

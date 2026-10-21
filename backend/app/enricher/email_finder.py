@@ -1,11 +1,14 @@
+import asyncio
+import random
 import httpx
 from bs4 import BeautifulSoup
 import re
 import urllib.parse
 from urllib.parse import urlparse, urljoin
+from urllib.robotparser import RobotFileParser
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Set, Any, Optional
+from typing import Dict, List, Set, Tuple, Any, Optional
 from sqlalchemy import select
 
 from app.database import async_session_maker
@@ -24,6 +27,60 @@ from app.enricher.pattern import generate_candidates
 
 logger = logging.getLogger(__name__)
 
+#: User-Agent strings used for outbound requests, rotated between retries.
+#: A single static UA is the easiest fingerprint to block on.
+#:
+#: ``app.sources.http_utils`` already owns the canonical list; it does not
+#: import anything from ``app.enricher``, so reusing it here cannot create a
+#: circular import. The fallback keeps this module importable on its own.
+try:  # pragma: no cover - defensive import of a shared constant
+    from app.sources.http_utils import USER_AGENTS as _SHARED_USER_AGENTS
+except Exception:  # pragma: no cover
+    _SHARED_USER_AGENTS = ()
+
+CRAWL_USER_AGENTS: Tuple[str, ...] = tuple(_SHARED_USER_AGENTS) or (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+)
+
+#: How many pages of a single site are fetched *concurrently*.
+#:
+#: The page budget is unaffected: the crawler walks the work queue in
+#: batches of at most this size and never fetches more than ``max_pages``
+#: distinct URLs in total.
+CRAWL_PAGE_CONCURRENCY = 4
+
+#: Retries (on top of the first attempt) for a single page fetch.
+CRAWL_FETCH_RETRIES = 2
+
+#: Retries for a single search-engine query.
+SEARCH_FETCH_RETRIES = 2
+
+#: Base delay of the exponential backoff between retries (seconds).
+RETRY_BACKOFF = 0.8
+
+#: Timeout for the robots.txt lookup - it must never dominate a crawl.
+ROBOTS_TIMEOUT = 5.0
+
+#: Upper bound honoured for a robots.txt ``Crawl-delay`` (seconds).
+MAX_CRAWL_DELAY = 3.0
+
+#: Token used when matching robots.txt rules against our own requests.
+ROBOTS_USER_AGENT = "LeadForgeBot"
+
+#: Transient failures worth another attempt.
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+
+SITE_HEADERS = {
+    "User-Agent": CRAWL_USER_AGENTS[0],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+}
+
 EMAIL_REGEX = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
 PHONE_REGEX = re.compile(r'(\+?91[\s-]?[6789]\d{9}|0?[6789]\d{4}\s*\d{5}|0?[6789]\d{9}|\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})')
 
@@ -34,6 +91,199 @@ EXCLUDED_EMAIL_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '
 # handled by email_status.detect_placeholder_domain, which knows the difference
 # between sentry.io/example.com and a company's actual mail domain.
 EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.com', 'email.com', 'schema.org')
+
+
+# ---------------------------------------------------------------------------
+# HTTP plumbing shared by the search stage and the site crawler
+# ---------------------------------------------------------------------------
+
+def _build_http_client(timeout: float = 12.0) -> httpx.AsyncClient:
+    """A pooled client with browser-ish headers and *verified* TLS.
+
+    A single client pools connections internally, so one client per crawl
+    (rather than one per page) is what makes the crawl fast.
+
+    TLS verification is left at httpx's default (on). The old crawler ran
+    with ``verify=False``, which is both a MITM hole and a bot signal.
+    """
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=SITE_HEADERS,
+        limits=httpx.Limits(
+            max_connections=CRAWL_PAGE_CONCURRENCY + 2,
+            max_keepalive_connections=CRAWL_PAGE_CONCURRENCY + 2,
+        ),
+    )
+
+
+def _request_headers(attempt: int) -> Dict[str, str]:
+    """Headers for one attempt, rotating the User-Agent between retries."""
+    ua = CRAWL_USER_AGENTS[attempt % len(CRAWL_USER_AGENTS)]
+    return {
+        "User-Agent": ua,
+        "Accept": SITE_HEADERS["Accept"],
+        "Accept-Language": SITE_HEADERS["Accept-Language"],
+    }
+
+
+def _backoff_delay(attempt: int, base: float = RETRY_BACKOFF) -> float:
+    """Exponential backoff with jitter, so parallel crawls do not sync up."""
+    return (base * (2 ** attempt)) + random.uniform(0, 0.5)
+
+
+def _is_tls_error(exc: BaseException) -> bool:
+    """True when an exception was caused by a certificate problem."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "ssl" in text or "certificate" in text
+
+
+async def _get_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    retries: int = CRAWL_FETCH_RETRIES,
+    timeout: Optional[float] = None,
+) -> Optional[httpx.Response]:
+    """GET with retries, exponential backoff, jitter and UA rotation.
+
+    Only transient failures are retried: connection errors, timeouts and
+    429/5xx responses. A 404 (or any other 4xx that will not fix itself) is
+    returned immediately so the retry budget is not wasted on it.
+
+    Never raises - a failed request comes back as ``None``.
+    """
+    attempts = max(1, retries + 1)
+    last_error: Optional[str] = None
+
+    for attempt in range(attempts):
+        try:
+            kwargs: Dict[str, Any] = {"headers": _request_headers(attempt)}
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            response = await client.get(url, **kwargs)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if _is_tls_error(exc):
+                logger.warning(
+                    "TLS verification failed for %s (%s). The certificate of "
+                    "this host must be fixed for enrichment to work.",
+                    urlparse(url).netloc, last_error,
+                )
+            if attempt < attempts - 1:
+                await asyncio.sleep(_backoff_delay(attempt))
+                continue
+            logger.debug("GET %s failed after %d attempts (%s)", url, attempts, last_error)
+            return None
+
+        if response.status_code in RETRYABLE_STATUS and attempt < attempts - 1:
+            last_error = f"HTTP {response.status_code}"
+            logger.debug(
+                "GET %s -> %s; retrying", url, response.status_code,
+            )
+            await asyncio.sleep(_backoff_delay(attempt))
+            continue
+
+        return response
+
+    return None
+
+
+def _normalize_site_url(url: str) -> str:
+    """Adds the https:// scheme a bare domain is missing."""
+    if not url:
+        return ""
+    url = url.strip()
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+    return url
+
+
+def _normalize_crawl_url(url: str) -> str:
+    """Canonical key for a URL: no fragment, no trailing slash, lower-case host.
+
+    Used for de-duplication so ``/contact`` and ``/contact/`` are recognised
+    as the same page and are never fetched twice.
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return ""
+    scheme = (parsed.scheme or "https").lower()
+    netloc = parsed.netloc.lower()
+    if not netloc:
+        return ""
+    path = parsed.path or "/"
+    if len(path) > 1:
+        path = path.rstrip("/")
+    out = f"{scheme}://{netloc}{path}"
+    if parsed.query:
+        out += f"?{parsed.query}"
+    return out
+
+
+async def _robots_parser(
+    client: httpx.AsyncClient,
+    origin: str,
+    cache: Dict[str, Optional[RobotFileParser]],
+) -> Optional[RobotFileParser]:
+    """Fetches and caches ``/robots.txt`` for one origin.
+
+    A missing (or unreadable) robots.txt means "no restrictions", which is
+    the standard interpretation.
+    """
+    if origin in cache:
+        return cache[origin]
+
+    parser: Optional[RobotFileParser] = None
+    try:
+        response = await client.get(f"{origin}/robots.txt", timeout=ROBOTS_TIMEOUT)
+        if response.status_code == 200:
+            parser = RobotFileParser()
+            parser.parse(response.text.splitlines())
+    except Exception as exc:
+        logger.debug("robots.txt lookup failed for %s: %s", origin, exc)
+
+    cache[origin] = parser
+    return parser
+
+
+async def _robots_allows(
+    client: httpx.AsyncClient,
+    url: str,
+    cache: Dict[str, Optional[RobotFileParser]],
+) -> bool:
+    """Whether robots.txt permits us to fetch ``url``."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    parser = await _robots_parser(client, origin, cache)
+    if parser is None:
+        return True
+    try:
+        return bool(parser.can_fetch(ROBOTS_USER_AGENT, url))
+    except Exception:
+        return True
+
+
+async def _respect_crawl_delay(
+    client: httpx.AsyncClient,
+    url: str,
+    cache: Dict[str, Optional[RobotFileParser]],
+) -> None:
+    """Honours a robots.txt ``Crawl-delay`` (capped so it cannot hang a crawl)."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    parser = await _robots_parser(client, origin, cache)
+    if parser is None:
+        return
+    try:
+        delay = parser.crawl_delay(ROBOTS_USER_AGENT)
+    except Exception:
+        delay = None
+    if delay and delay > 0:
+        await asyncio.sleep(min(float(delay), MAX_CRAWL_DELAY))
 
 #: Call-to-action and boilerplate phrases that the title regex used to
 #: mistake for people's names. "Read more - owner" became the contact
@@ -223,6 +473,75 @@ def calculate_lead_quality_score(business: Any, contacts: List[Any]) -> Dict[str
     return result
 
 
+def _extract_contacts_from_text(text: str, emails: Set[str], phones: Set[str]) -> None:
+    """Adds every email / phone number found in a block of text."""
+    for em in EMAIL_REGEX.findall(text):
+        em_clean = em.lower().strip(".")
+        if any(em_clean.endswith(ext) for ext in EXCLUDED_EMAIL_EXTENSIONS):
+            continue
+        domain = em_clean.split("@")[-1] if "@" in em_clean else ""
+        if domain and not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
+            emails.add(em_clean)
+
+    for ph in PHONE_REGEX.findall(text):
+        clean_ph = ph[0] if isinstance(ph, tuple) else ph
+        digits = re.sub(r'\D', '', clean_ph)
+        if 10 <= len(digits) <= 13:
+            phones.add(clean_ph.strip())
+
+
+async def _search_yahoo(
+    client: httpx.AsyncClient,
+    search_query: str,
+    emails: Set[str],
+    phones: Set[str],
+    websites: List[str],
+) -> None:
+    """Engine 1: Yahoo Search."""
+    try:
+        y_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(search_query)}"
+        res = await _get_with_retry(client, y_url, retries=SEARCH_FETCH_RETRIES)
+        if res is None or res.status_code != 200:
+            return
+        soup_y = BeautifulSoup(res.text, "html.parser")
+        for item in soup_y.select("div.algo"):
+            text = item.get_text(" ", strip=True)
+            _extract_contacts_from_text(text, emails, phones)
+            link = item.select_one("a[href^='http']")
+            if link:
+                href = link.get("href", "")
+                m = re.search(r'/RU=(.*?)/RK=', href)
+                target_url = urllib.parse.unquote(m.group(1)) if m else href
+                if target_url.startswith("http") and not any(x in target_url for x in [
+                    "yahoo.com", "bing.com", "google.com", "facebook.com",
+                    "instagram.com", "twitter.com", "youtube.com"
+                ]):
+                    websites.append(target_url)
+    except Exception as y_err:
+        logger.debug(f"Yahoo search error: {y_err}")
+
+
+async def _search_bing(
+    client: httpx.AsyncClient,
+    clean_name: str,
+    clean_location: str,
+    emails: Set[str],
+    phones: Set[str],
+) -> None:
+    """Engine 2: Bing Search."""
+    try:
+        b_url = f"https://www.bing.com/search?q={urllib.parse.quote(f'{clean_name} {clean_location} phone email')}"
+        res = await _get_with_retry(client, b_url, retries=SEARCH_FETCH_RETRIES)
+        if res is None or res.status_code != 200:
+            return
+        soup_b = BeautifulSoup(res.text, "html.parser")
+        for item in soup_b.select("li.b_algo"):
+            text = item.get_text(" ", strip=True)
+            _extract_contacts_from_text(text, emails, phones)
+    except Exception as b_err:
+        logger.debug(f"Bing search error: {b_err}")
+
+
 async def search_web_for_business_contacts(name: str, location: str = "") -> Dict[str, Any]:
     """
     Searches across Yahoo, Bing, and web directories to discover missing business
@@ -237,60 +556,21 @@ async def search_web_for_business_contacts(name: str, location: str = "") -> Dic
     clean_location = re.sub(r'[:|\-·]+.*$', '', location).strip()
     search_query = f'"{clean_name}" {clean_location} phone contact email'.strip()
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    def _extract_from_text(text: str):
-        for em in EMAIL_REGEX.findall(text):
-            em_clean = em.lower().strip(".")
-            if not any(em_clean.endswith(ext) for ext in EXCLUDED_EMAIL_EXTENSIONS):
-                domain = em_clean.split("@")[-1] if "@" in em_clean else ""
-                if domain and not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
-                    emails.add(em_clean)
-
-        for ph in PHONE_REGEX.findall(text):
-            clean_ph = ph[0] if isinstance(ph, tuple) else ph
-            digits = re.sub(r'\D', '', clean_ph)
-            if 10 <= len(digits) <= 13:
-                phones.add(clean_ph.strip())
-
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=12.0, follow_redirects=True, verify=False) as client:
-            # Engine 1: Yahoo Search
-            try:
-                y_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(search_query)}"
-                res_y = await client.get(y_url)
-                if res_y.status_code == 200:
-                    soup_y = BeautifulSoup(res_y.text, "html.parser")
-                    for item in soup_y.select("div.algo"):
-                        text = item.get_text(" ", strip=True)
-                        _extract_from_text(text)
-                        link = item.select_one("a[href^='http']")
-                        if link:
-                            href = link.get("href", "")
-                            m = re.search(r'/RU=(.*?)/RK=', href)
-                            target_url = urllib.parse.unquote(m.group(1)) if m else href
-                            if target_url.startswith("http") and not any(x in target_url for x in [
-                                "yahoo.com", "bing.com", "google.com", "facebook.com", 
-                                "instagram.com", "twitter.com", "youtube.com"
-                            ]):
-                                websites.append(target_url)
-            except Exception as y_err:
-                logger.debug(f"Yahoo search error for '{name}': {y_err}")
-
-            # Engine 2: Bing Search
-            try:
-                b_url = f"https://www.bing.com/search?q={urllib.parse.quote(f'{clean_name} {clean_location} phone email')}"
-                res_b = await client.get(b_url)
-                if res_b.status_code == 200:
-                    soup_b = BeautifulSoup(res_b.text, "html.parser")
-                    for item in soup_b.select("li.b_algo"):
-                        text = item.get_text(" ", strip=True)
-                        _extract_from_text(text)
-            except Exception as b_err:
-                logger.debug(f"Bing search error for '{name}': {b_err}")
+        async with _build_http_client(timeout=12.0) as client:
+            # Yahoo and Bing are independent requests to two different hosts.
+            # They used to be awaited one after the other, so every lead paid
+            # for the sum of both engines' latencies. Running them together
+            # costs the slower engine instead of the sum - and neither engine
+            # can take the other one down with it.
+            results = await asyncio.gather(
+                _search_yahoo(client, search_query, emails, phones, websites),
+                _search_bing(client, clean_name, clean_location, emails, phones),
+                return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, BaseException):
+                    logger.debug("Web search engine failed: %s", res)
 
     except Exception as e:
         logger.warning(f"Web search discovery error for '{name}': {e}")
@@ -302,172 +582,373 @@ async def search_web_for_business_contacts(name: str, location: str = "") -> Dic
     }
 
 
-async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, Any]:
-    """
-    Crawls a target business website, prioritizing contact/about subpages,
-    and extracts emails, phone numbers, WhatsApp links, and social links.
-    """
-    if not url:
-        return {"emails": [], "phones": [], "whatsapp": None, "socials": {}}
+#: Titles that actually appear on Indian SMB sites. The old list missed
+#: MD, Principal (e.g. "Principal Dentist" - the dental norm), General
+#: Manager, Promoter and Chairman, which together cover the majority of
+#: owner-operator titles in the target market.
+_EXEC_TITLES = [
+    r'founder', r'co-founder', r'ceo', r'chief executive officer',
+    r'managing director', r'md', r'director', r'principal(?:\s+\w+)?',
+    r'general manager', r'manager', r'promoter', r'chairman',
+    r'chairperson', r'president', r'owner', r'partner', r'proprietor',
+    r'administrator', r'head of \w+', r'vice president', r'vp',
+]
 
-    if not url.startswith("http://") and not url.startswith("https://"):
-        url = "https://" + url
+#: The separator class includes the em-dash (U+2014), en-dash (U+2013) and
+#: bullet (U+2022) - all three are used by Indian SMB sites and all three
+#: were silently failing to split name from title.
+_TITLE_PATTERN = re.compile(
+    r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,2})\s*'
+    r'(?:[-\u2013\u2014\u2022|,;:()]|\bis\b|\bas\b|&)\s*('
+    + '|'.join(_EXEC_TITLES) + r')\b',
+    re.IGNORECASE
+)
 
+
+def _is_x_host(href: str, host: str) -> bool:
+    """Whether a link points at ``host`` (or one of its sub-domains).
+
+    The old check was a plain ``"x.com" in href`` substring test, which
+    matched every URL that merely *contained* those characters - so a link
+    to ``https://www.max.com/`` was filed as a Twitter profile.
+    """
+    try:
+        parsed = urlparse(href)
+    except Exception:
+        return False
+    netloc = (parsed.netloc or "").lower().split(":")[0]
+    if not netloc:
+        return False
+    return netloc == host or netloc.endswith("." + host)
+
+
+def _extract_page_contacts(
+    html_text: str,
+    current_url: str,
+    base_domain: str,
+) -> Dict[str, Any]:
+    """Every contact signal on one page of HTML.
+
+    Pure function (no network), so the crawler can run it over pages it
+    fetched concurrently without any shared mutable state.
+    """
     emails: Set[str] = set()
     phones: Set[str] = set()
     whatsapp_links: Set[str] = set()
     socials: Dict[str, str] = {}
-    visited: Set[str] = set()
+    executives: List[Dict[str, str]] = []
+    internal_links: List[str] = []
+
+    # 1. Regex email search + deobfuscated text search
+    normalized_text = deobfuscate_text_emails(html_text)
+    for em in EMAIL_REGEX.findall(normalized_text):
+        em_clean = em.lower().strip(".")
+        if any(em_clean.endswith(ext) for ext in EXCLUDED_EMAIL_EXTENSIONS):
+            continue
+        domain = em_clean.split("@")[-1] if "@" in em_clean else ""
+        if domain and not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
+            emails.add(em_clean)
+
+    # 2. Regex phone search
+    for ph in PHONE_REGEX.findall(html_text):
+        clean_ph = ph[0] if isinstance(ph, tuple) else ph
+        if len(re.sub(r'\D', '', clean_ph)) >= 10:
+            phones.add(clean_ph.strip())
+
+    # 3. DOM parsing for Cloudflare emails, mailto:, tel:, WhatsApp, and Socials
+    soup = BeautifulSoup(html_text, 'html.parser')
+
+    # Cloudflare email protection decode
+    for cf_el in soup.select('[data-cfemail], .__cf_email__'):
+        cf_hex = cf_el.get('data-cfemail') or cf_el.get('href', '').split('#')[-1]
+        if cf_hex:
+            cf_email = decode_cloudflare_email(cf_hex)
+            if cf_email and not any(ex in cf_email for ex in EXCLUDED_EMAIL_DOMAINS):
+                emails.add(cf_email)
+
+    # Executive detection on about/team pages
+    text_clean = soup.get_text(" ", strip=True)
+    for match in _TITLE_PATTERN.finditer(text_clean):
+        found_name, found_title = match.group(1).strip(), match.group(2).strip()
+        if not _is_plausible_person_name(found_name):
+            continue
+        executives.append({"name": found_name, "title": found_title.title()})
+
+    for link in soup.find_all('a', href=True):
+        href = link['href'].strip()
+        lowered = href.lower()
+
+        # Mailto links
+        if lowered.startswith('mailto:'):
+            em = href[href.lower().index('mailto:') + len('mailto:'):].split('?')[0].strip()
+            if EMAIL_REGEX.match(em):
+                em_clean = em.lower()
+                domain = em_clean.rpartition("@")[2]
+                if domain and not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
+                    emails.add(em_clean)
+
+        # Tel links
+        elif lowered.startswith('tel:'):
+            ph = href[href.lower().index('tel:') + len('tel:'):].split('?')[0].strip()
+            if len(re.sub(r'\D', '', ph)) >= 10:
+                phones.add(ph)
+
+        # WhatsApp links
+        elif 'wa.me' in href or 'api.whatsapp.com' in href:
+            whatsapp_links.add(href)
+
+        # Social Profiles
+        elif 'linkedin.com/company' in href or 'linkedin.com/in' in href:
+            socials['linkedin'] = href
+        elif 'facebook.com' in href and not any(x in href for x in ['sharer', 'dialog']):
+            socials['facebook'] = href
+        elif 'instagram.com' in href and not any(x in href for x in ['share', 'p/']):
+            socials['instagram'] = href
+        elif 'twitter.com' in href or _is_x_host(href, 'x.com'):
+            socials['twitter'] = href
+        elif 'youtube.com' in href:
+            socials['youtube'] = href
+
+        # Internal page discovery - external links are never followed, so the
+        # page budget is never spent on somebody else's website.
+        else:
+            full_next = urljoin(current_url, href)
+            next_parsed = urlparse(full_next)
+            next_domain = next_parsed.netloc.lower().replace("www.", "")
+
+            if next_domain == base_domain:
+                internal_links.append(full_next)
+
+    return {
+        "emails": emails,
+        "phones": phones,
+        "whatsapp": whatsapp_links,
+        "socials": socials,
+        "executives": executives,
+        "internal_links": internal_links,
+    }
+
+
+async def _fetch_page_html(client: httpx.AsyncClient, url: str) -> Optional[str]:
+    """Fetches one page and returns its HTML (``None`` on any failure)."""
+    response = await _get_with_retry(client, url, retries=CRAWL_FETCH_RETRIES)
+    if response is None or response.status_code != 200:
+        return None
+    content_type = response.headers.get("content-type", "")
+    # A missing content-type is not a reason to throw a real page away; a
+    # non-HTML content type is.
+    if content_type and ("text/html" not in content_type and "xhtml" not in content_type):
+        return None
+    return response.text
+
+
+async def _crawl_with_client(
+    client: httpx.AsyncClient,
+    url: str,
+    max_pages: int,
+    homepage_html: Optional[str],
+) -> Dict[str, Any]:
+    """The crawl itself. See :func:`crawl_website_for_contacts`."""
+    emails: Set[str] = set()
+    phones: Set[str] = set()
+    whatsapp_links: Set[str] = set()
+    socials: Dict[str, str] = {}
     executives: List[Dict[str, str]] = []
 
     parsed_base = urlparse(url)
     base_domain = parsed_base.netloc.lower().replace("www.", "")
 
-    to_visit: List[str] = [url]
+    #: Normalised URLs that have been *scheduled*. A URL is reserved BEFORE
+    #: the request goes out, so a page can never be fetched twice - not when
+    #: the same link appears twice on a page, and not when two pages of the
+    #: same batch both link to it.
+    visited: Set[str] = set()
+    #: URLs already sitting in one of the queues (stops duplicate entries).
+    queued: Set[str] = set()
     priority_queue: List[str] = []
+    to_visit: List[str] = []
+    robots_cache: Dict[str, Optional[RobotFileParser]] = {}
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+    #: The homepage is handled on its own (it may already have been supplied
+    #: by the caller) so its links can seed the next batch.
+    pending: List[Tuple[str, Optional[str]]] = [(url, homepage_html)]
+    attempted = 0
+    homepage_used = homepage_html
 
-    # Titles that actually appear on Indian SMB sites. The old list missed
-    # MD, Principal (e.g. "Principal Dentist" - the dental norm), General
-    # Manager, Promoter and Chairman, which together cover the majority of
-    # owner-operator titles in the target market.
-    EXEC_TITLES = [
-        r'founder', r'co-founder', r'ceo', r'chief executive officer',
-        r'managing director', r'md', r'director', r'principal(?:\s+\w+)?',
-        r'general manager', r'manager', r'promoter', r'chairman',
-        r'chairperson', r'president', r'owner', r'partner', r'proprietor',
-        r'administrator', r'head of \w+', r'vice president', r'vp',
-    ]
-    TITLE_PATTERN = re.compile(
-        # The separator class now includes the em-dash (U+2014), en-dash
-        # (U+2013) and bullet (U+2022) - all three are used by Indian SMB
-        # sites and all three were silently failing to split name from title.
-        r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,2})\s*'
-        r'(?:[-\u2013\u2014\u2022|,;:()]|\bis\b|\bas\b|&)\s*('
-        + '|'.join(EXEC_TITLES) + r')\b',
-        re.IGNORECASE
-    )
+    while attempted < max_pages and (pending or priority_queue or to_visit):
+        batch: List[Tuple[str, Optional[str]]] = []
+        batch_size = max(1, min(CRAWL_PAGE_CONCURRENCY, max_pages - attempted))
 
-    async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, verify=False, headers=headers) as client:
-        while (priority_queue or to_visit) and len(visited) < max_pages:
-            current_url = priority_queue.pop(0) if priority_queue else to_visit.pop(0)
-            
-            clean_curr = current_url.split("#")[0].rstrip("/")
-            if clean_curr in visited:
+        if pending:
+            batch = pending[:1]
+            pending = []
+        else:
+            # Contact/about pages first (same priority the serial crawler
+            # used), then whatever else the site links to.
+            while priority_queue and len(batch) < batch_size:
+                batch.append((priority_queue.pop(0), None))
+            while to_visit and len(batch) < batch_size:
+                batch.append((to_visit.pop(0), None))
+
+        if not batch:
+            break
+
+        # Reserve the URLs *before* fetching them.
+        targets: List[Tuple[str, Optional[str]]] = []
+        for target, pre_html in batch:
+            norm = _normalize_crawl_url(target)
+            if not norm or norm in visited:
                 continue
-            visited.add(clean_curr)
+            visited.add(norm)
+            targets.append((target, pre_html))
 
-            try:
-                response = await client.get(current_url)
-                if response.status_code != 200:
-                    continue
+        if not targets:
+            continue
 
-                content_type = response.headers.get("content-type", "")
-                if "text/html" not in content_type:
-                    continue
-
-                html_text = response.text
-
-                # 1. Regex email search + deobfuscated text search
-                normalized_text = deobfuscate_text_emails(html_text)
-                raw_emails = EMAIL_REGEX.findall(normalized_text)
-                for em in raw_emails:
-                    em_clean = em.lower().strip(".")
-                    if not any(em_clean.endswith(ext) for ext in EXCLUDED_EMAIL_EXTENSIONS):
-                        domain = em_clean.split("@")[-1] if "@" in em_clean else ""
-                        if domain and not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
-                            emails.add(em_clean)
-
-                # 2. Regex phone search
-                raw_phones = PHONE_REGEX.findall(html_text)
-                for ph in raw_phones:
-                    clean_ph = ph[0] if isinstance(ph, tuple) else ph
-                    if len(re.sub(r'\D', '', clean_ph)) >= 10:
-                        phones.add(clean_ph.strip())
-
-                # 3. DOM parsing for Cloudflare emails, mailto:, tel:, WhatsApp, and Socials
-                soup = BeautifulSoup(html_text, 'html.parser')
-
-                # Cloudflare email protection decode
-                for cf_el in soup.select('[data-cfemail], .__cf_email__'):
-                    cf_hex = cf_el.get('data-cfemail') or cf_el.get('href', '').split('#')[-1]
-                    if cf_hex:
-                        cf_email = decode_cloudflare_email(cf_hex)
-                        if cf_email and not any(ex in cf_email for ex in EXCLUDED_EMAIL_DOMAINS):
-                            emails.add(cf_email)
-
-                # Executive detection on about/team pages
-                text_clean = soup.get_text(" ", strip=True)
-                for match in TITLE_PATTERN.finditer(text_clean):
-                    found_name, found_title = match.group(1).strip(), match.group(2).strip()
-                    if not _is_plausible_person_name(found_name):
-                        continue
-                    executives.append({"name": found_name, "title": found_title.title()})
-                
-                for link in soup.find_all('a', href=True):
-                    href = link['href'].strip()
-
-                    # Mailto links
-                    if href.lower().startswith('mailto:'):
-                        em = href.split('mailto:')[1].split('?')[0].strip()
-                        if EMAIL_REGEX.match(em):
-                            em_clean = em.lower()
-                            domain = em_clean.split("@")[-1]
-                            if not any(ex in domain for ex in EXCLUDED_EMAIL_DOMAINS):
-                                emails.add(em_clean)
-
-                    # Tel links
-                    elif href.lower().startswith('tel:'):
-                        ph = href.split('tel:')[1].split('?')[0].strip()
-                        if len(re.sub(r'\D', '', ph)) >= 10:
-                            phones.add(ph)
-
-                    # WhatsApp links
-                    elif 'wa.me' in href or 'api.whatsapp.com' in href:
-                        whatsapp_links.add(href)
-
-                    # Social Profiles
-                    elif 'linkedin.com/company' in href or 'linkedin.com/in' in href:
-                        socials['linkedin'] = href
-                    elif 'facebook.com' in href and not any(x in href for x in ['sharer', 'dialog']):
-                        socials['facebook'] = href
-                    elif 'instagram.com' in href and not any(x in href for x in ['share', 'p/']):
-                        socials['instagram'] = href
-                    elif 'twitter.com' in href or 'x.com' in href:
-                        socials['twitter'] = href
-                    elif 'youtube.com' in href:
-                        socials['youtube'] = href
-
-                    # Internal page discovery
-                    else:
-                        full_next = urljoin(current_url, href)
-                        next_parsed = urlparse(full_next)
-                        next_domain = next_parsed.netloc.lower().replace("www.", "")
-
-                        if next_domain == base_domain:
-                            path_lower = next_parsed.path.lower()
-                            if any(kw in path_lower for kw in CONTACT_PRIORITY_KEYWORDS):
-                                if full_next not in visited and full_next not in priority_queue:
-                                    priority_queue.append(full_next)
-                            else:
-                                if full_next not in visited and full_next not in to_visit and len(to_visit) < 10:
-                                    to_visit.append(full_next)
-
-            except Exception as e:
-                logger.debug(f"Error crawling {current_url}: {e}")
+        # robots.txt
+        allowed: List[Tuple[str, Optional[str]]] = []
+        for target, pre_html in targets:
+            if pre_html is not None:
+                allowed.append((target, pre_html))
                 continue
+            if await _robots_allows(client, target, robots_cache):
+                allowed.append((target, None))
+            else:
+                logger.debug("robots.txt disallows %s", target)
+
+        if not allowed:
+            continue
+
+        attempted += len(allowed)
+        await _respect_crawl_delay(client, allowed[0][0], robots_cache)
+
+        # Pages the caller already fetched are used as-is; the rest are
+        # fetched concurrently over the one pooled client.
+        html_results: List[Optional[str]] = [None] * len(allowed)
+        fetch_indexes: List[int] = []
+        for idx, (_target, pre_html) in enumerate(allowed):
+            if pre_html is not None:
+                html_results[idx] = pre_html
+            else:
+                fetch_indexes.append(idx)
+
+        if fetch_indexes:
+            if len(fetch_indexes) == 1:
+                fetched = [await _fetch_page_html(client, allowed[fetch_indexes[0]][0])]
+            else:
+                fetched = await asyncio.gather(
+                    *[_fetch_page_html(client, allowed[i][0]) for i in fetch_indexes]
+                )
+            for idx, html_text in zip(fetch_indexes, fetched):
+                html_results[idx] = html_text
+
+        for (target, _pre_html), html_text in zip(allowed, html_results):
+            if not html_text:
+                continue
+            if _normalize_crawl_url(target) == _normalize_crawl_url(url) and homepage_used is None:
+                homepage_used = html_text
+
+            data = _extract_page_contacts(html_text, target, base_domain)
+            emails.update(data["emails"])
+            phones.update(data["phones"])
+            whatsapp_links.update(data["whatsapp"])
+            socials.update(data["socials"])
+            executives.extend(data["executives"])
+
+            for link in data["internal_links"]:
+                norm = _normalize_crawl_url(link)
+                if not norm or norm in visited or norm in queued:
+                    continue
+                queued.add(norm)
+                path_lower = urlparse(link).path.lower()
+                if any(kw in path_lower for kw in CONTACT_PRIORITY_KEYWORDS):
+                    priority_queue.append(link)
+                elif len(to_visit) < 10:
+                    to_visit.append(link)
 
     return {
         "emails": list(emails),
         "phones": list(phones),
         "whatsapp": list(whatsapp_links)[0] if whatsapp_links else None,
         "socials": socials,
-        "executives": executives[:5]
+        "executives": executives[:5],
+        "homepage_html": homepage_used,
     }
+
+
+async def crawl_website_for_contacts(
+    url: str,
+    max_pages: int = 4,
+    homepage_html: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    """
+    Crawls a target business website, prioritizing contact/about subpages,
+    and extracts emails, phone numbers, WhatsApp links, and social links.
+
+    ``homepage_html`` lets the caller supply a homepage it has already
+    fetched, so the homepage is downloaded once per lead and can be shared
+    with the social finder instead of being fetched twice.
+
+    ``client`` lets the caller supply a pooled client. When omitted, one
+    client is created and reused for every page of the crawl.
+    """
+    if not url:
+        return {"emails": [], "phones": [], "whatsapp": None, "socials": {},
+                "executives": [], "homepage_html": None}
+
+    url = _normalize_site_url(url)
+
+    if client is not None:
+        return await _crawl_with_client(client, url, max_pages, homepage_html)
+
+    async with _build_http_client(timeout=12.0) as owned_client:
+        return await _crawl_with_client(owned_client, url, max_pages, homepage_html)
+
+
+async def _probe_business_health_concurrent(business: Any, country: str = "IN") -> Dict[str, Any]:
+    """Runs the two network probes of ``probe_business_health`` in parallel.
+
+    ``app.qualifier.signals.probe_business_health`` awaits the website
+    health probe and *then* the Facebook Ad Library probe. The two are
+    completely independent - a HEAD/GET of the company's own site and a
+    fetch of a public Facebook page - so serialising them doubles the
+    network wait of every enriched lead.
+
+    ``app/qualifier/`` is outside the enricher package, so instead of
+    editing it we call the very same probes here with ``asyncio.gather``.
+    The merged patch has exactly the same shape as the serial version.
+    """
+    try:
+        from app.qualifier import signals
+    except Exception:
+        from app.qualifier.signals import probe_business_health
+        return await probe_business_health(business, country=country)
+
+    website_probe = getattr(signals, "_probe_website_health", None)
+    ads_probe = getattr(signals, "_probe_facebook_ads", None)
+    if not callable(website_probe) or not callable(ads_probe):
+        # The probe module changed shape - fall back to its own entry point.
+        return await signals.probe_business_health(business, country=country)
+
+    website = getattr(business, "website", None)
+    name = getattr(business, "name", "") or ""
+
+    jobs = []
+    if website:
+        jobs.append(website_probe(website))
+    jobs.append(ads_probe(name, country=country))
+
+    results = await asyncio.gather(*jobs, return_exceptions=True)
+
+    patch: Dict[str, Any] = {}
+    for res in results:
+        if isinstance(res, BaseException):
+            logger.debug("Health probe failed: %s", res)
+            continue
+        if isinstance(res, dict):
+            patch.update(res)
+    return patch
 
 
 async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
@@ -502,10 +983,25 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             logger.info(f"Discovered official website for {business.name}: {business.website}")
 
         # Step 2: Crawl website if present
+        #
+        # The homepage is downloaded ONCE here and the same HTML is handed to
+        # both the crawler and the social finder below. It used to be fetched
+        # twice per lead (once by the crawler, once by social_finder) for the
+        # exact same page.
         crawl_res: Dict[str, Any] = {}
+        homepage_html: Optional[str] = None
         if business.website:
             try:
-                crawl_res = await crawl_website_for_contacts(business.website)
+                site_url = _normalize_site_url(business.website)
+                async with _build_http_client(timeout=12.0) as site_client:
+                    homepage_html = await _fetch_page_html(site_client, site_url)
+                    crawl_res = await crawl_website_for_contacts(
+                        site_url,
+                        homepage_html=homepage_html,
+                        client=site_client,
+                    )
+                if not homepage_html:
+                    homepage_html = crawl_res.get("homepage_html")
                 for em in crawl_res.get("emails", []):
                     all_emails.add(em)
                 for ph in crawl_res.get("phones", []):
@@ -527,7 +1023,14 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             )
             from app.config import settings
 
-            merged_socials = await find_business_socials(business, contact_socials=discovered_socials)
+            # An empty string means "we already fetched the homepage and got
+            # nothing" - it stops the social finder from downloading the same
+            # page a second time.
+            merged_socials = await find_business_socials(
+                business,
+                homepage_html=homepage_html if homepage_html is not None else "",
+                contact_socials=discovered_socials,
+            )
             provenance = "website"
             if settings.SOCIAL_DIRECT:
                 direct_socials = await probe_direct_socials(business)
@@ -547,6 +1050,11 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
         batch: Dict[str, Any] = {}
         learned_pattern: Optional[str] = None
         learned_confidence: float = 0.0
+        #: Defined here (not only inside the ``business.website`` branch):
+        #: a lead with no website but an email from the web search used to
+        #: raise NameError in the contact stage below and lose the whole lead.
+        permutations: List[str] = []
+        w_domain: Optional[str] = None
         if business.website:
             try:
                 web_for_domain = business.website if business.website.startswith("http") else f"https://{business.website}"
@@ -781,8 +1289,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
         # probed for ICP-driven enrichment and cached so scoring stays repeatable.
         if icp_profile is not None:
             try:
-                from app.qualifier.signals import probe_business_health
-                health_patch = await probe_business_health(business)
+                health_patch = await _probe_business_health_concurrent(business)
                 base_extra = dict(business.extra_data) if (business.extra_data and isinstance(business.extra_data, dict)) else {}
                 base_extra.update({k: v for k, v in health_patch.items() if v is not None})
                 business.extra_data = base_extra

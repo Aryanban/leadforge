@@ -1,7 +1,7 @@
 import urllib.parse
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone
 
@@ -104,6 +104,11 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, A
 async def get_timeseries(days: int = 30, db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
     """Per-day send activity for charts: sent / opened / replied / bounced.
 
+    The aggregation happens in SQL. It used to load every Send row in the
+    window into Python and count them there, which meant a busy account
+    (100k sends in 30 days) materialised 100k ORM objects just to produce
+    thirty numbers.
+
     ``CAST(sent_at AS DATE)`` keeps one code path for SQLite and Postgres.
     Missing days are zero-filled in Python so charts never gap on idle days
     (a gap reads identically to a zero-send day, which it always is here).
@@ -112,25 +117,39 @@ async def get_timeseries(days: int = 30, db: AsyncSession = Depends(get_db)) -> 
     today = datetime.utcnow().date()
     start = today - timedelta(days=days - 1)
 
+    # ``date()`` is the portable day-truncation function: SQLite has
+    # ``date(x)`` and Postgres has ``date(timestamp)``. A ``CAST(x AS DATE)``
+    # is NOT portable - SQLite applies NUMERIC affinity to the cast and
+    # truncates '2026-10-17' to the integer 2026, which then blows up in
+    # SQLAlchemy's date processor.
+    day_col = func.date(Send.sent_at).label("day")
     rows = (await db.execute(
-        select(Send).where(
+        select(
+            day_col,
+            func.count(Send.id),
+            func.sum(case((Send.opened == True, 1), else_=0)),
+            func.sum(case((Send.replied == True, 1), else_=0)),
+            func.sum(case((Send.status == "bounced", 1), else_=0)),
+        )
+        .where(
             Send.status == "sent",
             Send.sent_at.isnot(None),
             Send.sent_at >= datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
         )
-    )).scalars().all()
+        .group_by(day_col)
+    )).all()
 
     by_day: Dict[str, Dict[str, int]] = {}
-    for s in rows:
-        key = s.sent_at.date().isoformat()
-        cell = by_day.setdefault(key, {"sent": 0, "opened": 0, "replied": 0, "bounced": 0})
-        cell["sent"] += 1
-        if s.opened:
-            cell["opened"] += 1
-        if s.replied:
-            cell["replied"] += 1
-        if getattr(s, "status", None) == "bounced":
-            cell["bounced"] += 1
+    for day, sent, opened, replied, bounced in rows:
+        if day is None:
+            continue
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        by_day[key] = {
+            "sent": int(sent or 0),
+            "opened": int(opened or 0),
+            "replied": int(replied or 0),
+            "bounced": int(bounced or 0),
+        }
 
     series = []
     for i in range(days):

@@ -344,3 +344,118 @@ def test_phone_extraction_handles_a_missing_phone():
 
     raw = [None] * 179
     assert _dig_phone(raw) is None
+
+
+# --------------------------------------------------------------------------
+# Full-text search must return exactly what the LIKE scan returns
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fts_search_matches_the_like_scan(client):
+    """The FTS5 trigram index must be semantically identical to LIKE.
+
+    A search that quietly returns a different result set is worse than a
+    slow one, so the two paths are compared row-for-row on the same data.
+    """
+    from app.database import async_session_maker as _maker
+    from sqlalchemy import select, func, or_ as _or_
+    from app.models.business import Business as _B
+
+    async with _maker() as db:
+        samples = [
+            ("Sharma Dental Clinic", "Kothrud Pune", "+91 98225 22560", "https://sharma.in"),
+            ("Clove Dental Care", "Viman Nagar", "+91 90000 11111", "https://clove.in"),
+            ("Apex Realty", "Baner Road", "+91 98877 66554", "https://apex.in"),
+            ("Bright Smile Studio", "Aundh", None, None),
+        ]
+        for name, addr, phone, web in samples:
+            db.add(_B(name=name, address=addr, phone=phone, website=web))
+        await db.commit()
+
+    # The index is created by the schema sync; make sure it exists.
+    from app.database import ensure_schema
+    await ensure_schema()
+
+    terms = ["dental", "othru", "Koth", "98225", "22560", "shine", "nowherexyz"]
+    for term in terms:
+        res = await client.get(f"/api/v1/leads?search={term}&limit=100")
+        fts_ids = sorted(lead["id"] for lead in res.json()["leads"])
+
+        async with _maker() as db:
+            like = f"%{term}%"
+            rows = (await db.execute(
+                select(_B.id).where(_or_(
+                    _B.name.ilike(like),
+                    _B.address.ilike(like),
+                    _B.phone.ilike(like),
+                    _B.website.ilike(like),
+                ))
+            )).all()
+            like_ids = sorted(r[0] for r in rows)
+
+        assert fts_ids == like_ids, (
+            f"term {term!r}: FTS returned {fts_ids} but LIKE returned {like_ids}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Analytics aggregation must happen in SQL and stay exact
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_timeseries_matches_a_python_reference(client):
+    """The SQL day-bucketing must produce exactly the same numbers as
+    aggregating the rows in Python.
+
+    A ``CAST(sent_at AS DATE)`` looks portable but is not: SQLite applies
+    NUMERIC affinity to the cast and truncates '2026-10-17' to the integer
+    2026, which then fails in SQLAlchemy's date processor.
+    """
+    from datetime import timedelta
+    from app.database import async_session_maker as _maker
+    from app.models.send import Send as _S
+    from app.models.campaign import Campaign as _C
+    from app.models.campaign_step import CampaignStep as _CS
+    from app.models.contact import Contact as _CT
+    from app.models.business import Business as _B
+    from sqlalchemy import select as _sel
+
+    async with _maker() as db:
+        camp = _C(name="ts"); db.add(camp); await db.flush()
+        step = _CS(campaign_id=camp.id, step_number=1, subject="s", body_text="b")
+        db.add(step); await db.flush()
+        biz = _B(name="B"); db.add(biz); await db.flush()
+        con = _CT(business_id=biz.id, email="t@b.in"); db.add(con); await db.flush()
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for i in range(30):
+            db.add(_S(campaign_id=camp.id, step_id=step.id, contact_id=con.id,
+                      status="sent", sent_at=now - timedelta(days=i),
+                      opened=(i % 3 == 0), replied=(i % 10 == 0)))
+        await db.commit()
+
+    async with _maker() as db:
+        rows = (await db.execute(
+            _sel(_S).where(_S.status == "sent", _S.sent_at.isnot(None))
+        )).scalars().all()
+        reference = {}
+        for s in rows:
+            cell = reference.setdefault(s.sent_at.date().isoformat(),
+                                        {"sent": 0, "opened": 0, "replied": 0})
+            cell["sent"] += 1
+            if s.opened:
+                cell["opened"] += 1
+            if s.replied:
+                cell["replied"] += 1
+
+    res = await client.get("/api/v1/analytics/timeseries?days=30")
+    payload = res.json()
+    assert payload["totals"]["sent"] == sum(v["sent"] for v in reference.values())
+
+    by_day = {d["date"]: d for d in payload["days"]}
+    for day, cell in reference.items():
+        got = by_day.get(day)
+        assert got is not None, f"missing day {day}"
+        assert got["sent"] == cell["sent"], f"{day}: {got} != {cell}"
+        assert got["opened"] == cell["opened"], f"{day} opened mismatch"
+        assert got["replied"] == cell["replied"], f"{day} replied mismatch"

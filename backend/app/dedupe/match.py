@@ -49,7 +49,17 @@ def normalize_name(name: Optional[str]) -> str:
 
 
 async def find_existing_business(db: AsyncSession, lead: dict) -> Optional[Business]:
-    """Match a raw lead to an existing business by place_id, phone, domain, or name."""
+    """Match a raw lead to an existing business by place_id, phone, domain, or name.
+
+    The phone branch used to compare a *normalised* value against the raw
+    stored string ("9822522560" vs "+91 98225 22560"), so it could never
+    match - the phone dedupe was dead code. It now matches on the derived
+    ``phone_e164`` column as well as the raw forms.
+
+    The domain branch used to be a substring match, so ``example.com``
+    matched ``smileshop.example.com`` - a silent false merge. It is now an
+    exact host comparison.
+    """
     place_id = lead.get("place_id")
     if place_id:
         res = await db.execute(select(Business).where(Business.place_id == place_id))
@@ -57,12 +67,14 @@ async def find_existing_business(db: AsyncSession, lead: dict) -> Optional[Busin
         if match:
             return match
 
-    phone = normalize_phone(lead.get("phone"))
+    raw_phone = lead.get("phone")
+    phone = normalize_phone(raw_phone)
     if phone:
         res = await db.execute(
             select(Business).where(
                 or_(
-                    Business.phone == lead.get("phone"),
+                    Business.phone_e164 == phone,
+                    Business.phone == raw_phone,
                     Business.phone == phone,
                 )
             )
@@ -73,7 +85,7 @@ async def find_existing_business(db: AsyncSession, lead: dict) -> Optional[Busin
 
         res = await db.execute(
             select(Contact).where(
-                or_(Contact.phone == lead.get("phone"), Contact.phone == phone)
+                or_(Contact.phone == raw_phone, Contact.phone == phone)
             )
         )
         contact = res.scalars().first()
@@ -85,8 +97,8 @@ async def find_existing_business(db: AsyncSession, lead: dict) -> Optional[Busin
         res = await db.execute(
             select(Business).where(
                 or_(
+                    Business.domain == domain,
                     Business.website == lead.get("website"),
-                    Business.website.like(f"%{domain}%"),
                 )
             )
         )
@@ -94,9 +106,13 @@ async def find_existing_business(db: AsyncSession, lead: dict) -> Optional[Busin
         if match:
             return match
 
-    key = normalize_name(lead.get("name"))
-    if key:
-        res = await db.execute(select(Business).where(Business.name == lead.get("name")))
+    # Name matching stays exact and raw on purpose. Indian SMBs have very
+    # generic names ("Sharma Dental Clinic", "Krishna Medicals"), so a
+    # looser match - or a normalised one that strips legal suffixes - would
+    # merge genuinely different businesses in different cities.
+    name = lead.get("name")
+    if name:
+        res = await db.execute(select(Business).where(Business.name == name))
         match = res.scalars().first()
         if match:
             return match
