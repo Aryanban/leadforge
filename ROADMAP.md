@@ -40,8 +40,8 @@
 
 | Path | Before | After | Speed-up |
 |---|---|---|---|
-| CSV import, 5,000 rows | 11.95 s | **0.21 s** | **57×** |
-| CSV re-import, 5,000 rows | 5.10 s | **1.43 s** | 3.6× |
+| CSV import, 5,000 rows | 11.95 s | **0.23 s** | **52×** |
+| CSV re-import, 5,000 rows | 5.10 s | **0.32 s** | 16× |
 | Lead search, selective term | 200 ms | **8 ms** | 25× |
 | Lead search, no match (a typo) | 427 ms | **2 ms** | **200×** |
 | Lead search, broad term | 148 ms | **84 ms** | 1.8× |
