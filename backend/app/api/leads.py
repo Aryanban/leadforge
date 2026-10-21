@@ -239,9 +239,7 @@ async def get_leads(
         #: Without this flag the overview says "83 businesses in your
         #: database" and a new user cannot tell sample data from leads they
         #: actually found.
-        is_demo = bool(extra.get("seeded")) or (
-            b.source == "google_maps_seed" and not b.enriched_at
-        )
+        is_demo = bool(b.is_demo)
 
         # The lead score is computed LIVE, never read from the enrichment-time
         # cache.

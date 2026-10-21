@@ -576,6 +576,7 @@ async def test_seeded_demo_leads_are_flagged(client):
     """
     from app.database import async_session_maker as _maker
     from app.models.business import Business as _B
+    from sqlalchemy import select as _select
 
     async with _maker() as db:
         db.add(_B(
@@ -599,6 +600,49 @@ async def test_seeded_demo_leads_are_flagged(client):
 
     assert leads["Demo Property Advisors"]["is_demo"] is True
     assert leads["A Real Scraped Lead"]["is_demo"] is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_rows_are_backfilled_with_their_identity():
+    """A database created before these columns existed must be repaired.
+
+    Without the backfill a legacy row has no `phone_e164` (so the phone
+    branch of the dedupe silently never matches) and no `is_demo` (so the
+    overview counts sample data as the operator's own leads).
+    """
+    from app.database import async_session_maker as _maker, backfill_business_identity
+    from app.models.business import Business as _B
+    from sqlalchemy import update as _update, select as _select
+
+    async with _maker() as db:
+        seeded = _B(name="Legacy Seeded", phone="+91 98765 00000",
+                    website="https://legacy.in", source=None,
+                    extra_data={"query": "demo", "seeded": True})
+        real = _B(name="Legacy Real", phone="+91 98765 11111",
+                  website="https://real.in", source="google_maps_http",
+                  extra_data={"query": "dentists"})
+        db.add_all([seeded, real])
+        await db.commit()
+        # Simulate a pre-migration row: the derived columns are missing.
+        await db.execute(_update(_B.__table__).where(_B.id == seeded.id)
+                         .values(phone_e164=None, domain=None, is_demo=None))
+        await db.execute(_update(_B.__table__).where(_B.id == real.id)
+                         .values(phone_e164=None, domain=None, is_demo=None))
+        await db.commit()
+
+    fixed = await backfill_business_identity()
+    assert fixed >= 2
+
+    async with _maker() as db:
+        rows = (await db.execute(
+            _select(_B).where(_B.name.in_(["Legacy Seeded", "Legacy Real"]))
+        )).scalars().all()
+        by_name = {b.name: b for b in rows}
+
+    assert by_name["Legacy Seeded"].is_demo is True
+    assert by_name["Legacy Real"].is_demo is False
+    assert by_name["Legacy Seeded"].phone_e164 == "9876500000"
+    assert by_name["Legacy Real"].domain == "real.in"
 
 
 @pytest.mark.asyncio

@@ -209,6 +209,10 @@ export interface SuppressionEntry {
 
 export interface DashboardStats {
   total_leads: number;
+  /** Leads the operator actually found. */
+  real_leads?: number;
+  /** The sample rows a fresh database is seeded with. */
+  demo_leads?: number;
   total_contacts: number;
   verified_contacts: number;
   emails_sent: number;

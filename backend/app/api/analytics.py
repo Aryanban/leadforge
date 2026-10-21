@@ -1,7 +1,7 @@
 import urllib.parse
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, case
+from sqlalchemy import select, func, case, or_
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone
 
@@ -18,9 +18,23 @@ router = APIRouter()
 
 @router.get("/stats")
 async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
-    # 1. Total Businesses
-    res_b = await db.execute(select(func.count(Business.id)))
-    total_leads = res_b.scalar() or 0
+    # 1. Total Businesses - split into real leads and the sample rows a fresh
+    #    database is seeded with. Reporting "83 businesses in your database"
+    #    when those 83 are demo data the operator never found is the first
+    #    thing the product says to a new user, and it is not true.
+    res_b = await db.execute(
+        select(
+            func.count(Business.id),
+            func.count(Business.id).filter(Business.is_demo == True),
+            func.count(Business.id).filter(
+                or_(Business.is_demo == False, Business.is_demo.is_(None))
+            ),
+        )
+    )
+    total_leads, demo_leads, real_leads = res_b.one()
+    total_leads = total_leads or 0
+    demo_leads = demo_leads or 0
+    real_leads = real_leads or 0
 
     # 2. Total Contacts
     res_c = await db.execute(select(func.count(Contact.id)))
@@ -89,6 +103,8 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, A
 
     return {
         "total_leads": total_leads,
+        "real_leads": real_leads,
+        "demo_leads": demo_leads,
         "total_contacts": total_contacts,
         "verified_contacts": verified_contacts,
         "emails_sent": sent_count,

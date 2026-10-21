@@ -82,6 +82,71 @@ async def ensure_schema() -> None:
         await conn.run_sync(_sync_missing_indexes)
         await conn.run_sync(_sync_fts)
 
+    try:
+        await backfill_business_identity()
+    except Exception as exc:  # pragma: no cover - never block a boot
+        logger.warning("identity backfill skipped: %s", exc)
+
+
+async def backfill_business_identity(batch_size: int = 2000) -> int:
+    """One-time backfill of the derived Business identity columns.
+
+    ``phone_e164``, ``domain`` and ``is_demo`` are populated by a
+    before_insert/before_update listener, so every row *written* after the
+    columns existed has them. Rows that predate the columns do not - and a
+    legacy database would silently have no phone dedupe (the raw column was
+    compared against a normalised value) and no way to tell demo data from
+    real leads.
+
+    The scan is chunked and only touches rows whose derived values are
+    missing, so it costs nothing on a healthy database.
+    """
+    from sqlalchemy import select
+    from app.models.business import (
+        Business,
+        normalize_phone_e164,
+        canonical_domain_of,
+    )
+
+    fixed = 0
+    async with async_session_maker() as db:
+        while True:
+            rows = (await db.execute(
+                select(
+                    Business.id,
+                    Business.phone,
+                    Business.phone_e164,
+                    Business.website,
+                    Business.domain,
+                    Business.source,
+                    Business.extra_data,
+                    Business.is_demo,
+                ).where(
+                    (Business.phone_e164.is_(None) & Business.phone.isnot(None))
+                    | (Business.domain.is_(None) & Business.website.isnot(None))
+                    | Business.is_demo.is_(None)
+                ).limit(batch_size)
+            )).all()
+            if not rows:
+                break
+            for (bid, phone, phone_e164, website, domain, source, extra, is_demo) in rows:
+                new_phone = phone_e164 or normalize_phone_e164(phone)
+                new_domain = domain or canonical_domain_of(website)
+                extra_map = extra if isinstance(extra, dict) else {}
+                new_demo = is_demo if is_demo is not None else bool(
+                    extra_map.get("seeded") or source == "google_maps_seed"
+                )
+                await db.execute(
+                    Business.__table__.update()
+                    .where(Business.id == bid)
+                    .values(phone_e164=new_phone, domain=new_domain, is_demo=new_demo)
+                )
+                fixed += 1
+            await db.commit()
+    if fixed:
+        logger.info("schema sync: backfilled %s business identity row(s)", fixed)
+    return fixed
+
 
 def _sync_missing_columns(sync_conn) -> None:
     """ALTER TABLE ADD COLUMN for any model column the live database lacks.

@@ -45,6 +45,17 @@ class Business(Base):
     #: had not, so it re-enriched the same newest rows on every run.
     enriched_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
+    #: True for the sample rows a fresh database is seeded with.
+    #:
+    #: Nullable with no default on purpose: a row written before this column
+    #: existed has NULL here, which is exactly what the one-time backfill
+    #: looks for. A non-null default would silently mark every legacy row as
+    #: "not demo" and the backfill would have nothing to find.
+    #:
+    #: The overview used to say "83 businesses in your database" when those
+    #: 83 were sample rows the operator never found.
+    is_demo = Column(Boolean, nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -92,6 +103,8 @@ def _populate_identity(mapper, connection, target):
     """
     target.phone_e164 = normalize_phone_e164(target.phone)
     target.domain = canonical_domain_of(target.website)
+    extra = target.extra_data if isinstance(target.extra_data, dict) else {}
+    target.is_demo = bool(extra.get("seeded")) or target.source == "google_maps_seed"
 
 
 event.listen(Business, "before_insert", _populate_identity)
