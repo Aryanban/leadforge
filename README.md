@@ -323,7 +323,7 @@ Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
 
 ---
 
-## 🧪 Automated Test Suite (223/223 Passing)
+## 🧪 Automated Test Suite (234/234 Passing)
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
@@ -335,7 +335,32 @@ LeadForge includes a comprehensive Pytest suite covering email status/role/free/
 (cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **223/223 tests pass synchronously** in under 2s — no network, no browser, no external services required.
+All **234/234 tests pass synchronously** in under 2s — no network, no browser, no external services required.
+
+### Accessibility & layout stability are enforced in CI
+
+The dashboard has an **axe-core** gate (`dashboard/e2e/a11y.spec.ts`) that runs
+WCAG 2.1 A/AA + best-practice checks against every route and **fails the build**
+on any `critical` or `serious` violation. It also asserts exactly one `<main>`
+and one `<h1>` per page, that no page fails to load its own assets, and that
+the layout does not shift while data loads (CLS < 0.1).
+
+```bash
+# Accessibility gate on its own (needs the API running):
+(cd dashboard && npm run test:a11y)
+
+# Or the whole end-to-end suite:
+(cd dashboard && npm run test:e2e)
+```
+
+This exists because the accessibility defects were invisible to every other
+check we had: TypeScript was clean, the build was green, the end-to-end suite
+passed, and 48 elements still failed colour contrast at 2.56:1 where WCAG AA
+requires 4.5:1. An accessibility regression should be as loud as a type error.
+
+The measured before/after numbers, the design findings and the remaining
+product gaps are in [`UX-AUDIT.md`](./UX-AUDIT.md); the product roadmap is
+in [`ROADMAP.md`](./ROADMAP.md).
 
 ---
 
