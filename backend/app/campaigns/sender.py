@@ -22,7 +22,7 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_step import CampaignStep
 from app.models.send import Send
 from app.campaigns.bounces import classify_bounce, HARD, SOFT
-from app.campaigns.suppression import is_suppressed, add_suppression
+from app.campaigns.suppression import is_suppressed, add_suppression, suppressed_reasons
 from app.models.suppression import PERMANENT_REASONS
 from app.campaigns.warmup import (
     mailbox_age_days, ramp_limit, mailbox_health, is_mailbox_usable,
@@ -478,22 +478,29 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         #: sequences as done.
         pending_delays = 0
 
+        # The authoritative suppression gate (gate 3 of 4). The per-contact
+        # `unsubscribed` boolean only records an unsubscribe on THIS row; a
+        # bounce, complaint or "stop" reply on any campaign must block the
+        # address everywhere.
+        #
+        # The whole candidate set is checked in ONE query. It used to be
+        # `await is_suppressed(db, contact.email)` inside the loop - one
+        # round-trip per candidate, so a 500-target campaign spent 500
+        # queries deciding who not to email.
+        candidate_emails = [c.email for c, _b in candidates if c.email]
+        suppressed_emails = await filter_suppressed(db, candidate_emails)
+        suppression_reasons = await suppressed_reasons(db, candidate_emails)
+
         for contact, business in candidates:
             c_sends = sends_by_contact.get(contact.id, [])
 
-            # Authoritative suppression gate (gate 3 of 4). The per-contact
-            # `unsubscribed` boolean only records an unsubscribe on THIS row;
-            # a bounce, complaint or "stop" reply on any campaign must block
-            # the address everywhere. Check the workspace-wide table here,
-            # immediately before we would open an SMTP connection.
-            suppression_reason = await is_suppressed(db, contact.email)
+            suppression_reason = suppression_reasons.get((contact.email or "").lower())
             if suppression_reason:
                 # Only a genuine opt-out flips the per-contact flag. A soft
                 # bounce has a 30-day expiry, and setting the flag for it made
                 # a transient gateway failure remove the lead permanently.
-                if suppression_reason in PERMANENT_REASONS or suppression_reason == "soft_bounce":
-                    if suppression_reason in ("unsubscribed", "replied_stop", "complaint", "manual"):
-                        contact.unsubscribed = True
+                if suppression_reason in ("unsubscribed", "replied_stop", "complaint", "manual"):
+                    contact.unsubscribed = True
                 if suppression_reason == HARD:
                     contact.verification_status = "bounced"
                     contact.is_verified = False

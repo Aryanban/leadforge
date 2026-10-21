@@ -459,3 +459,55 @@ async def test_timeseries_matches_a_python_reference(client):
         assert got["sent"] == cell["sent"], f"{day}: {got} != {cell}"
         assert got["opened"] == cell["opened"], f"{day} opened mismatch"
         assert got["replied"] == cell["replied"], f"{day} replied mismatch"
+
+
+# --------------------------------------------------------------------------
+# The batched suppression lookup must agree with the per-address check
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_batched_suppression_matches_the_per_address_check():
+    """`suppressed_reasons` replaced one query per candidate contact.
+
+    The batch form must return exactly what the per-address check returned,
+    including the whole-domain case and the expired-soft-bounce case.
+    """
+    from app.campaigns.suppression import is_suppressed, suppressed_reasons
+    from app.database import async_session_maker as _maker
+    from app.models.suppression import Suppression
+    from datetime import timedelta
+
+    async with _maker() as db:
+        db.add(Suppression.make("blocked@example.in", "unsubscribed"))
+        db.add(Suppression.make("hard@example.in", "hard_bounce"))
+        db.add(Suppression.make("@banned-domain.in", "manual"))
+        # An EXPIRED soft bounce must not block the address.
+        expired = Suppression.make("retry@example.in", "soft_bounce")
+        expired.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        db.add(expired)
+        await db.commit()
+
+        addresses = [
+            "blocked@example.in",
+            "hard@example.in",
+            "someone@banned-domain.in",
+            "retry@example.in",
+            "clean@example.in",
+        ]
+
+        one_by_one = {}
+        for addr in addresses:
+            reason = await is_suppressed(db, addr)
+            if reason:
+                one_by_one[addr.lower()] = reason
+
+        batched = await suppressed_reasons(db, addresses)
+
+    assert batched == one_by_one, (
+        f"batched {batched} != per-address {one_by_one}"
+    )
+    assert batched.get("blocked@example.in") == "unsubscribed"
+    assert batched.get("hard@example.in") == "hard_bounce"
+    assert batched.get("someone@banned-domain.in") == "manual"
+    assert "retry@example.in" not in batched, "an expired soft bounce must not block"
+    assert "clean@example.in" not in batched
