@@ -9,7 +9,7 @@
 
 ## ✅ Status: Wave 0 + Wave 1 shipped
 
-**226 backend tests pass** (was 196). Frontend: `tsc --noEmit` clean, `npm run build` green,
+**229 backend tests pass** (was 196). Frontend: `tsc --noEmit` clean, `npm run build` green,
 21 Playwright specs that can now actually fail the build.
 
 | # | Fix | Before | After |
@@ -25,20 +25,46 @@
 | — | SMTP probe | `EHLO [127.0.0.1]`, bogus MAIL FROM, no STARTTLS | RFC 5321 null reverse path, FQDN EHLO, STARTTLS |
 | — | Pattern inference | 4/10 templates, confidently wrong | **8/10** detected, dominance-aware confidence, 0 invalid candidates |
 | — | Phone extraction | display form (`098225 22560`) | international form (`+91 98225 22560`) |
+| — | Google CID | dropped on the primary scrape path | populated on 25/25 leads — the strongest dedupe key, finally in use |
 | — | DB layer | FKs off, no indexes, no WAL | `foreign_keys=ON` + WAL + indexes on every FK/sort column |
 | — | Schema sync | columns only; never created indexes | tables + columns + indexes; CLI and MCP self-migrate |
 | — | Auth | open API, `CORS=*` + credentials | optional `API_KEY`; tracker exempt for mail clients |
-| — | MCP agent loop | no contact IDs → agent mailed the wrong 79% | contact IDs + dry-run launch + JSON-RPC `isError` |
+| — | MCP agent loop | no contact IDs → agent mailed the wrong 79% | contact IDs + dry-run launch + JSON-RPC `isError` + 18 tools |
+| — | MCP concurrency | one blocking tool wedged the server | concurrent request handling; a slow tool no longer blocks the rest |
 | — | Click tracking | didn't exist → WhatsApp handoff permanently empty | `/click` route + link rewriting; handoff now populates |
 | — | A/B testing | raw rates at n=10 | two-proportion z-test, n≥50, positive replies only |
 | — | ICP parser | silently dropped constraints | reports `unsupported_terms` + warnings; fixed corrupt exclusions |
 | — | Dashboard | dead Cmd+K, 15 `alert()`, no mobile, CI ignored types | wired search, toasts, mobile drawer, type-checked CI, 21 real e2e specs |
+
+### Measured performance (500,000-lead SQLite database)
+
+| Path | Before | After | Speed-up |
+|---|---|---|---|
+| CSV import, 5,000 rows | 11.95 s | **0.21 s** | **57×** |
+| CSV re-import, 5,000 rows | 5.10 s | **1.43 s** | 3.6× |
+| Lead search, selective term | 200 ms | **8 ms** | 25× |
+| Lead search, no match (a typo) | 427 ms | **2 ms** | **200×** |
+| Lead search, broad term | 148 ms | **84 ms** | 1.8× |
+| Lead list, 500k | — | **10 ms** | — |
+| Analytics timeseries, 18k sends | — | **1.9 ms** | — |
+| Campaigns list | 4 queries/campaign | **3 queries total** | — |
+| MCP `search_leads` | 26 SELECTs | **2** | 13× |
+| MCP `list_campaigns` | 31 SELECTs | **4** | 8× |
+| CLI `search` | 26 SELECTs | **3** | 9× |
+| Enrichment, whole flow | 8.14 s | **0.62 s** | **13×** |
+| Homepage fetches per lead | 5 | **1** | 5× |
+| Suppression checks per campaign | N queries | **1** | N× |
 
 **One bug found during verification that the audits missed:** Google stores the phone in a
 nested structure with the *display* form (leading trunk zero) first and the international
 form second. The parser took the first one, so every phone in the database was
 `098225 22560` — which reads as a landline with STD code `098225`, mis-files the STD→city
 lookup, and does not match a `+91 98225 22560` stored elsewhere for the same business.
+
+**One bug introduced and caught during verification:** the analytics day-bucketing used
+`CAST(sent_at AS DATE)`, which is *not* portable — SQLite applies NUMERIC affinity and
+truncates `2026-10-17` to the integer `2026`. It is now `date()`, and a regression test
+compares the SQL aggregation against a Python reference day by day.
 
 ---
 
