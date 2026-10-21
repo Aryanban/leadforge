@@ -516,19 +516,49 @@ async def scrape_leads_and_save(
                 await db.commit()
 
             new_biz_ids = []
+
+            # Dedupe in the same priority order as the rest of the codebase
+            # (place id -> phone -> domain -> name), using four grouped
+            # queries for the whole batch instead of one query per lead.
+            #
+            # The old code matched on the business NAME only, so the same
+            # business whose name changed became a duplicate, and two
+            # different businesses sharing a generic Indian name were merged.
+            from app.dedupe.match import build_lead_indexes, match_lead
+            _leads_for_index = [
+                {
+                    "place_id": lead.get("place_id"),
+                    "phone": lead.get("phone"),
+                    "website": lead.get("website"),
+                    "name": (lead.get("name") or "").strip(),
+                }
+                for lead in raw_leads if (lead.get("name") or "").strip()
+            ]
+            _indexes = await build_lead_indexes(db, _leads_for_index)
+
             for lead in raw_leads:
                 name = lead.get("name", "").strip()
                 if not name:
                     continue
 
-                # Check for existing business by name
-                stmt = select(Business).where(Business.name == name)
-                res = await db.execute(stmt)
-                existing = res.scalars().first()
+                existing = match_lead(
+                    {
+                        "place_id": lead.get("place_id"),
+                        "phone": lead.get("phone"),
+                        "website": lead.get("website"),
+                        "name": name,
+                    },
+                    _indexes,
+                )
 
                 if not existing:
                     business = Business(
-                        place_id=lead.get("place_id"),
+                        # The Google CID is the strongest identity signal we
+                        # have and it is what the HTTP path calls
+                        # ``google_data_id``. It was being dropped here, so
+                        # every Maps-sourced business had a NULL place_id and
+                        # the dedupe fell back to name/phone alone.
+                        place_id=lead.get("place_id") or lead.get("google_data_id"),
                         name=name,
                         website=lead.get("website") or None,
                         phone=lead.get("phone") or None,
@@ -567,6 +597,18 @@ async def scrape_leads_and_save(
                     db.add(contact)
                     saved_count += 1
                     new_biz_ids.append(business.id)
+                    # Register the new business so a duplicate row *within the
+                    # same batch* is caught too.
+                    from app.dedupe.match import canonical_domain, normalize_phone
+                    if lead.get("place_id"):
+                        _indexes["place_id"].setdefault(lead["place_id"], business)
+                    _p = normalize_phone(lead.get("phone"))
+                    if _p:
+                        _indexes["phone"].setdefault(_p, business)
+                    _d = canonical_domain(lead.get("website"))
+                    if _d:
+                        _indexes["domain"].setdefault(_d, business)
+                    _indexes["name"].setdefault(name, business)
                 else:
                     # Update phone, website, or maps_url if missing
                     if not existing.phone and lead.get("phone"):

@@ -70,6 +70,12 @@ async def ensure_schema() -> None:
     """
     from sqlalchemy import inspect as sa_inspect
 
+    # Importing the models registers them on Base.metadata. Without this,
+    # ``create_all`` silently created NOTHING and the full-text triggers
+    # failed with "no such table: main.businesses" - it only worked because
+    # every caller happened to have imported the API modules first.
+    import app.models  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_sync_missing_columns)
@@ -103,6 +109,11 @@ def _sync_missing_columns(sync_conn) -> None:
             try:
                 sync_conn.execute(text(ddl))
                 logger.info("schema sync: added %s.%s", table.name, col.name)
+                # The inspector is a snapshot taken before the ALTER, so it
+                # does not know about the column we just added. Without this
+                # the next boot logs a bogus "duplicate column name"
+                # warning on every start.
+                have.add(col.name)
             except Exception as exc:  # pragma: no cover - dialect-specific limits
                 logger.warning("schema sync skipped %s.%s: %s", table.name, col.name, exc)
 
@@ -139,6 +150,7 @@ def _sync_missing_indexes(sync_conn) -> None:
                 ddl = str(CreateIndex(index).compile(dialect=sync_conn.dialect))
                 sync_conn.execute(text(ddl))
                 logger.info("schema sync: created index %s", index.name)
+                present.add(index.name)
             except Exception as exc:  # pragma: no cover - dialect-specific limits
                 logger.warning("schema sync skipped index %s: %s", index.name, exc)
 
