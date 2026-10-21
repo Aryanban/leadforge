@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { api, ICPDraft, RankedLead, DiscoveryJob } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
+import { EmptyState, ErrorState, StatusLive } from "@/components/PageStates";
 
 const EMPTY_DRAFT: ICPDraft = {
   name: "",
@@ -48,8 +49,8 @@ export default function FindLeadsPage() {
 
   const hasDraft = Boolean(draft.niche);
 
-  const handleParse = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleParse = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!intentText.trim()) return;
     try {
       setParsing(true);
@@ -97,8 +98,8 @@ export default function FindLeadsPage() {
     poll();
   }, []);
 
-  const handleDiscover = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleDiscover = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     try {
       setError(null);
       setRanked(null);
@@ -151,6 +152,18 @@ export default function FindLeadsPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {/* Screen-reader announcement of the long-running discovery states. */}
+      <StatusLive
+        loading={parsing || discovering || ranking}
+        loadingLabel={
+          discovering
+            ? "Discovering and ranking leads…"
+            : ranking
+            ? "Ranking the leads in your database…"
+            : "Drafting your ideal customer profile…"
+        }
+      />
+
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">Find the Best Leads</h1>
         <p className="text-sm text-slate-500 mt-1">
@@ -160,9 +173,18 @@ export default function FindLeadsPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
-          {error}
-        </div>
+        <ErrorState
+          title="That did not work"
+          message={error}
+          onRetry={() => {
+            setError(null);
+            if (hasDraft) {
+              handleRankExisting();
+            } else if (intentText.trim()) {
+              handleParse();
+            }
+          }}
+        />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -175,6 +197,7 @@ export default function FindLeadsPage() {
           <form onSubmit={handleParse} className="space-y-3">
             <textarea
               rows={3}
+              aria-label="Describe the leads you are looking for"
               placeholder="e.g. Dentists in South Delhi with verified emails and no website"
               value={intentText}
               onChange={(e) => setIntentText(e.target.value)}
@@ -183,13 +206,13 @@ export default function FindLeadsPage() {
             <button
               type="submit"
               disabled={parsing || !intentText.trim()}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
-              {parsing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
+              {parsing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
               Draft my ICP
             </button>
           </form>
-          <p className="text-[11px] text-slate-400 leading-relaxed">
+          <p className="text-[11px] text-slate-500 leading-relaxed">
             Try signals like &ldquo;verified emails&rdquo;, &ldquo;no website&rdquo;, &ldquo;running ads&rdquo;, or &ldquo;best leads&rdquo;
             to tune the scoring model.
           </p>
@@ -203,7 +226,7 @@ export default function FindLeadsPage() {
           </div>
 
           {!hasDraft ? (
-            <p className="text-xs text-slate-400 italic py-6 text-center">
+            <p className="text-xs text-slate-500 italic py-6 text-center">
               Draft an ICP above, or fill the fields manually below.
             </p>
           ) : null}
@@ -227,9 +250,10 @@ export default function FindLeadsPage() {
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </label>
-            <label className="block">
+            <label className="block" htmlFor="icp-preset">
               <span className="font-semibold text-slate-700 block mb-1">Scoring preset</span>
               <select
+                id="icp-preset"
                 value={draft.preset}
                 onChange={(e) => updateDraft({ preset: e.target.value as ICPDraft["preset"] })}
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none"
@@ -306,20 +330,20 @@ export default function FindLeadsPage() {
             <button
               onClick={handleRankExisting}
               disabled={ranking || !hasDraft}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               title="Rank the leads already in your database against this ICP"
             >
-              {ranking ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Database className="w-3.5 h-3.5 mr-1.5" />}
+              {ranking ? <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Database className="w-3.5 h-3.5 mr-1.5" />}
               Rank existing DB
             </button>
             <button
               onClick={handleDiscover}
               disabled={discovering || !hasDraft}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               {discovering ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" />
                   {job?.status === "running" ? "Enriching & ranking…" : "Starting discovery…"}
                 </>
               ) : (
@@ -344,17 +368,34 @@ export default function FindLeadsPage() {
             </h2>
             <button
               onClick={() => setRanked(null)}
-              className="text-xs text-slate-400 hover:text-slate-700 inline-flex items-center gap-1"
+              className="text-xs text-slate-500 hover:text-slate-700 inline-flex items-center gap-1"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Clear
             </button>
           </div>
 
           {ranked.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-10 text-center text-sm text-slate-400">
-              No leads reached the minimum score of {draft.min_score}. Try lowering the gate, broadening the niche,
-              or running discovery with more results.
-            </div>
+            <EmptyState
+              icon={<Target className="h-5 w-5" />}
+              title="No lead passed your ICP gate"
+              description={`Nothing in your database scored at least ${draft.min_score}. Lower the gate, broaden the niche, or run discovery to look outside the database.`}
+              action={
+                <button
+                  onClick={() => updateDraft({ min_score: Math.max(10, draft.min_score - 15) })}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+                >
+                  Lower the score gate
+                </button>
+              }
+              secondaryAction={
+                <button
+                  onClick={handleDiscover}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                >
+                  <Target className="w-3.5 h-3.5" /> Run discovery
+                </button>
+              }
+            />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {ranked.map((lead) => (
@@ -391,7 +432,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={mapsUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5"
+            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <span className="truncate">{lead.name}</span>
             <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
@@ -426,8 +467,8 @@ function LeadCard({ lead }: { lead: RankedLead }) {
 
       <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
         {lead.phone ? (
-          <a href={`tel:${lead.phone}`} className="inline-flex items-center gap-1 text-slate-700 hover:text-blue-600 font-mono">
-            <Phone className="w-3 h-3 text-slate-400" />
+          <a href={`tel:${lead.phone}`} className="inline-flex items-center gap-1 text-slate-700 hover:text-blue-600 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2">
+            <Phone className="w-3 h-3 text-slate-500" />
             {lead.phone}
           </a>
         ) : null}
@@ -436,7 +477,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={`https://wa.me/${cleanPhone}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-emerald-600 hover:text-emerald-700"
+            className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <MessageCircle className="w-3 h-3" />
             WhatsApp
@@ -447,15 +488,15 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={lead.website.startsWith("http") ? lead.website : `https://${lead.website}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 max-w-[160px] truncate"
+            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 max-w-[160px] truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <Globe className="w-3 h-3 shrink-0" />
             <span className="truncate">{lead.website.replace(/^https?:\/\/|\/$/g, "")}</span>
           </a>
         ) : null}
         {lead.rating ? (
-          <span className="inline-flex items-center gap-1 text-amber-600 font-medium">
-            ★ {lead.rating} <span className="text-slate-400">({lead.reviews_count || 0})</span>
+          <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
+            ★ {lead.rating} <span className="text-slate-500">({lead.reviews_count || 0})</span>
           </span>
         ) : null}
       </div>
@@ -465,7 +506,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
           {lead.contacts.map((contact) => (
             <div key={contact.id} className="flex items-center justify-between gap-2 text-[11px]">
               <span className="inline-flex items-center gap-1.5 text-slate-700 min-w-0">
-                <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                <Mail className="w-3 h-3 text-slate-500 shrink-0" />
                 <span className="truncate font-mono">{contact.email || "No email found"}</span>
               </span>
               {contact.is_verified ? (
@@ -488,7 +529,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-50 text-slate-600 border border-slate-200 hover:text-blue-700 capitalize"
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-50 text-slate-600 border border-slate-200 hover:text-blue-700 capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               {platform}
             </a>

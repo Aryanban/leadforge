@@ -3,8 +3,18 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = process.env.PW_BASE || 'http://127.0.0.1:3000';
-const API = process.env.PW_API || 'http://127.0.0.1:8000';
+const BASE = process.env.PW_BASE || process.env.E2E_BASE_URL || 'http://127.0.0.1:3000';
+// Two bases, because the suite checks two different things:
+//
+//  * `/health` is not under `/api`, so the dashboard's rewrite does not cover
+//    it - it has to be asked of the backend directly.
+//  * everything else is asked through the dashboard's own `/api` proxy,
+//    which is the path the browser actually takes. Testing the backend
+//    directly would test a route the product never uses.
+//
+// PW_API overrides the direct backend base (CI runs the API on 8000).
+const DIRECT_API = process.env.PW_API || 'http://127.0.0.1:8000';
+const PROXY_BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:3000';
 const SHOTS = path.join(__dirname, '..', 'shots');
 fs.mkdirSync(SHOTS, { recursive: true });
 
@@ -54,12 +64,15 @@ const findings = [];
 
 test('API health and core endpoints respond', async ({ request }) => {
   const checks = [
-    '/health', '/api/v1/leads', '/api/v1/campaigns', '/api/v1/analytics/stats',
-    '/api/v1/mailboxes', '/api/v1/scraper/jobs', '/api/v1/icp',
-    '/api/v1/icp/sources/list', '/api/v1/campaigns/india/advisor',
+    '/leads', '/campaigns', '/analytics/stats',
+    '/mailboxes', '/scraper/jobs', '/icp',
+    '/icp/sources/list', '/campaigns/india/advisor',
   ];
+  // Health lives outside /api, so it is asked of the backend directly.
+  const health = await request.get(DIRECT_API + '/health');
+  expect(health.status(), '/health should respond').toBe(200);
   for (const p of checks) {
-    const res = await request.get(API + p);
+    const res = await request.get(PROXY_BASE + '/api/v1' + p);
     expect(res.status(), `${p} should respond`).toBe(200);
   }
 });
@@ -117,7 +130,7 @@ test('leads table shows data and bulk-select affordances', async ({ page: pw }) 
   // The empty state means the backend returned nothing — that is a failure,
   // not a pass.
   await expect(
-    pw.getByText(/no leads found/i).first(),
+    pw.getByText(/no leads (found|match)/i).first(),
     'leads: table is empty (backend returned no leads)',
   ).toHaveCount(0);
 
@@ -166,7 +179,7 @@ test('AI Lead Finder: parse an intent into a structured ICP draft', async ({ pag
   await textarea.fill('dentists in Rohini Delhi with a website and good reviews');
 
   // The parse button is the primary action (Wand2 "Parse intent" or similar).
-  const parseBtn = pw.getByRole('button', { name: /parse|extract|understand|magic/i }).first();
+  const parseBtn = pw.getByRole('button', { name: /draft|parse|extract|understand|magic/i }).first();
   expect(await parseBtn.count(), 'find: no parse button found').toBeGreaterThan(0);
   await parseBtn.click();
 
@@ -185,7 +198,16 @@ test('Sequences: add a step and the step editor appears', async ({ page: pw }) =
   await pw.goto(BASE + '/sequences', { waitUntil: 'networkidle' });
   await pw.waitForTimeout(600);
 
-  const addBtn = pw.getByRole('button', { name: /add step|new step|\+ step|add email/i }).first();
+  // The step editor lives inside an open sequence, so the page has to be in
+  // that state first. Either a sequence is already open, or one is created.
+  let addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  if ((await addBtn.count()) === 0) {
+    const createBtn = pw.getByRole('button', { name: /new sequence|create sequence/i }).first();
+    expect(await createBtn.count(), 'sequences: no way to open a sequence editor').toBeGreaterThan(0);
+    await createBtn.click();
+    await pw.waitForTimeout(900);
+    addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  }
   expect(await addBtn.count(), 'sequences: no "add step" button').toBeGreaterThan(0);
   const before = await pw.locator('body').innerText();
   await addBtn.click();
@@ -246,14 +268,14 @@ test('Leads: filters/search narrow the table', async ({ page: pw }) => {
   expect(rowsBefore, 'leads: table has no rows to filter').toBeGreaterThan(0);
   // Real data must be on screen before we can claim the filter narrowed it.
   await expect(
-    pw.getByText(/no leads found/i).first(),
+    pw.getByText(/no leads (found|match)/i).first(),
     'leads: table shows no data rows',
   ).toHaveCount(0);
 
   await search.fill('zzzz-no-such-lead-zzzz');
   await pw.waitForTimeout(1500);
   await expect(
-    pw.getByText(/no leads found/i).first(),
+    pw.getByText(/no leads (found|match)/i).first(),
     'leads: search did not narrow results',
   ).toBeVisible();
 });

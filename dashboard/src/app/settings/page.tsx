@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { 
   Settings as SettingsIcon, 
   Mail, 
@@ -17,11 +17,13 @@ import {
   Copy,
   Check,
   Sparkles,
-  ShieldCheck
+  ShieldCheck,
+  Inbox as InboxIcon
 } from "lucide-react";
 import { api, MailboxItem } from "@/lib/api";
 import { AuthBadge } from "@/components/IndiaKit";
 import { toast } from "@/components/Toaster";
+import { EmptyState, ErrorState, Skeleton, StatusLive } from "@/components/PageStates";
 
 const PRESET_PROVIDERS = [
   { name: "Gmail", host: "smtp.gmail.com", port: 587 },
@@ -34,10 +36,20 @@ const PRESET_PROVIDERS = [
 export default function SettingsPage() {
   const [mailboxes, setMailboxes] = useState<MailboxItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResults, setTestResults] = useState<Record<number, { success: boolean; message: string }>>({});
   const [showAddModal, setShowAddModal] = useState(false);
   const [copiedPlatform, setCopiedPlatform] = useState<string | null>(null);
+  /**
+   * Which mailboxes the operator asked us to check.
+   *
+   * The SPF/DKIM/DMARC probe is a live DNS lookup: a dozen sequential
+   * resolver round-trips that can take the best part of a second. Doing it
+   * for every mailbox on page load made this route twice as slow as every
+   * other one in the app, so it is now an explicit, on-demand action.
+   */
+  const [authChecked, setAuthChecked] = useState<Record<number, boolean>>({});
 
   // Form state
   const [formEmail, setFormEmail] = useState("");
@@ -49,21 +61,25 @@ export default function SettingsPage() {
   const [formLimit, setFormLimit] = useState(50);
   const [submitting, setSubmitting] = useState(false);
 
-  const fetchMailboxes = async () => {
+  const fetchMailboxes = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(null);
       const data = await api.getMailboxes();
       setMailboxes(data);
-    } catch (err) {
+    } catch (err: any) {
       console.warn("Could not fetch mailboxes:", err);
+      setLoadError(
+        err?.message || "The backend did not answer. Check that it is running, then try again.",
+      );
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchMailboxes();
-  }, []);
+  }, [fetchMailboxes]);
 
   const handleTestConnection = async (id: number) => {
     try {
@@ -117,15 +133,27 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
+      {/* Screen-reader announcement of the loading state. */}
+      <StatusLive loading={loading} loadingLabel="Loading your sender mailboxes…" />
+
       {/* Header */}
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
-          Settings & SMTP Infrastructure
+          Settings &amp; SMTP Infrastructure
         </h1>
         <p className="text-sm text-slate-500 mt-1">
           Configure sender mailboxes, test credentials, and monitor daily deliverability quotas.
         </p>
       </div>
+
+      {/* Inline error with a retry — a toast disappears, this stays. */}
+      {loadError && !loading && (
+        <ErrorState
+          title="Could not load your mailboxes"
+          message={loadError}
+          onRetry={fetchMailboxes}
+        />
+      )}
 
       {/* Mailbox Section */}
       <div className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xs space-y-5">
@@ -147,9 +175,21 @@ export default function SettingsPage() {
 
         <div className="space-y-3">
           {loading ? (
-            <div className="p-8 text-center text-slate-400">
-              <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
-              Loading mailboxes...
+            /* Exactly the height of a real mailbox card, so the section below
+               does not jump when the list arrives. */
+            <div
+              className="h-[92px] rounded-xl border border-slate-200 bg-slate-50/50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+              aria-hidden="true"
+            >
+              <div className="space-y-2 flex-1">
+                <Skeleton className="h-4 w-56" />
+                <Skeleton className="h-3 w-72" />
+                <Skeleton className="h-3 w-40" />
+              </div>
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-8 w-32 rounded-lg" />
+                <Skeleton className="h-8 w-8 rounded-lg" />
+              </div>
             </div>
           ) : mailboxes && mailboxes.length > 0 ? (
             mailboxes.map((mb) => {
@@ -157,7 +197,7 @@ export default function SettingsPage() {
               return (
                 <div
                   key={mb.id}
-                  className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                  className="min-h-[92px] p-4 rounded-xl border border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
                 >
                   <div className="space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -172,7 +212,18 @@ export default function SettingsPage() {
                           Active
                         </span>
                       )}
-                      <AuthBadge domain={mb.email.split("@")[1] || ""} />
+                      {authChecked[mb.id] ? (
+                        <AuthBadge domain={mb.email.split("@")[1] || ""} />
+                      ) : (
+                        <button
+                          onClick={() => setAuthChecked((prev) => ({ ...prev, [mb.id]: true }))}
+                          title="Check SPF, DKIM and DMARC for this sending domain (live DNS lookup)"
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-700"
+                        >
+                          <ShieldCheck className="w-3 h-3 text-blue-600" />
+                          Check DNS auth
+                        </button>
+                      )}
                     </div>
                     <p className="text-xs text-slate-500">
                       Host: <code className="font-mono">{mb.smtp_host}:{mb.smtp_port}</code> | Sender:{" "}
@@ -226,7 +277,7 @@ export default function SettingsPage() {
                     >
                       {testingId === mb.id ? (
                         <>
-                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                          <Loader2 className="w-3 h-3 mr-1 motion-safe:animate-spin motion-reduce:animate-pulse" />
                           Testing...
                         </>
                       ) : (
@@ -238,7 +289,7 @@ export default function SettingsPage() {
                     </button>
                     <button
                       onClick={() => handleDelete(mb.id)}
-                      className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      className="p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
                       title="Delete Mailbox"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -248,9 +299,27 @@ export default function SettingsPage() {
               );
             })
           ) : (
-            <div className="p-8 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-              No SMTP mailboxes connected yet. Add one above to begin sending campaigns!
-            </div>
+            <EmptyState
+              icon={<InboxIcon className="h-5 w-5" />}
+              title="No SMTP mailboxes connected yet"
+              description="A sending mailbox is the one thing LeadForge needs before it can send. Connect one and the first campaign can go out."
+              action={
+                <button
+                  onClick={() => setShowAddModal(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add Mailbox
+                </button>
+              }
+              secondaryAction={
+                <a
+                  href="/setup"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                >
+                  <Sparkles className="w-3.5 h-3.5" /> Run the setup checklist
+                </a>
+              }
+            />
           )}
         </div>
       </div>
@@ -346,18 +415,18 @@ export default function SettingsPage() {
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
           <div className="p-3.5 rounded-xl border border-slate-100 bg-slate-50/70">
-            <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Database Engine</span>
+            <span className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Database Engine</span>
             <div className="font-bold text-slate-800 text-sm">Async SQLite / PostgreSQL</div>
             <p className="text-[11px] text-slate-500 mt-1">Dual-mode zero-install local & cloud</p>
           </div>
           <div className="p-3.5 rounded-xl border border-slate-100 bg-slate-50/70">
-            <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Scraper Engine</span>
+            <span className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Scraper Engine</span>
             <div className="font-bold text-slate-800 text-sm">Playwright Headless + HTTP</div>
             <p className="text-[11px] text-slate-500 mt-1">Zero paid API key dependencies</p>
           </div>
           <div className="p-3.5 rounded-xl border border-slate-100 bg-slate-50/70">
-            <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Anti-Spam Throttling</span>
-            <div className="font-bold text-emerald-600 text-sm">15s Jitter Delay Enabled</div>
+            <span className="text-[10px] uppercase font-bold text-slate-500 block mb-1">Anti-Spam Throttling</span>
+            <div className="font-bold text-emerald-700 text-sm">15s Jitter Delay Enabled</div>
             <p className="text-[11px] text-slate-500 mt-1">Protects sender IP and domain health</p>
           </div>
         </div>
@@ -369,12 +438,12 @@ export default function SettingsPage() {
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>
-                <h3 className="font-bold text-base text-slate-900">Connect SMTP Mailbox</h3>
+                <h2 className="font-bold text-base text-slate-900">Connect SMTP Mailbox</h2>
                 <p className="text-xs text-slate-500 mt-0.5">Use your Gmail App Password, Zoho, or custom domain</p>
               </div>
               <button
                 onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -402,8 +471,9 @@ export default function SettingsPage() {
 
             <form onSubmit={handleCreate} className="space-y-3 text-xs">
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Email Address *</label>
+                <label htmlFor="mb-email" className="font-semibold text-slate-700 block mb-1">Email Address *</label>
                 <input
+                  id="mb-email"
                   type="email"
                   required
                   placeholder="e.g. outreach@yourdomain.com"
@@ -414,8 +484,9 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Password or App Password *</label>
+                <label htmlFor="mb-password" className="font-semibold text-slate-700 block mb-1">Password or App Password *</label>
                 <input
+                  id="mb-password"
                   type="password"
                   required
                   placeholder="••••••••••••••••"
@@ -423,15 +494,16 @@ export default function SettingsPage() {
                   onChange={(e) => setFormPassword(e.target.value)}
                   className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 />
-                <p className="text-[10px] text-slate-400 mt-1">
+                <p className="text-[10px] text-slate-500 mt-1">
                   For Gmail, use a 16-character Google App Password (not your personal login password).
                 </p>
               </div>
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
-                  <label className="font-semibold text-slate-700 block mb-1">SMTP Host *</label>
+                  <label htmlFor="mb-host" className="font-semibold text-slate-700 block mb-1">SMTP Host *</label>
                   <input
+                    id="mb-host"
                     type="text"
                     required
                     value={formHost}
@@ -440,8 +512,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Port</label>
+                  <label htmlFor="mb-port" className="font-semibold text-slate-700 block mb-1">Port</label>
                   <input
+                    id="mb-port"
                     type="number"
                     required
                     value={formPort}
@@ -453,8 +526,9 @@ export default function SettingsPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Sender First Name</label>
+                  <label htmlFor="mb-first" className="font-semibold text-slate-700 block mb-1">Sender First Name</label>
                   <input
+                    id="mb-first"
                     type="text"
                     value={formFirstName}
                     onChange={(e) => setFormFirstName(e.target.value)}
@@ -462,8 +536,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Sender Last Name</label>
+                  <label htmlFor="mb-last" className="font-semibold text-slate-700 block mb-1">Sender Last Name</label>
                   <input
+                    id="mb-last"
                     type="text"
                     value={formLastName}
                     onChange={(e) => setFormLastName(e.target.value)}
@@ -473,8 +548,9 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Daily Sending Limit</label>
+                <label htmlFor="mb-limit" className="font-semibold text-slate-700 block mb-1">Daily Sending Limit</label>
                 <input
+                  id="mb-limit"
                   type="number"
                   min={10}
                   max={500}
@@ -495,7 +571,7 @@ export default function SettingsPage() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs"
+                  className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                 >
                   {submitting ? "Saving..." : "Save Mailbox"}
                 </button>

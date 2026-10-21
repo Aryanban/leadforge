@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Inbox as InboxIcon, Loader2, Mail, RefreshCw } from "lucide-react";
+import { Inbox as InboxIcon, Mail, RefreshCw, FilterX, Send } from "lucide-react";
 import { api, InboxItem, InboxResponse } from "@/lib/api";
+import { CardSkeleton, EmptyState, ErrorState, StatusLive } from "@/components/PageStates";
 
 const CATEGORY_TABS = [
   { key: "", label: "All" },
@@ -38,14 +39,20 @@ const CATEGORY_LABEL: Record<string, string> = {
 export default function InboxPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState("");
   const [savingId, setSavingId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
+      setLoading(true);
+      setError(null);
       setData(await api.listInbox(tab || undefined));
-    } catch {
+    } catch (err: any) {
       setData(null);
+      setError(
+        err?.message || "The backend did not answer. Check that it is running, then try again.",
+      );
     } finally {
       setLoading(false);
     }
@@ -78,10 +85,14 @@ export default function InboxPage() {
     });
   };
 
+  const totalReplies = Object.values(data?.counts ?? {}).reduce((a, b) => a + b, 0);
 
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      {/* Screen-reader announcement of the loading state. */}
+      <StatusLive loading={loading} loadingLabel="Loading your replies…" />
+
+      <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-start">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Inbox</h1>
           <p className="text-sm text-slate-500 mt-0.5">
@@ -91,7 +102,7 @@ export default function InboxPage() {
         </div>
         <a
           href="/email-health"
-          className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 transition-colors"
+          className="inline-flex items-center gap-1.5 justify-self-start rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 transition-colors sm:justify-self-end focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
         >
           <RefreshCw className="w-3.5 h-3.5" /> Poll now
         </a>
@@ -99,7 +110,7 @@ export default function InboxPage() {
 
       <div className="flex items-center gap-1.5 flex-wrap">
         {CATEGORY_TABS.map((t) => {
-          const count = t.key === "" ? Object.values(data?.counts ?? {}).reduce((a, b) => a + b, 0) : data?.counts?.[t.key] ?? 0;
+          const count = t.key === "" ? totalReplies : data?.counts?.[t.key] ?? 0;
           return (
             <button
               key={t.key}
@@ -111,26 +122,70 @@ export default function InboxPage() {
               }`}
             >
               {t.label}
-              <span className={tab === t.key ? "text-slate-300" : "text-slate-400"}>{count}</span>
+              <span className={tab === t.key ? "text-slate-300" : "text-slate-500"}>{count}</span>
             </button>
           );
         })}
       </div>
 
+      {/* Inline error with a retry — a toast disappears, this stays. */}
+      {error && !loading && (
+        <ErrorState
+          title="Could not load your replies"
+          message={error}
+          onRetry={load}
+        />
+      )}
+
       {loading ? (
-        <div className="text-center py-12 text-slate-400">
-          <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
-          Loading replies...
+        <div className="min-h-[320px] space-y-3" aria-hidden="true">
+          <CardSkeleton lines={2} />
+          <CardSkeleton lines={2} />
+          <CardSkeleton lines={2} />
         </div>
       ) : !data || data.items.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-12 text-center">
-          <InboxIcon className="w-8 h-8 text-slate-300 mx-auto mb-3" />
-          <h3 className="text-sm font-bold text-slate-700">No replies yet</h3>
-          <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-            Replies are matched by message-threading when the poller sweeps your mailboxes
-            (every 5 minutes, or hit &ldquo;Poll now&rdquo; on Email Health).
-          </p>
-        </div>
+        tab ? (
+          /* Filtered to nothing — the replies are there, the filter is narrow. */
+          <EmptyState
+            icon={<FilterX className="h-5 w-5" />}
+            title={`No ${CATEGORY_LABEL[tab]?.toLowerCase() ?? tab} replies`}
+            description={
+              totalReplies > 0
+                ? `You have ${totalReplies} repl${totalReplies === 1 ? "y" : "ies"} in total, but none of them are in this category right now.`
+                : "Replies are matched by message-threading when the poller sweeps your mailboxes."
+            }
+            action={
+              <button
+                onClick={() => setTab("")}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+              >
+                Show all replies
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={<InboxIcon className="h-5 w-5" />}
+            title="No replies yet"
+            description="Replies are matched by message-threading when the poller sweeps your mailboxes (every 5 minutes, or hit “Poll now” on Email Health)."
+            action={
+              <a
+                href="/email-health"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Poll mailboxes
+              </a>
+            }
+            secondaryAction={
+              <a
+                href="/sequences"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+              >
+                <Send className="w-3.5 h-3.5" /> Send your first sequence
+              </a>
+            }
+          />
+        )
       ) : (
         <div className="space-y-3">
           {data.items.map((item: InboxItem) => (
@@ -161,7 +216,7 @@ export default function InboxPage() {
                   disabled={savingId === item.send_id}
                   onChange={(e) => recategorize(item.send_id, e.target.value)}
                   className="shrink-0 h-8 rounded-lg border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-600 focus:outline-none disabled:opacity-50"
-                  aria-label="Reclassify reply"
+                  aria-label={`Reclassify the reply from ${item.contact_email ?? item.contact_name ?? item.send_id}`}
                 >
                   {Object.entries(CATEGORY_LABEL).map(([k, v]) => (
                     <option key={k} value={k}>{v}</option>
@@ -169,8 +224,8 @@ export default function InboxPage() {
                 </select>
               </div>
               {item.step_subject && (
-                <p className="mt-2.5 flex items-center gap-1.5 text-[11px] text-slate-400">
-                  <Mail className="w-3 h-3" /> replied to: <span className="text-slate-500">{item.step_subject}</span>
+                <p className="mt-2.5 flex items-center gap-1.5 text-[11px] text-slate-500">
+                  <Mail className="w-3 h-3" /> replied to: <span className="text-slate-600">{item.step_subject}</span>
                 </p>
               )}
               {item.reply_body && (
