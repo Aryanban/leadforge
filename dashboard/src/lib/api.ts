@@ -249,6 +249,12 @@ export interface LeadItem {
   latitude?: number | null;
   longitude?: number | null;
   is_claimed?: boolean;
+  /**
+   * True for the sample rows a fresh database is seeded with. Without this
+   * the overview reports "83 businesses in your database" when those 83 are
+   * demo data the user never found.
+   */
+  is_demo?: boolean;
   operational_status?: string;
   price_tier?: string | null;
   lead_score?: number;
