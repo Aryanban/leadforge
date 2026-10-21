@@ -6,6 +6,7 @@ gates, blocks, pauses, or rewrites a send. The dashboard renders these as
 banners and checklists; ``execute_campaign_step`` never imports this module.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -85,6 +86,81 @@ def check_sender_auth(domain: str, use_cache: bool = True) -> Dict[str, Any]:
     }
     _auth_cache[domain] = dict(result)
     return result
+
+
+async def check_sender_auth_async(domain: str, use_cache: bool = True) -> Dict[str, Any]:
+    """Async advisory SPF/DKIM/DMARC check for a sending domain.
+
+    The synchronous :func:`check_sender_auth` performs up to **13 blocking
+    DNS TXT lookups**, each with a 3-second timeout. Called from an ``async
+    def`` route that froze the event loop for up to ~39 seconds - and it was
+    on the critical path of a page load, so a single request could stall the
+    whole API for other users.
+
+    Here every lookup runs in a worker thread and the DKIM selector probes
+    run concurrently, so the wall clock is one timeout instead of thirteen.
+    """
+    domain = (domain or "").strip().lower().lstrip("@")
+    if use_cache and domain in _auth_cache:
+        return dict(_auth_cache[domain])
+
+    selectors = ("google", "default", "k1", "k2", "mail", "email",
+                 "dkim", "s1", "s2", "zoho", "cm")
+
+    # Every DNS query at once, each off the event loop.
+    results = await asyncio.gather(
+        _dns_txt_async(domain),                       # SPF
+        *[_dns_txt_async(f"{s}._domainkey.{domain}") for s in selectors],
+        _dns_txt_async(f"_dmarc.{domain}"),           # DMARC
+        return_exceptions=True,
+    )
+
+    spf_txt = _unwrap(results[0])
+    dkim_hits = [_unwrap(r) for r in results[1:1 + len(selectors)]]
+    dmarc_txt = _unwrap(results[-1])
+
+    warnings: List[str] = []
+
+    spf_ok = any(t.strip().lower().startswith("v=spf1") for t in spf_txt)
+    if not spf_ok:
+        warnings.append(
+            f"{domain} publishes no SPF record — Gmail/Yahoo bulk-reject "
+            "unauthenticated mail since Feb 2024. Add a TXT `v=spf1` record."
+        )
+
+    dkim_ok = any(dkim_hits)
+    if not dkim_ok:
+        warnings.append(
+            f"No DKIM key found under common selectors for {domain} — "
+            "signing proves the mail wasn't tampered with in transit."
+        )
+
+    dmarc_ok = any(t.strip().lower().startswith("v=dmarc1") for t in dmarc_txt)
+    if not dmarc_ok:
+        warnings.append(
+            f"{domain} publishes no DMARC policy — add "
+            "`v=DMARC1; p=none; rua=mailto:you@domain` to get reports."
+        )
+
+    result = {
+        "domain": domain, "spf_ok": spf_ok, "dkim_ok": dkim_ok,
+        "dmarc_ok": dmarc_ok, "ok": spf_ok and dkim_ok and dmarc_ok,
+        "warnings": warnings,
+    }
+    _auth_cache[domain] = dict(result)
+    return result
+
+
+async def _dns_txt_async(name: str) -> List[str]:
+    """A DNS TXT lookup that does not block the event loop."""
+    return await asyncio.to_thread(_dns_txt, name)
+
+
+def _unwrap(value: Any) -> Any:
+    """``asyncio.gather(..., return_exceptions=True)`` helper."""
+    if isinstance(value, BaseException):
+        return []
+    return value
 
 
 def in_quiet_hours(now: Optional[datetime] = None) -> bool:

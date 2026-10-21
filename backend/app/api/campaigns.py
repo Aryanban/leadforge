@@ -355,7 +355,11 @@ async def check_email_deliverability(req: SpamCheckRequest):
 
 # --- India advisor (advisory only: nothing here blocks, gates or sends) ------
 
-from app.campaigns.india_advisor import check_sender_auth, dlt_checklist, in_quiet_hours
+from app.campaigns.india_advisor import (
+    check_sender_auth_async,
+    dlt_checklist,
+    in_quiet_hours,
+)
 from app.campaigns.india_copy import festival_context, hinglish_closers, culture_checklist
 from app.campaigns.engagement import whatsapp_handoff, engagement_summary
 
@@ -375,7 +379,9 @@ async def india_advisor(domain: Optional[str] = None):
     out: Dict[str, Any] = {
         "quiet_hours_now": in_quiet_hours(),
         "festival": festival_context(),
-        "auth": check_sender_auth(domain) if domain else None,
+        # The async variant: the sync one performs up to 13 blocking DNS
+        # lookups, which froze the event loop for up to 39 seconds.
+        "auth": await check_sender_auth_async(domain) if domain else None,
     }
     return out
 

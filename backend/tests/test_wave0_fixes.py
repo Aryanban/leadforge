@@ -17,6 +17,7 @@ non-functional. They exist so none of it can silently come back.
 """
 
 import pytest
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -684,3 +685,46 @@ async def test_enrich_all_targets_leads_that_were_never_enriched():
     assert count == 1, f"expected exactly one unenriched lead, got {count}"
     assert seen == [old_id], f"should have enriched the never-enriched lead, got {seen}"
     assert done_id not in seen
+
+
+# --------------------------------------------------------------------------
+# The DNS probe must not block the event loop
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dns_auth_probe_does_not_block_the_event_loop():
+    """13 blocking DNS lookups in an async route froze the API.
+
+    `check_sender_auth` performed up to 13 sequential `dns.resolver.resolve`
+    calls, each with a 3-second timeout - up to ~39 seconds of a blocked
+    event loop for a single request, on the critical path of a page load.
+    A trivial request could stall every other user of the API.
+    """
+    import asyncio
+    from app.campaigns import india_advisor
+
+    calls = []
+
+    def _slow_dns(name: str):
+        calls.append(name)
+        time.sleep(0.05)  # a slow resolver
+        return ["v=spf1 -all"]
+
+    original = india_advisor._dns_txt
+    india_advisor._dns_txt = _slow_dns
+    try:
+        # Concurrency: 13 lookups x 50ms each, run serially, would be 650ms.
+        t0 = time.perf_counter()
+        result = await india_advisor.check_sender_auth_async("blocking-test.in")
+        elapsed = time.perf_counter() - t0
+    finally:
+        india_advisor._dns_txt = original
+
+    assert result["domain"] == "blocking-test.in"
+    assert len(calls) >= 13, "the probe should still look at every record"
+
+    # With 13 lookups at 50ms each, running them concurrently finishes in
+    # roughly one lookup's time. Allow generous headroom for CI.
+    assert elapsed < 0.4, (
+        f"the DNS probe took {elapsed:.3f}s - it is running sequentially"
+    )
