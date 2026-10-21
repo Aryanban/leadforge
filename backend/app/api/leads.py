@@ -17,6 +17,7 @@ from app.models.campaign_step import CampaignStep
 from app.campaigns.sender import resolve_city
 from app.campaigns.suppression import is_suppressed, add_suppression
 from app.enricher.email_finder import calculate_lead_quality_score
+from app.enricher.ai_icebreaker import generate_ai_icebreaker
 from app.dedupe.match import find_existing_business
 
 router = APIRouter()
@@ -40,13 +41,17 @@ async def get_leads(
     search: Optional[str] = None,
     industry: Optional[str] = None,
     has_email: Optional[bool] = None,
+    sort: str = Query("created", pattern="^(created|score|name|rating)$"),
+    desc: bool = True,
+    min_score: Optional[int] = Query(None, ge=0, le=100),
+    source: Optional[str] = None,
     db: AsyncSession = Depends(get_db)
 ):
     offset = (page - 1) * limit
-    
+
     # Base query for businesses
     stmt = select(Business)
-    
+
     if search:
         search_term = f"%{search}%"
         stmt = stmt.where(
@@ -60,6 +65,25 @@ async def get_leads(
     
     if industry:
         stmt = stmt.where(Business.industry.ilike(f"%{industry}%"))
+
+    # The "has email" filter is a SQL predicate, not a Python post-filter.
+    #
+    # It used to be applied inside the row loop, AFTER the LIMIT/OFFSET had
+    # already run, and it was missing from the count query entirely. That
+    # meant: `total` always reported the unfiltered count, and the rows that
+    # matched the filter were removed from the middle of an already-paged
+    # result set. On the Lead Database - the product's front door - a user
+    # filtering for "has email" saw 4 rows instead of 20 and could never
+    # reach page 2.
+    has_email_clause = None
+    if has_email is not None:
+        email_ids = select(Contact.business_id).where(
+            Contact.email.isnot(None), Contact.email != ""
+        )
+        has_email_clause = (
+            Business.id.in_(email_ids) if has_email else Business.id.notin_(email_ids)
+        )
+        stmt = stmt.where(has_email_clause)
 
     # Total count query
     count_stmt = select(func.count(Business.id))
@@ -75,12 +99,30 @@ async def get_leads(
         )
     if industry:
         count_stmt = count_stmt.where(Business.industry.ilike(f"%{industry}%"))
+    if has_email_clause is not None:
+        count_stmt = count_stmt.where(has_email_clause)
+    if min_score is not None:
+        stmt = stmt.where(Business.score >= min_score)
+        count_stmt = count_stmt.where(Business.score >= min_score)
+    if source:
+        stmt = stmt.where(Business.source == source)
+        count_stmt = count_stmt.where(Business.source == source)
 
     total_res = await db.execute(count_stmt)
     total = total_res.scalar() or 0
 
-    # Paged query
-    stmt = stmt.order_by(Business.created_at.desc()).offset(offset).limit(limit)
+    # Paged query. Sorting is parameterised (the old hard-coded
+    # `created_at desc` meant "show me the hottest leads" was impossible
+    # without a code change).
+    _sort_columns = {
+        "created": Business.created_at,
+        "score": Business.score,
+        "name": Business.name,
+        "rating": Business.rating,
+    }
+    _sort_col = _sort_columns.get(sort, Business.created_at)
+    stmt = stmt.order_by(_sort_col.desc() if desc else _sort_col.asc())
+    stmt = stmt.offset(offset).limit(limit)
     res = await db.execute(stmt)
     businesses = res.scalars().all()
 
@@ -108,12 +150,6 @@ async def get_leads(
     for b in businesses:
         b_contacts = contacts_map.get(b.id, [])
         primary_contact = b_contacts[0] if b_contacts else None
-        
-        # Apply email filter if requested
-        if has_email is True and not any(c.get("email") for c in b_contacts):
-            continue
-        if has_email is False and any(c.get("email") for c in b_contacts):
-            continue
 
         # Compute Google Maps URL
         extra = b.extra_data if isinstance(b.extra_data, dict) else {}
@@ -131,21 +167,38 @@ async def get_leads(
         operational_status = extra.get("operational_status", "Operational")
         price_tier = extra.get("price_tier")
 
-        if "lead_score" in extra and "lead_tier" in extra:
-            lead_score = extra["lead_score"]
-            lead_tier = extra["lead_tier"]
-            lead_badges = extra.get("lead_badges", [])
-        else:
-            score_info = calculate_lead_quality_score(b, b_contacts)
-            lead_score = score_info["score"]
-            lead_tier = score_info["tier"]
-            lead_badges = score_info["badges"]
+        # The lead score is computed LIVE, never read from the enrichment-time
+        # cache.
+        #
+        # The cache stored an ICP-relative score computed with whatever ICP
+        # was attached when the lead was enriched. Changing the ICP weights or
+        # switching preset therefore had *no* effect on the Lead Database - the
+        # stale cached value won, and scores from different ICPs were not
+        # comparable. Computing it live makes the score mean the same thing
+        # everywhere and makes ICP tuning visible immediately.
+        score_info = calculate_lead_quality_score(b, b_contacts)
+        lead_score = score_info["score"]
+        lead_tier = score_info["tier"]
+        lead_badges = score_info["badges"]
+        # Keep the column in sync so it can be sorted/filtered in SQL.
+        if b.score != lead_score:
+            b.score = lead_score
 
         # India source-trust: surfaces *why* a lead's score was adjusted —
         # self-listed directories (JustDial/IndiaMART) carry shared/stale
         # risk, live GBP and first-party sites do not. Advisory for the UI.
+        #
+        # The modifier reported here must be the one that was ACTUALLY
+        # applied to the score. Recomputing it independently meant the API
+        # advertised a trust bonus that the scorer had never applied (the
+        # primary scrape path's source values were missing from the trust
+        # table entirely), so the dashboard showed a badge next to a number
+        # that did not include it.
         from app.qualifier.source_trust import source_trust, trust_score_modifier
         _trust_val, _trust_note = source_trust(getattr(b, "source", None))
+        _applied_modifier = score_info.get("trust_modifier") if score_info else None
+        if _applied_modifier is None:
+            _applied_modifier = trust_score_modifier(_trust_val)
 
         leads_data.append({
             "id": b.id,
@@ -168,11 +221,14 @@ async def get_leads(
             "source": getattr(b, "source", None),
             "source_trust": _trust_val,
             "trust_note": _trust_note,
-            "trust_modifier": trust_score_modifier(_trust_val),
+            "trust_modifier": _applied_modifier,
             "primary_contact": primary_contact,
             "contacts": b_contacts,
             "created_at": b.created_at.isoformat() if b.created_at else None
         })
+
+    # Persist the refreshed scores so they are sortable/filterable in SQL.
+    await db.commit()
 
     return {
         "total": total,

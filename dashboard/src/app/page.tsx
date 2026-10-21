@@ -134,9 +134,11 @@ export default function Home() {
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
               Outreach activity · last {series.period_days} days
             </h2>
-            <div className="flex items-center gap-3 text-[11px] text-slate-500">
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
               <span><span className="font-bold text-slate-700">{series.totals.sent}</span> sent</span>
+              <span><span className="font-bold text-slate-700">{series.totals.opened}</span> opened</span>
               <span><span className="font-bold text-slate-700">{series.totals.replied}</span> replied</span>
+              <span><span className="font-bold text-slate-700">{series.totals.open_rate}%</span> open rate</span>
               <span className="font-bold text-slate-700">{series.totals.reply_rate}% reply rate</span>
             </div>
           </div>
@@ -157,6 +159,7 @@ export default function Home() {
                 />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Line type="monotone" dataKey="sent" stroke="#2563eb" strokeWidth={2} dot={false} name="Sent" />
+                <Line type="monotone" dataKey="opened" stroke="#7c3aed" strokeWidth={2} dot={false} name="Opened" />
                 <Line type="monotone" dataKey="replied" stroke="#059669" strokeWidth={2} dot={false} name="Replied" />
                 <Line type="monotone" dataKey="bounced" stroke="#dc2626" strokeWidth={2} dot={false} name="Bounced" />
               </LineChart>
@@ -176,8 +179,11 @@ export default function Home() {
           </div>
           <div className="mt-3">
             <div className="text-3xl font-extrabold text-slate-900">{stats?.total_leads ?? "..."}</div>
+            {/* No fake delta here: the API exposes no period-scoped discovery
+                count, so we show the absolute total instead of claiming every
+                lead was found this month. */}
             <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-              <span className="text-emerald-600 font-semibold">+{stats?.total_leads ?? 0}</span> discovered
+              businesses in your database
             </p>
           </div>
         </div>
@@ -207,7 +213,9 @@ export default function Home() {
           <div className="mt-3">
             <div className="text-3xl font-extrabold text-slate-900">{stats?.emails_sent ?? "..."}</div>
             <p className="text-xs text-slate-500 mt-1">
-              Across active campaigns
+              {series
+                ? `${series.totals.sent} sent in the last ${series.period_days} days`
+                : "Across active campaigns"}
             </p>
           </div>
         </div>

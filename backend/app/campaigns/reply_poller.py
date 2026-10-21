@@ -22,7 +22,7 @@ import asyncio
 import imaplib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -198,7 +198,15 @@ def _poll_one_mailbox_sync(mailbox_id: int, email: str, password: str,
             body = extract_reply_body(msg)
             subject = _decode(msg.get("Subject"))
             auto = any(msg.get(h) for h in _AUTO_HEADERS)
-            inbound.append((num, refs, subject, body, auto))
+            # Carry the headers through. They were collected and then
+            # discarded, which made the ``Auto-Submitted`` branch of
+            # ``categorize_reply`` dead code at runtime: an out-of-office
+            # auto-responder was classified from body text alone, and often
+            # not at all. That mattered twice over - it ended the follow-up
+            # chain on every lead whose owner travels, and an auto-responder
+            # could be counted as a "reply" and pick the A/B winning subject.
+            headers = {str(k): v for k, v in msg.items()}
+            inbound.append((num, refs, subject, body, auto, headers))
         stats["matched"] = len(inbound)
         if not inbound:
             return stats
@@ -252,9 +260,9 @@ async def poll_mailbox(mailbox_id: int) -> Dict[str, int]:
     out.update({k: int(fetch.get(k, 0)) for k in ("seen", "matched")})
     if not inbound:
         return out
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     async with async_session_maker() as db:
-        for _num, refs, subject, body, _auto in inbound:
+        for _num, refs, subject, body, _auto, headers in inbound:
             target_id = next((r for r in refs if r in known_ids), None)
             if not target_id:
                 continue
@@ -263,7 +271,10 @@ async def poll_mailbox(mailbox_id: int) -> Dict[str, int]:
             )).scalars().first()
             if not send or send.replied:
                 continue
-            category, is_opt_out = categorize_reply(subject, body)
+            # Pass the headers so ``Auto-Submitted`` / ``X-Auto-Reply`` are
+            # honoured. Without them an out-of-office auto-responder is
+            # indistinguishable from a real reply.
+            category, is_opt_out = categorize_reply(subject, body, headers)
             send.replied = True
             send.replied_at = now
             send.reply_category = category

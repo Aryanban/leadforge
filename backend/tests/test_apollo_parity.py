@@ -85,16 +85,31 @@ def test_authored_text_strips_footer_and_quote():
 # --- A/B winner selection -----------------------------------------------------
 
 def test_ab_winner_undecided_below_sample():
+    # Cold-email reply rates are 1-3%, so a small sample must never produce a
+    # winner - one extra reply at n=10 is a 10pp swing.
+    assert decide_ab_winner(49, 40, 49, 0) is None
     assert decide_ab_winner(9, 9, 9, 0) is None
 
 
+def test_ab_winner_needs_a_real_sample():
+    """The old test asserted a winner from 10 sends per variant.
+
+    That is a coin flip deciding which subject line ships to every
+    prospect. The winner now requires a statistically meaningful difference.
+    """
+    # 10 vs 10 sends, 3 replies vs 1: not enough sample, and even if it
+    # were, the difference is not significant.
+    assert decide_ab_winner(10, 3, 10, 1) is None
+
+
 def test_ab_winner_by_reply_rate():
-    assert decide_ab_winner(10, 3, 10, 1) == "a"
-    assert decide_ab_winner(10, 1, 10, 3) == "b"
+    # A real sample with a real difference.
+    assert decide_ab_winner(200, 30, 200, 8) == "a"
+    assert decide_ab_winner(200, 8, 200, 30) == "b"
 
 
 def test_ab_tie_stays_undecided():
-    assert decide_ab_winner(10, 2, 10, 2) is None
+    assert decide_ab_winner(200, 20, 200, 20) is None
 
 
 # --- API surface ---------------------------------------------------------------

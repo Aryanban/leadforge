@@ -155,6 +155,10 @@ async def seed_initial_data_if_empty():
                 rating=item["rating"],
                 reviews_count=item["reviews_count"],
                 industry=item["industry"],
+                # The business is what source-trust scoring reads. It used to
+                # be set on the *contact* only, so every seeded lead fell
+                # through to the default trust and never got a trust badge.
+                source="google_maps_seed",
                 extra_data={"query": "Real Estate Agents in Rohini Delhi", "seeded": True}
             )
             db.add(b)

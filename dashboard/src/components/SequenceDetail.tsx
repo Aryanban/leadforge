@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, Play, Pause, Loader2, Users, Mail, Trophy } from "lucide-react";
+import { X, Play, Pause, Loader2, Users, Mail, Trophy, AlertTriangle } from "lucide-react";
 import { api, StepStat, CampaignTargetItem } from "@/lib/api";
+import { toast } from "@/components/Toaster";
 
 const STATUS_STYLE: Record<string, string> = {
   active: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -29,6 +30,7 @@ export function SequenceDetail({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmLaunch, setConfirmLaunch] = useState(false);
 
   const load = async () => {
     try {
@@ -59,11 +61,18 @@ export function SequenceDetail({
         ? await api.launchCampaign(campaignId)
         : await api.pauseCampaign(campaignId);
       setMessage(res.message || "Done.");
+      if (kind === "launch") {
+        toast.success("Sequence launched", res.message || "Sending has started.");
+      } else {
+        toast.info("Sequence paused", res.message || "Sending is paused.");
+      }
       await load();
     } catch (e: any) {
       setMessage(e.message || "Action failed.");
+      toast.error(kind === "launch" ? "Could not launch sequence" : "Could not pause sequence", e.message);
     } finally {
       setBusy(false);
+      setConfirmLaunch(false);
     }
   };
 
@@ -107,7 +116,7 @@ export function SequenceDetail({
           <div className="flex items-center gap-2">
             {camp?.status !== "active" ? (
               <button
-                onClick={() => act("launch")}
+                onClick={() => setConfirmLaunch(true)}
                 disabled={busy}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 text-white px-4 py-2 text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
               >
@@ -208,6 +217,77 @@ export function SequenceDetail({
           </section>
         </div>
       </div>
+
+      {/* Launch confirmation — this sends real cold email, so the operator
+          gets to see the blast radius before anything leaves the building. */}
+      {confirmLaunch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setConfirmLaunch(false)} />
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="launch-confirm-title"
+            className="relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl space-y-4"
+          >
+            <div className="flex items-start gap-3">
+              <span className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-4 h-4" />
+              </span>
+              <div className="min-w-0">
+                <h3 id="launch-confirm-title" className="text-sm font-bold text-slate-900">
+                  Launch this sequence now?
+                </h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Real cold email starts going out to your recipients. This cannot be
+                  unsent.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">
+                  Recipients
+                </span>
+                <div className="text-xl font-extrabold text-slate-900">{targets.length}</div>
+                <div className="text-[11px] text-slate-500">email{targets.length === 1 ? "" : "s"} in this blast</div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">
+                  Steps
+                </span>
+                <div className="text-xl font-extrabold text-slate-900">{stats.length}</div>
+                <div className="text-[11px] text-slate-500">
+                  email{stats.length === 1 ? "" : "s"} in the sequence
+                </div>
+              </div>
+            </div>
+
+            {targets.length === 0 && (
+              <p className="text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                This sequence has no recipients — add contacts before launching.
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
+              <button
+                onClick={() => setConfirmLaunch(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => act("launch")}
+                disabled={busy || targets.length === 0}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs disabled:opacity-50"
+              >
+                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                Launch {targets.length} recipient{targets.length === 1 ? "" : "s"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

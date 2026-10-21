@@ -15,6 +15,7 @@ import {
   MapPin
 } from "lucide-react";
 import { api, ScrapeJob } from "@/lib/api";
+import { toast } from "@/components/Toaster";
 
 const PRESET_QUERIES = [
   { label: "Rohini Property Dealers", query: "Real Estate Agents & Property Dealers in Rohini Delhi" },
@@ -90,7 +91,7 @@ export default function ScrapePage() {
       });
       fetchJobs();
     } catch (err: any) {
-      alert(`Scrape failed to start: ${err.message}`);
+      toast.error("Scrape failed to start", err.message || "Check the query and try again.");
     } finally {
       setIsSubmitting(false);
     }

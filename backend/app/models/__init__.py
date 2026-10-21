@@ -9,6 +9,11 @@ from .icp_profile import ICPProfile
 from .source_stats import SourceStats
 from .social_profile import SocialProfile
 from .suppression import Suppression
+# Every model module must be imported here. A model that is only registered
+# when some other module happens to import it is a model whose table is
+# missing from `create_all` - which is how `saved_lists` ended up absent
+# from freshly-created databases (and blew up the test-suite reset).
+from .saved_list import SavedList
 
 __all__ = [
     "Business",
@@ -24,4 +29,5 @@ __all__ = [
     "SourceStats",
     "SocialProfile",
     "Suppression",
+    "SavedList",
 ]

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
+import math
 from typing import Optional, List, Dict, Any
 
 from app.database import get_db
@@ -408,7 +409,16 @@ async def india_warm_handoff(campaign_id: int, db: AsyncSession = Depends(get_db
                     "link and write a personal message."}
 
 #: Minimum sends per variant before an A/B winner may be declared.
-AB_MIN_SENDS_PER_VARIANT = 10
+#: Cold-email reply rates sit at 1-3%, so at 10 sends per variant a single
+#: extra reply is a 10pp swing - a coin flip would "declare" a winner. 50
+#: per variant gives a real sample.
+AB_MIN_SENDS_PER_VARIANT = 50
+
+#: Reply categories that count as a *positive* reply for A/B purposes. An
+#: out-of-office auto-responder and an opt-out are not signals that a subject
+#: line works - counting them let a vacation responder pick the winning
+#: subject line, and an opt-out was counted as a success.
+AB_POSITIVE_REPLIES = ("interested",)
 
 
 def decide_ab_winner(a_sent: int, a_replied: int, b_sent: int, b_replied: int,
@@ -420,14 +430,31 @@ def decide_ab_winner(a_sent: int, a_replied: int, b_sent: int, b_replied: int,
     is deliberately NOT consulted: opens require the deliverability-killing
     open-tracking pixel, so with tracking off open counts are all zero and
     any open-based decision would be fiction.
+
+    The comparison is a two-proportion z-test. The old code compared raw
+    rates with no significance test at all, so with 1-3% reply rates a single
+    reply decided the winner.
     """
     if a_sent < min_sends or b_sent < min_sends:
         return None
-    a_rate = a_replied / a_sent
-    b_rate = b_replied / b_sent
-    if b_rate == a_rate:
+    if a_replied + b_replied < 3:
+        # Fewer than three replies in total: nothing to say.
         return None
-    return "b" if b_rate > a_rate else "a"
+
+    p1, p2 = a_replied / a_sent, b_replied / b_sent
+    if p1 == p2:
+        return None
+
+    pooled = (a_replied + b_replied) / (a_sent + b_sent)
+    if pooled <= 0 or pooled >= 1:
+        return None
+    se = math.sqrt(pooled * (1 - pooled) * (1 / a_sent + 1 / b_sent))
+    if se == 0:
+        return None
+    z = abs(p1 - p2) / se
+    if z < 1.96:  # ~95% confidence
+        return None
+    return "b" if p2 > p1 else "a"
 
 
 @router.get("/{campaign_id}/step-stats")
@@ -462,8 +489,8 @@ async def get_step_stats(campaign_id: int, db: AsyncSession = Depends(get_db)):
         rows = [s for s in by_step.get(step.id, []) if getattr(s, "status", None) == "sent"]
         a = [s for s in rows if (getattr(s, "variant_used", None) or "a") == "a"]
         b = [s for s in rows if getattr(s, "variant_used", None) == "b"]
-        a_rep = sum(1 for s in a if s.replied)
-        b_rep = sum(1 for s in b if s.replied)
+        a_rep = sum(1 for s in a if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        b_rep = sum(1 for s in b if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
 
         is_ab = bool(getattr(step, "subject_b", None))
         winner = getattr(step, "variant_winner", None)

@@ -17,7 +17,17 @@ const config = {
     video: 'off',
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
-  webServer: null,
+  // The suite has to boot the app itself, otherwise it silently tests nothing.
+  // CI builds first (the build now type-checks) and starts the production
+  // server; locally `next dev` is used so no build step is required.
+  webServer: {
+    command: process.env.CI ? 'npm run build && npm run start' : 'npm run dev',
+    url: 'http://127.0.0.1:3000',
+    reuseExistingServer: !process.env.CI,
+    timeout: 180_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  },
 };
 
 module.exports = config;

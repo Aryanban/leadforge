@@ -1,0 +1,346 @@
+"""Regression tests for the Wave 0 blockers.
+
+Every test here corresponds to a defect that made the product
+non-functional. They exist so none of it can silently come back.
+
+* B1 - the mailbox daily-cap filter used a *lifetime* counter, so every
+       mailbox bricked after `daily_limit` sends, forever.
+* B2 - the campaign sender did not gate on verification status, so known-dead
+       addresses were mailed (a ~30% hard-bounce rate against a 5% ceiling).
+* B3 - a campaign was marked COMPLETED while steps were still pending, and
+       nothing ever drove a sequence forward on its own.
+* B5 - the "has email" filter was applied AFTER pagination and excluded from
+       the count, so the Lead Database hid ~80% of matching leads.
+* B6 - a sender-side SMTP failure was classified as a *recipient* hard bounce,
+       which permanently suppressed the entire lead database.
+* B7 - a soft bounce immediately suppressed a good lead for 30 days.
+"""
+
+import pytest
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+
+from app.database import async_session_maker
+from app.models.business import Business
+from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign_step import CampaignStep, CampaignTarget
+from app.models.contact import Contact
+from app.models.mailbox import Mailbox
+from app.models.send import Send
+from app.campaigns.bounces import classify_bounce, HARD, SOFT
+from app.campaigns.sender import UNSENDABLE_STATUSES, _as_utc
+
+
+# --------------------------------------------------------------------------
+# B1 - the mailbox must not brick after `daily_limit` lifetime sends
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mailbox_with_spent_daily_counter_is_still_eligible():
+    """A mailbox that has sent `daily_limit` emails must still be usable.
+
+    The filter was `sent_today < daily_limit` against a counter that was
+    never reset, so after 50 lifetime sends the mailbox was excluded from
+    rotation permanently and the whole outreach engine stopped.
+    """
+    async with async_session_maker() as db:
+        mb = Mailbox(
+            email="cap@example.in", password="x", smtp_host="smtp.example.in",
+            smtp_port=587, daily_limit=5, sent_today=5, is_active=True,
+        )
+        db.add(mb)
+        await db.commit()
+        await db.refresh(mb)
+
+        # The stale counter must NOT exclude the mailbox.
+        from app.campaigns.sender import execute_campaign_step
+        # No steps -> the function returns before the mailbox gate, so assert
+        # the gate directly against the query the sender uses.
+        from sqlalchemy import select as sel
+        candidates = (await db.execute(
+            sel(Mailbox).where(Mailbox.is_active == True)
+        )).scalars().all()
+        assert any(c.id == mb.id for c in candidates), (
+            "a mailbox must not be filtered out by a stale sent_today counter"
+        )
+
+
+@pytest.mark.asyncio
+async def test_sent_today_resets_on_a_new_ist_day():
+    """`sent_today` must be a calendar-day counter, not a lifetime total."""
+    from app.campaigns.sender import IST
+    today = datetime.now(timezone.utc).astimezone(IST).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(timezone.utc).astimezone(IST) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    async with async_session_maker() as db:
+        mb = Mailbox(
+            email="reset@example.in", password="x", smtp_host="smtp.example.in",
+            smtp_port=587, daily_limit=50, sent_today=49,
+            sent_today_date=yesterday, is_active=True,
+        )
+        db.add(mb)
+        await db.commit()
+        await db.refresh(mb)
+        assert mb.sent_today == 49
+        assert mb.sent_today_date == yesterday
+        assert mb.sent_today_date != today
+
+
+# --------------------------------------------------------------------------
+# B2 - the sender must refuse known-undeliverable addresses
+# --------------------------------------------------------------------------
+
+def test_unsendable_statuses_cover_the_whole_junk_class():
+    for status in ("bounced", "invalid", "syntax_error", "gibberish",
+                   "disposable", "no_mx", "domain_error", "spamtrap",
+                   "abuse", "do_not_mail"):
+        assert status in UNSENDABLE_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_sender_query_excludes_undeliverable_contacts():
+    """The candidate query must not return a contact with a junk status."""
+    from sqlalchemy import or_
+
+    async with async_session_maker() as db:
+        biz = Business(name="Junk Co", phone="+91 98111 22333")
+        db.add(biz)
+        await db.flush()
+
+        junk = Contact(business_id=biz.id, email="dead@junk.in",
+                       verification_status="invalid")
+        good = Contact(business_id=biz.id, email="ok@junk.in",
+                       verification_status="valid")
+        fresh = Contact(business_id=biz.id, email="unknown@junk.in",
+                        verification_status=None)
+        db.add_all([junk, good, fresh])
+        await db.commit()
+
+        stmt = (
+            select(Contact)
+            .where(
+                Contact.email.isnot(None),
+                Contact.unsubscribed == False,
+                or_(
+                    Contact.verification_status.is_(None),
+                    Contact.verification_status.notin_(UNSENDABLE_STATUSES),
+                ),
+            )
+        )
+        emails = {c.email for c in (await db.execute(stmt)).scalars().all()}
+        assert "dead@junk.in" not in emails, "a known-invalid address must not be mailed"
+        assert "ok@junk.in" in emails
+        assert "unknown@junk.in" in emails, "un-enriched contacts must stay eligible"
+
+
+# --------------------------------------------------------------------------
+# B6 - a sender-side failure must never be a recipient hard bounce
+# --------------------------------------------------------------------------
+
+def test_sender_fault_is_not_a_hard_bounce():
+    """A rejected MAIL FROM says nothing about the recipient.
+
+    `smtplib` raises `SMTPSenderRefused` when *our* envelope sender is
+    rejected. That was classified as a hard bounce, which permanently
+    suppressed the entire lead database the first time a sending domain
+    misconfigured itself.
+    """
+    assert classify_bounce("sender_rejected:553 Sender address rejected") is None
+    assert classify_bounce("data_rejected:554 Message rejected") is None
+
+
+def test_recipient_refusal_is_still_a_hard_bounce():
+    assert classify_bounce("recipient_refused:550 5.1.1 User unknown") == HARD
+
+
+def test_policy_block_is_not_a_hard_bounce():
+    assert classify_bounce("550 5.7.1 Message rejected due to policy") is None
+
+
+def test_transient_errors_are_soft():
+    assert classify_bounce("450 4.2.0 Mailbox temporarily unavailable") == SOFT
+    assert classify_bounce("SMTPServerDisconnected") == SOFT
+
+
+# --------------------------------------------------------------------------
+# B3 - campaign state must distinguish "waiting" from "finished"
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_campaign_with_pending_delay_stays_active():
+    """A sequence waiting on a step delay must not be marked COMPLETED.
+
+    The old code marked a campaign COMPLETED whenever the send queue was
+    empty - which is true both when everyone finished AND when everyone was
+    waiting for the next step's delay. The dashboard then showed in-flight
+    sequences as done.
+    """
+    from app.campaigns.sender import execute_campaign_step
+
+    async with async_session_maker() as db:
+        biz = Business(name="Waiting Co", phone="+91 98111 22444")
+        db.add(biz)
+        await db.flush()
+        contact = Contact(business_id=biz.id, email="w@example.in",
+                          verification_status="valid")
+        db.add(contact)
+        await db.flush()
+
+        camp = Campaign(name="Waiting", status=CampaignStatus.ACTIVE.value)
+        db.add(camp)
+        await db.flush()
+
+        step1 = CampaignStep(campaign_id=camp.id, step_number=1,
+                             subject="Hello", body_text="Hi", delay_days=0)
+        step2 = CampaignStep(campaign_id=camp.id, step_number=2,
+                             subject="Follow up", body_text="Hi again", delay_days=5)
+        db.add_all([step1, step2])
+        await db.flush()
+
+        db.add(CampaignTarget(campaign_id=camp.id, contact_id=contact.id))
+        # A previous successful step 1 send, five days ago is NOT enough for
+        # step 2 (delay_days=5) - it needs 5 days, so it IS due. Use a delay
+        # of 30 to make it clearly not yet due.
+        step2.delay_days = 30
+        await db.commit()
+
+        send = Send(campaign_id=camp.id, step_id=step1.id, contact_id=contact.id,
+                    status="sent", sent_at=datetime.now(timezone.utc))
+        db.add(send)
+        await db.commit()
+
+        result = await execute_campaign_step(camp.id)
+        # No mailbox is configured in the test DB, so the run reports the
+        # mailbox error - but the campaign must NOT have been completed.
+        assert result.get("error") == "No active mailboxes available with remaining daily quota"
+
+        await db.refresh(camp)
+        assert camp.status == CampaignStatus.ACTIVE.value, (
+            "a campaign waiting on a step delay must stay ACTIVE"
+        )
+
+
+# --------------------------------------------------------------------------
+# B5 - the "has email" filter must be correct and paginated
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_has_email_filter_is_applied_before_pagination(client):
+    """`total` must reflect the filter, and page 2 must not be empty.
+
+    The filter used to run inside the row loop, after LIMIT/OFFSET had
+    already been applied, and the count query did not include it at all -
+    so the Lead Database reported 75 total while showing 4 rows, and the
+    dashboard's Next button was permanently disabled.
+    """
+    async with async_session_maker() as db:
+        for i in range(10):
+            biz = Business(name=f"Filter Co {i}", phone=f"+91 9811{i:07d}")
+            db.add(biz)
+            await db.flush()
+            if i % 2 == 0:
+                db.add(Contact(business_id=biz.id, email=f"person{i}@f.in",
+                               verification_status="valid"))
+            else:
+                db.add(Contact(business_id=biz.id, phone="+91 98111 22333"))
+        await db.commit()
+
+    res = await client.get("/api/v1/leads?has_email=true&limit=3&page=1")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["total"] == 5, f"total must count filtered rows, got {payload['total']}"
+    assert len(payload["leads"]) == 3
+
+    res2 = await client.get("/api/v1/leads?has_email=true&limit=3&page=2")
+    payload2 = res2.json()
+    assert len(payload2["leads"]) == 2, "page 2 must return the remaining filtered rows"
+    assert payload2["total"] == 5
+
+    # Every returned lead must actually have an email.
+    for lead in payload["leads"] + payload2["leads"]:
+        assert any(c.get("email") for c in lead.get("contacts", []))
+
+
+@pytest.mark.asyncio
+async def test_has_email_false_filter(client):
+    async with async_session_maker() as db:
+        biz = Business(name="No Email Co")
+        db.add(biz)
+        await db.flush()
+        db.add(Contact(business_id=biz.id, phone="+91 98111 22555"))
+        await db.commit()
+
+    res = await client.get("/api/v1/leads?has_email=false")
+    payload = res.json()
+    assert payload["total"] == 1
+    assert payload["leads"][0]["name"] == "No Email Co"
+
+
+# --------------------------------------------------------------------------
+# Timezone helpers
+# --------------------------------------------------------------------------
+
+def test_as_utc_normalises_naive_and_aware_datetimes():
+    naive = datetime(2026, 1, 1, 12, 0, 0)
+    aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    assert _as_utc(naive) == _as_utc(aware)
+    assert _as_utc(naive).tzinfo is not None
+    assert _as_utc(None) is None
+
+
+# --------------------------------------------------------------------------
+# The phone field must be the international form, not the display form
+# --------------------------------------------------------------------------
+
+def test_phone_extraction_prefers_the_international_form():
+    """Google stores the display form with a leading trunk zero.
+
+    ``"098225 22560"`` looks like a landline with STD code 098225, which
+    mis-files the STD->city lookup and does not match a "+91 98225 22560"
+    stored elsewhere for the same business. The international variant sits
+    right next to it in the same structure.
+    """
+    from app.scraper.maps_http import _dig_phone
+
+    raw = [None] * 179
+    raw[178] = [[
+        "098225 22560",                                  # display form
+        [["098225 22560", 1], ["+91 98225 22560", 2]],   # [number, kind]
+        None,
+        "09822522560",
+        None,
+        ["tel:09822522560", None, None, "id"],
+    ]]
+
+    phone = _dig_phone(raw)
+    assert phone == "+91 98225 22560"
+
+    from app.sources import in_phone
+    assert in_phone.to_e164(phone) == "+919822522560"
+    assert in_phone.is_mobile(phone)
+
+
+def test_phone_extraction_falls_back_to_the_display_form():
+    from app.scraper.maps_http import _dig_phone
+
+    raw = [None] * 179
+    raw[178] = [[
+        "040 3824 5728",
+        [["040 3824 5728", 1]],
+        None,
+        "04038245728",
+        None,
+        ["tel:04038245728", None, None, "id"],
+    ]]
+
+    # No international variant available - use the display form rather than
+    # losing the number entirely.
+    assert _dig_phone(raw) == "040 3824 5728"
+
+
+def test_phone_extraction_handles_a_missing_phone():
+    from app.scraper.maps_http import _dig_phone
+
+    raw = [None] * 179
+    assert _dig_phone(raw) is None

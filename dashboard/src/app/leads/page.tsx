@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { 
   Users, 
   Search, 
@@ -35,14 +36,60 @@ import {
 } from "lucide-react";
 import { api, LeadItem, CampaignItem, LeadDetailResponse, SavedView } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
+import { toast } from "@/components/Toaster";
 
+/** Rows per page — the backend paginates on the same number. */
+const PAGE_SIZE = 20;
+
+function LeadsSkeleton() {
+  return (
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <div>
+        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+          Lead Database
+        </h1>
+        <p className="text-sm text-slate-500 mt-1">Loading your lead database…</p>
+      </div>
+      <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs flex items-center justify-center py-16 text-slate-400">
+        <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The page reads `?search=` / `?industry=` from the URL, which is what the
+ * global Cmd+K search lands on. `useSearchParams` forces the surrounding
+ * Suspense boundary (see the default export) so the route stays statically
+ * renderable.
+ */
 export default function LeadsPage() {
+  return (
+    <Suspense fallback={<LeadsSkeleton />}>
+      <LeadsPageInner />
+    </Suspense>
+  );
+}
+
+function LeadsPageInner() {
+  const searchParams = useSearchParams();
+  const urlSearch = searchParams.get("search") ?? "";
+  const urlIndustry = searchParams.get("industry") ?? "";
+
   const [leads, setLeads] = useState<LeadItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [industryFilter, setIndustryFilter] = useState("");
+  const [search, setSearch] = useState(urlSearch);
+  const [industryFilter, setIndustryFilter] = useState(urlIndustry);
   const [hasEmailFilter, setHasEmailFilter] = useState<string>("all");
+
+  // Pagination is driven by the total the API reports — a filtered last page
+  // is legitimately shorter than PAGE_SIZE, so row count can't drive it.
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const firstRowIndex = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const lastRowIndex = total === 0 ? 0 : Math.min(page * PAGE_SIZE, total);
+  const hasActiveFilters =
+    Boolean(search.trim()) || Boolean(industryFilter.trim()) || hasEmailFilter !== "all";
   const [loading, setLoading] = useState(true);
   const [enrichingId, setEnrichingId] = useState<number | null>(null);
   const [bulkEnrichLoading, setBulkEnrichLoading] = useState(false);
@@ -96,9 +143,27 @@ export default function LeadsPage() {
   const contactIdFor = (lead: LeadItem): number | null =>
     lead.primary_contact?.id ?? lead.contacts?.[0]?.id ?? null;
 
-  const selectableIds = leads.map(contactIdFor);
-  const selectableCount = selectableIds.filter((id): id is number => id !== null).length;
+  // Selectable ids are PAGE-scoped, while `selected` is global (it can hold
+  // picks from earlier pages). Keep both views straight: the header checkbox
+  // reflects the current page only, and toggling it merges into / removes from
+  // the global set instead of replacing it.
+  const selectableIds = leads
+    .map(contactIdFor)
+    .filter((id): id is number => id !== null);
+  const selectableCount = selectableIds.length;
   const selectableLoaded = !loading && leads.length > 0;
+  const selectedOnPage = selectableIds.filter((id) => selected.has(id));
+  const allOnPageSelected = selectableCount > 0 && selectedOnPage.length === selectableCount;
+  const someOnPageSelected = selectedOnPage.length > 0 && !allOnPageSelected;
+
+  // The header checkbox is "indeterminate" when only part of the page is
+  // picked — the DOM property can't be set declaratively.
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
 
   const toggleRow = (lead: LeadItem) => {
     const cid = contactIdFor(lead);
@@ -195,11 +260,14 @@ export default function LeadsPage() {
   }, [loadSavedViews]);
 
   const toggleAll = () => {
-    setSelected((prev) =>
-      prev.size === selectableCount
-        ? new Set()
-        : new Set(selectableIds.filter((id): id is number => id !== null)),
-    );
+    setSelected((prev) => {
+      const next = new Set(prev);
+      // Union (never replace): picks made on other pages must survive.
+      const everySelected = selectableIds.length > 0 && selectableIds.every((id) => next.has(id));
+      if (everySelected) selectableIds.forEach((id) => next.delete(id));
+      else selectableIds.forEach((id) => next.add(id));
+      return next;
+    });
   };
 
   const openSequencePicker = async () => {
@@ -228,29 +296,46 @@ export default function LeadsPage() {
     }
   };
 
-  const fetchLeads = async () => {
-    try {
-      setLoading(true);
-      const emailFilterParam = hasEmailFilter === "true" ? true : hasEmailFilter === "false" ? false : undefined;
-      const res = await api.getLeads({
-        page,
-        limit: 20,
-        search: search || undefined,
-        industry: industryFilter || undefined,
-        has_email: emailFilterParam,
-      });
-      setLeads(res.leads);
-      setTotal(res.total);
-    } catch (err) {
-      console.warn("Could not fetch live leads, using demo fallback:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Two in-flight requests can resolve out of order (a slow page-1 response
+  // landing after a fast page-2 response). A monotonically increasing token
+  // makes sure only the newest response is allowed to paint.
+  const requestToken = useRef(0);
+
+  const fetchLeads = useCallback(
+    async (args: { page: number; search: string; industry: string; hasEmail?: boolean }) => {
+      const token = ++requestToken.current;
+      try {
+        setLoading(true);
+        const res = await api.getLeads({
+          page: args.page,
+          limit: PAGE_SIZE,
+          search: args.search || undefined,
+          industry: args.industry || undefined,
+          has_email: args.hasEmail,
+        });
+        if (token !== requestToken.current) return; // a newer request won
+        setLeads(res.leads);
+        setTotal(res.total);
+      } catch (err) {
+        if (token !== requestToken.current) return;
+        console.warn("Could not fetch live leads:", err);
+        toast.error("Could not load leads", "Check that the backend is reachable and try again.");
+      } finally {
+        if (token === requestToken.current) setLoading(false);
+      }
+    },
+    [],
+  );
+
+  const emailFilterParam =
+    hasEmailFilter === "true" ? true : hasEmailFilter === "false" ? false : undefined;
 
   useEffect(() => {
-    fetchLeads();
-  }, [page, industryFilter, hasEmailFilter]);
+    fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
+    // `search` / `industry` are intentionally excluded: they have their own
+    // debounced effect so typing doesn't fire a request per keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, hasEmailFilter, fetchLeads]);
 
   // Live search: debounced so typing doesn't fire a request per keystroke, but
   // without requiring the user to press Enter (Apollo-style instant filter).
@@ -262,15 +347,30 @@ export default function LeadsPage() {
     }
     const t = setTimeout(() => {
       setPage(1);
-      fetchLeads();
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     }, 400);
     return () => clearTimeout(t);
-  }, [search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, industryFilter]);
+
+  // Sync the URL (?search= / ?industry=) into the filters. This is what makes
+  // the global Cmd+K search land on an actually filtered table. Changing the
+  // URL resets to the first page.
+  useEffect(() => {
+    setSearch((prev) => (prev === urlSearch ? prev : urlSearch));
+    setIndustryFilter((prev) => (prev === urlIndustry ? prev : urlIndustry));
+    setPage(1);
+  }, [urlSearch, urlIndustry]);
+
+  // Deleting the last row of the last page must not strand us on an empty page.
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
-    fetchLeads();
+    fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
   };
 
   const handleEnrichSingle = async (businessId: number) => {
@@ -280,10 +380,13 @@ export default function LeadsPage() {
       const emailCount = res.emails_found || 0;
       const phoneCount = res.phones_found || 0;
       const verifiedCount = res.verified_emails || 0;
-      alert(`Multi-Source Search Complete!\n• Emails Found: ${emailCount} (${verifiedCount} verified deliverable)\n• Discovered Phone Numbers: ${phoneCount}\n• Discovered Website: ${res.website || "None"}`);
-      fetchLeads();
+      toast.success(
+        "Multi-source search complete",
+        `Emails found: ${emailCount} (${verifiedCount} verified deliverable) • Phone numbers: ${phoneCount} • Website: ${res.website || "None"}`,
+      );
+      fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Search notice: ${err.message}`);
+      toast.error("Search failed", err.message || "Could not run the contact search.");
     } finally {
       setEnrichingId(null);
     }
@@ -293,10 +396,16 @@ export default function LeadsPage() {
     try {
       setBulkEnrichLoading(true);
       const res = await api.enrichAll(25);
-      alert(res.message || "Deep web contact enrichment started in background across DuckDuckGo & websites!");
-      setTimeout(() => fetchLeads(), 3000);
+      toast.info(
+        "Deep web enrichment started",
+        res.message || "Running in the background across DuckDuckGo & target websites.",
+      );
+      setTimeout(
+        () => fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam }),
+        3000,
+      );
     } catch (err: any) {
-      alert(`Failed to trigger bulk enrichment: ${err.message}`);
+      toast.error("Bulk enrichment failed", err.message || "Could not trigger bulk enrichment.");
     } finally {
       setBulkEnrichLoading(false);
     }
@@ -306,9 +415,10 @@ export default function LeadsPage() {
     if (!confirm("Are you sure you want to remove this lead?")) return;
     try {
       await api.deleteLead(id);
-      fetchLeads();
+      toast.success("Lead deleted", "The lead was removed from your database.");
+      fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Failed to delete lead: ${err.message}`);
+      toast.error("Could not delete lead", err.message || "The lead is still in your database.");
     }
   };
 
@@ -319,9 +429,10 @@ export default function LeadsPage() {
       await api.createLead(newLead);
       setShowAddModal(false);
       setNewLead({ name: "", phone: "", email: "", website: "", address: "", industry: "Real Estate Agency" });
-      fetchLeads();
+      toast.success("Lead added", `${newLead.name} is now in your lead database.`);
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Failed to add lead: ${err.message}`);
+      toast.error("Could not add lead", err.message || "Please check the details and try again.");
     }
   };
 
@@ -331,10 +442,13 @@ export default function LeadsPage() {
     try {
       setSyncingTwenty(true);
       const res = await api.exportTwentyCrm(syncWebhookUrl);
-      alert(`Sync successful! ${res.synced_companies || 0} companies pushed to target webhook.`);
+      toast.success(
+        "Sync successful",
+        `${res.synced_companies || 0} companies pushed to your webhook.`,
+      );
       setShowSyncModal(false);
     } catch (err: any) {
-      alert(`Sync notice: ${err.message}`);
+      toast.error("Sync failed", err.message || "Could not reach the webhook.");
     } finally {
       setSyncingTwenty(false);
     }
@@ -346,12 +460,15 @@ export default function LeadsPage() {
     try {
       setImportingCsv(true);
       const res = await api.importCsv(importCsvText.trim());
-      alert(`Import Successful!\n• Imported Leads: ${res.imported}\n• Skipped: ${res.skipped}\n• Total Processed: ${res.total_rows_processed}`);
+      toast.success(
+        "Import complete",
+        `Imported ${res.imported} lead(s) • Skipped ${res.skipped} • ${res.total_rows_processed} rows processed`,
+      );
       setShowImportModal(false);
       setImportCsvText("");
-      fetchLeads();
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`CSV Import failed: ${err.message}`);
+      toast.error("CSV import failed", err.message || "Could not read that CSV.");
     } finally {
       setImportingCsv(false);
     }
@@ -374,7 +491,7 @@ export default function LeadsPage() {
       const res = await api.getIcebreaker(leadId);
       setActiveIcebreaker(res);
     } catch (err: any) {
-      alert(`Icebreaker generation notice: ${err.message}`);
+      toast.error("Could not generate an icebreaker", err.message || "Try again in a moment.");
     } finally {
       setLoadingIcebreakerId(null);
     }
@@ -387,7 +504,7 @@ export default function LeadsPage() {
       const res = await api.checkSpam(spamSubject, spamBody);
       setSpamResult(res);
     } catch (err: any) {
-      alert(`Spam analysis notice: ${err.message}`);
+      toast.error("Spam analysis failed", err.message || "Try again in a moment.");
     } finally {
       setCheckingSpam(false);
     }
@@ -490,9 +607,18 @@ export default function LeadsPage() {
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto">
+            <input
+              type="text"
+              value={industryFilter}
+              onChange={(e) => setIndustryFilter(e.target.value)}
+              placeholder="Industry…"
+              aria-label="Filter by industry"
+              className="h-10 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 w-full md:w-40"
+            />
             <select
               value={hasEmailFilter}
               onChange={(e) => setHasEmailFilter(e.target.value)}
+              aria-label="Filter by contact email"
               className="h-10 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-700 focus:outline-none"
             >
               <option value="all">All Contacts</option>
@@ -508,6 +634,44 @@ export default function LeadsPage() {
             </button>
           </div>
         </form>
+
+        {/* Active filters — a saved view (or the global Cmd+K search) can apply
+            filters that have no control of their own. Show them so nothing is
+            applied silently, and let the user drop them one by one. */}
+        {hasActiveFilters && (
+          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              Filters
+            </span>
+            {search.trim() && (
+              <button
+                onClick={() => setSearch("")}
+                className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                title="Clear search filter"
+              >
+                <Search className="w-3 h-3" /> “{search.trim()}” <X className="w-3 h-3" />
+              </button>
+            )}
+            {industryFilter.trim() && (
+              <button
+                onClick={() => setIndustryFilter("")}
+                className="inline-flex items-center gap-1 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 hover:bg-violet-100 transition-colors"
+                title="Clear industry filter"
+              >
+                Industry: {industryFilter.trim()} <X className="w-3 h-3" />
+              </button>
+            )}
+            {hasEmailFilter !== "all" && (
+              <button
+                onClick={() => setHasEmailFilter("all")}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 transition-colors"
+                title="Clear contact filter"
+              >
+                {hasEmailFilter === "true" ? "Has email" : "Missing email"} <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Saved views (Apollo dynamic lists) + inline save */}
@@ -554,7 +718,7 @@ export default function LeadsPage() {
 
       {/* Bulk Action Bar — appears when rows are selected (Apollo-style) */}
       {selected.size > 0 && (
-        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-xs px-4 py-2.5 shadow-xs">
+        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-sm px-4 py-2.5 shadow-xs">
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center justify-center rounded-lg bg-blue-600 text-white text-xs font-bold h-6 min-w-6 px-2">
               {selected.size}
@@ -592,9 +756,10 @@ export default function LeadsPage() {
               <tr>
                 <th className="pl-5 pr-2 py-3 w-8">
                   <input
+                    ref={headerCheckboxRef}
                     type="checkbox"
                     aria-label="Select all leads on this page"
-                    checked={selectableLoaded && selected.size === selectableCount}
+                    checked={selectableLoaded && allOnPageSelected}
                     onChange={toggleAll}
                     className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30"
                   />
@@ -857,21 +1022,28 @@ export default function LeadsPage() {
           </table>
         </div>
 
-        {/* Pagination Bar */}
-        <div className="p-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-          <span>Showing {leads.length} of {total} leads</span>
+        {/* Pagination Bar — driven by the total the API reports, not by how
+            many rows happened to come back (a filtered last page is shorter). */}
+        <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-600">
+          <span>
+            {total === 0
+              ? "No leads"
+              : `Showing ${firstRowIndex}–${lastRowIndex} of ${total} lead${total === 1 ? "" : "s"}`}
+          </span>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1}
+              disabled={page === 1 || loading}
               className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
             >
               Previous
             </button>
-            <span className="font-semibold text-slate-900">Page {page}</span>
+            <span className="font-semibold text-slate-900">
+              Page {page} of {totalPages}
+            </span>
             <button
-              onClick={() => setPage((p) => p + 1)}
-              disabled={leads.length < 20}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages || loading}
               className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
             >
               Next
@@ -882,7 +1054,7 @@ export default function LeadsPage() {
 
       {/* Add Lead Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-base text-slate-900">Add New Lead</h3>
@@ -974,7 +1146,7 @@ export default function LeadsPage() {
 
       {/* Twenty CRM / Webhook Sync Modal */}
       {showSyncModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1043,7 +1215,7 @@ export default function LeadsPage() {
 
       {/* Import CSV Modal */}
       {showImportModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1108,7 +1280,7 @@ export default function LeadsPage() {
 
       {/* AI Icebreaker / Hook Modal */}
       {activeIcebreaker && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1252,7 +1424,7 @@ export default function LeadsPage() {
 
       {/* Spam Checker Modal */}
       {showSpamModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
@@ -1409,7 +1581,7 @@ export default function LeadsPage() {
 
       {/* Sequence Picker Modal — bulk "Add to Sequence" */}
       {sequenceModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>

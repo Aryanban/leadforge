@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Search, Command, Sparkles } from "lucide-react";
+import { Search, Command, Sparkles, Menu } from "lucide-react";
+import { toggleMobileNav } from "@/components/navState";
 
 /**
  * TopBar — Apollo's most recognisable affordance is the global search that
@@ -33,7 +34,17 @@ export function TopBar() {
   };
 
   return (
-    <div className="h-14 shrink-0 border-b border-slate-200 bg-white flex items-center gap-3 px-5">
+    <div className="h-14 shrink-0 border-b border-slate-200 bg-white flex items-center gap-2 sm:gap-3 px-3 sm:px-5">
+      {/* Mobile: the rail is hidden below md, so the nav lives behind this button */}
+      <button
+        onClick={toggleMobileNav}
+        aria-label="Open navigation"
+        title="Open navigation"
+        className="md:hidden p-1.5 -ml-0.5 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+      >
+        <Menu className="w-5 h-5" />
+      </button>
+
       <form onSubmit={submit} className="relative flex-1 max-w-2xl">
         <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
         <input
@@ -41,7 +52,8 @@ export function TopBar() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search leads, businesses, phone numbers…"
-          className="w-full h-9 pl-9 pr-20 rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:bg-white focus:border-blue-300"
+          aria-label="Search leads"
+          className="w-full h-9 pl-9 pr-3 sm:pr-20 rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:bg-white focus:border-blue-300"
         />
         <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
           <Command className="w-2.5 h-2.5" />K

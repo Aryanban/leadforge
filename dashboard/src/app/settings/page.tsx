@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { api, MailboxItem } from "@/lib/api";
 import { AuthBadge } from "@/components/IndiaKit";
+import { toast } from "@/components/Toaster";
 
 const PRESET_PROVIDERS = [
   { name: "Gmail", host: "smtp.gmail.com", port: 587 },
@@ -80,9 +81,10 @@ export default function SettingsPage() {
     if (!confirm("Are you sure you want to remove this mailbox?")) return;
     try {
       await api.deleteMailbox(id);
+      toast.success("Mailbox removed", "The sender mailbox was deleted.");
       fetchMailboxes();
     } catch (err: any) {
-      alert(`Failed to delete: ${err.message}`);
+      toast.error("Could not delete mailbox", err.message || "Please try again.");
     }
   };
 
@@ -104,9 +106,10 @@ export default function SettingsPage() {
       setShowAddModal(false);
       setFormEmail("");
       setFormPassword("");
+      toast.success("Mailbox connected", `${formEmail.trim()} is ready to send from.`);
       fetchMailboxes();
     } catch (err: any) {
-      alert(`Error saving mailbox: ${err.message}`);
+      toast.error("Could not save mailbox", err.message || "Check the credentials and try again.");
     } finally {
       setSubmitting(false);
     }
@@ -362,7 +365,7 @@ export default function SettingsPage() {
 
       {/* Add Mailbox Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>

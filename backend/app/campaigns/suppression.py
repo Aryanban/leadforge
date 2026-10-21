@@ -121,6 +121,12 @@ async def add_suppression(
             return False
         existing.reason = reason
         existing.detail = detail
+        # A row created as a soft bounce carries an expiry. If it is later
+        # upgraded to a permanent reason the expiry has to go, otherwise the
+        # hard-bounce suppression silently ages out and the dead address
+        # becomes mailable again.
+        if reason in PERMANENT_REASONS:
+            existing.expires_at = None
         await db.flush()
         return False
 
@@ -131,10 +137,13 @@ async def add_suppression(
 
 async def purge_expired(db: AsyncSession) -> int:
     """Deletes soft-bounce rows whose retry window has passed."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
     result = await db.execute(
         delete(Suppression).where(
             Suppression.expires_at.isnot(None),
-            Suppression.expires_at < Suppression.created_at,
+            Suppression.expires_at < now,
         )
     )
     await db.flush()

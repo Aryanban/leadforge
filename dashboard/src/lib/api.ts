@@ -1,4 +1,24 @@
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1').replace(/\/$/, '');
+/**
+ * Same-origin by default. The dashboard is frequently deployed on a LAN box or
+ * inside Docker where `localhost:8000` is NOT the backend — a build-time
+ * absolute URL baked into the browser bundle breaks those installs (the
+ * browser resolves "localhost" to whichever machine is running the browser).
+ *
+ * With the default `/api/v1` the browser calls the Next server, and
+ * `next.config.mjs` proxies `/api/*` to the real backend (see `API_PROXY_URL`).
+ * An explicit `NEXT_PUBLIC_API_URL` still wins for people who want direct
+ * CORS calls — unless it points at localhost, which is exactly the value that
+ * gets baked in by default and is the one that breaks remote installs.
+ */
+const CONFIGURED_API_URL = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+const IS_LOCALHOST_URL = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:|\/|$)/i.test(CONFIGURED_API_URL);
+const API_BASE = (IS_LOCALHOST_URL || !CONFIGURED_API_URL ? '/api/v1' : CONFIGURED_API_URL).replace(/\/$/, '');
+
+/** Requests are abandoned after this long so a hung socket can't wedge a page. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+/** Extra attempts after the first one (network errors and 5xx only). */
+const DEFAULT_RETRIES = 1;
+const RETRY_BASE_DELAY_MS = 400;
 
 // --- Apollo-parity types -----------------------------------------------------
 
@@ -430,30 +450,138 @@ export interface DiscoveryJob {
   finished_at: string | null;
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
-  try {
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      let msg = `HTTP error ${res.status}`;
-      try {
-        const parsed = JSON.parse(errText);
-        msg = parsed.detail || parsed.message || msg;
-      } catch {}
-      throw new Error(msg);
-    }
-    return res.json();
-  } catch (err: any) {
-    console.error(`API Error on ${path}:`, err);
-    throw err;
+/** Error carrying the HTTP status so callers can branch on 404/5xx. */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
   }
+}
+
+export interface RequestOptions extends RequestInit {
+  /** Abort the request after N ms (default 30s). */
+  timeoutMs?: number;
+  /** Extra attempts after the first one (default 1 => 2 attempts total). */
+  retries?: number;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 5xx and network-level failures are worth a second try; 4xx are not. */
+const isRetryableStatus = (status: number) => status >= 500;
+
+/**
+ * The single HTTP door to the backend.
+ *
+ * - every request has a hard timeout, so a half-open socket can't leave a
+ *   page spinning forever;
+ * - transient failures (network errors, 5xx) are retried once with backoff;
+ * - the caller may pass its own `signal` to cancel in-flight work, which is
+ *   what the leads page uses to drop stale responses.
+ */
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, retries = DEFAULT_RETRIES, ...init } = options;
+  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+
+  let lastError: unknown = new Error(`Request failed: ${path}`);
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    let timedOut = false;
+
+    // The caller may cancel us mid-flight (e.g. a newer search superseded an
+    // older one). Never swallow that — it must surface as an abort error.
+    const externalSignal = init.signal ?? null;
+    const forwardAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener('abort', forwardAbort);
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const headers = new Headers(init.headers as HeadersInit | undefined);
+      if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+
+      const res = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+        headers,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        let msg = `HTTP error ${res.status}`;
+        try {
+          const parsed = JSON.parse(errText);
+          msg = parsed.detail || parsed.message || msg;
+        } catch {}
+        const apiErr = new ApiError(msg, res.status);
+        if (isRetryableStatus(res.status) && attempt < retries) {
+          lastError = apiErr;
+        } else {
+          throw apiErr;
+        }
+      } else {
+        return (await res.json()) as T;
+      }
+    } catch (err: any) {
+      if (timedOut) {
+        lastError = new ApiError(`Request timed out after ${timeoutMs}ms`, 408);
+      } else if (err instanceof ApiError) {
+        // Already classified above (non-retryable status) — let it through.
+        throw err;
+      } else if (err?.name === 'AbortError' && externalSignal?.aborted) {
+        // Deliberate cancellation — propagate without retrying.
+        throw err;
+      } else {
+        // Network-level failure (DNS, refused connection, socket reset).
+        lastError = err instanceof Error ? err : new Error(String(err));
+        console.error(`API network error on ${path}:`, lastError);
+      }
+      if (attempt >= retries) throw lastError;
+    } finally {
+      // Always clear the timer, even on the retry path.
+      clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', forwardAbort);
+    }
+
+    // Backoff before the next attempt.
+    await sleep(RETRY_BASE_DELAY_MS * (attempt + 1));
+  }
+
+  throw lastError;
+}
+
+export interface LeadsResponse {
+  total: number;
+  page: number;
+  limit: number;
+  leads: LeadItem[];
+}
+
+export interface CreateLeadResponse {
+  id: number;
+  name?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export interface CreateMailboxResponse {
+  id: number;
+  email: string;
+  status: string;
+}
+
+export interface CampaignActionResponse {
+  status: string;
+  message: string;
 }
 
 export const api = {
@@ -468,11 +596,11 @@ export const api = {
     if (params.search) q.set('search', params.search);
     if (params.industry) q.set('industry', params.industry);
     if (params.has_email !== undefined) q.set('has_email', String(params.has_email));
-    return request<{ total: number; page: number; limit: number; leads: LeadItem[] }>(`/leads?${q.toString()}`);
+    return request<LeadsResponse>(`/leads?${q.toString()}`);
   },
   createLead: (data: { name: string; phone?: string; email?: string; website?: string; address?: string; industry?: string }) =>
-    request('/leads', { method: 'POST', body: JSON.stringify(data) }),
-  deleteLead: (id: number) => request(`/leads/${id}`, { method: 'DELETE' }),
+    request<CreateLeadResponse>('/leads', { method: 'POST', body: JSON.stringify(data) }),
+  deleteLead: (id: number) => request<{ status?: string; id?: number }>(`/leads/${id}`, { method: 'DELETE' }),
   exportCsvUrl: `${API_BASE}/leads/export/csv`,
   exportTwentyCrmUrl: `${API_BASE}/leads/export/twenty-crm`,
   exportTwentyCrm: (webhook_url?: string) =>
@@ -535,8 +663,8 @@ export const api = {
     ),
   removeCampaignTarget: (campaignId: number, contactId: number) =>
     request(`/campaigns/${campaignId}/targets/${contactId}`, { method: 'DELETE' }),
-  launchCampaign: (id: number) => request(`/campaigns/${id}/launch`, { method: 'POST' }),
-  pauseCampaign: (id: number) => request(`/campaigns/${id}/pause`, { method: 'POST' }),
+  launchCampaign: (id: number) => request<CampaignActionResponse>(`/campaigns/${id}/launch`, { method: 'POST' }),
+  pauseCampaign: (id: number) => request<CampaignActionResponse>(`/campaigns/${id}/pause`, { method: 'POST' }),
   previewTemplate: (subject: string, body: string) =>
     request<{ sample_variables_used: any; rendered_subject: string; rendered_body: string }>('/campaigns/preview', {
       method: 'POST',
@@ -546,7 +674,7 @@ export const api = {
   // Mailboxes
   getMailboxes: () => request<MailboxItem[]>('/mailboxes'),
   createMailbox: (data: { email: string; password: string; smtp_host: string; smtp_port?: number; first_name?: string; last_name?: string; daily_limit?: number }) =>
-    request('/mailboxes', { method: 'POST', body: JSON.stringify(data) }),
+    request<CreateMailboxResponse>('/mailboxes', { method: 'POST', body: JSON.stringify(data) }),
   testMailbox: (id: number) =>
     request<{ success: boolean; message: string }>(`/mailboxes/${id}/test`, { method: 'POST' }),
   deleteMailbox: (id: number) => request(`/mailboxes/${id}`, { method: 'DELETE' }),

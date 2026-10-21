@@ -75,12 +75,30 @@ def extract_signals(business: Any, contacts: Optional[List[Any]] = None) -> Dict
     except (TypeError, ValueError):
         reviews_val = None
 
+    # Mobile vs landline is *independent* information: a landline-only lead
+    # cannot be reached on WhatsApp, which is the primary channel for Indian
+    # SMBs. The previous "whatsapp" signal was derived mechanically from the
+    # same phone number, so it could never disagree with "phone" - 15 of the
+    # 100 score points were free.
+    phone_raw = _get(business, "phone")
+    mobile_line = False
+    line_type = extra.get("line_type")
+    if line_type:
+        mobile_line = str(line_type).lower() in ("mobile", "cell", "mobile_line")
+    elif phone_raw:
+        try:
+            from app.sources.in_phone import is_mobile
+            mobile_line = bool(is_mobile(phone_raw))
+        except Exception:
+            mobile_line = False
+
     return {
         "verified_email": any(bool(_get(c, "is_verified", False)) for c in contacts),
         "any_email": bool(emails),
         "email_count": len(emails),
-        "phone": bool(_get(business, "phone")),
+        "phone": bool(phone_raw),
         "whatsapp": any(bool(_get(c, "whatsapp_link")) for c in contacts),
+        "mobile_line": mobile_line,
         "website": bool(website),
         "rating": rating_val,
         "reviews_count": reviews_val,
@@ -116,15 +134,26 @@ async def _probe_website_health(url: str, timeout: float = 10.0) -> Dict[str, An
 
             if "text/html" in response.headers.get("content-type", ""):
                 text = response.text
-                flat = []
-                for m in re.finditer(r"(19\d{2}|20\d{2})", text):
-                    try:
-                        flat.append(int(m.group(1)))
-                    except ValueError:
-                        pass
-                if flat:
-                    out["site_copyright_year"] = max(flat)
-                    out["site_stale"] = max(flat) < 2022
+                # Look for a *year* the site claims, not any 4-digit number.
+                # The old regex matched every 4-digit number in the page, so a
+                # price of "2024" or a stray number in a CSS comment made a
+                # brand-new site look stale - which flipped the
+                # "agency_opportunity" preset's signal to the wrong side.
+                years: List[int] = []
+                for pattern in (
+                    r"(?:©|&copy;|copyright)\s*(?:\(c\))?\s*(\d{4})",
+                    r"copyright[^0-9]{0,24}(\d{4})",
+                    r"(?:©|&copy;)\s*(\d{4})\s*[-–—]",
+                    r"\b(?:last\s+updated|established|since|founded)\b[^0-9]{0,24}(\d{4})",
+                ):
+                    for m in re.finditer(pattern, text, re.IGNORECASE):
+                        try:
+                            years.append(int(m.group(1)))
+                        except (ValueError, IndexError):
+                            pass
+                if years:
+                    out["site_copyright_year"] = max(years)
+                    out["site_stale"] = max(years) < 2022
                 last_mod = response.headers.get("last-modified")
                 if last_mod:
                     out["last_modified"] = last_mod

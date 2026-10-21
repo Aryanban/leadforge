@@ -22,15 +22,33 @@ be great, it just needs a phone re-check first. Pure function, unit-testable.
 from typing import Any, Dict, Optional
 
 #: Source key -> (trust 0-1, one-line rationale shown in the dashboard).
+#:
+#: The keys must cover every source the scrapers actually write. The table
+#: used to omit ``playwright_maps`` / ``playwright_single`` / ``http_fallback``
+#: / ``google_maps_seed`` - which are precisely the values the primary scrape
+#: path stores - so the trust modifier was skipped for every lead the
+#: dashboard produced, and the API still advertised a trust badge next to a
+#: score that had never included it.
 SOURCE_TRUST: Dict[str, tuple] = {
     "google_maps": (0.95, "Live GBP data; businesses keep it current."),
     "maps": (0.95, "Live GBP data; businesses keep it current."),
     "google_maps_scraper": (0.95, "Live GBP data; businesses keep it current."),
+    # Values written by the live scrape paths.
+    "google_maps_http": (0.95, "Live GBP data; businesses keep it current."),
+    "playwright_maps": (0.95, "Live GBP data; businesses keep it current."),
+    "playwright_single": (0.95, "Live GBP data; businesses keep it current."),
+    "http_fallback": (0.85, "Web-search fallback; freshness varies."),
+    "google_maps_seed": (0.95, "Live GBP data; businesses keep it current."),
     "website": (0.90, "First-party: crawled from the business's own site."),
+    "website_scrape": (0.90, "First-party: crawled from the business's own site."),
+    "web_search": (0.75, "Found via web search; verify before a full sequence."),
+    "pattern_guess": (0.55, "Guessed from the domain's email pattern; not yet confirmed."),
+    "alias": (0.80, "Department mailbox (info@/sales@); not a named person."),
     "multi_source_enricher": (0.85, "Merged from site crawl + web search."),
     "indiamart": (0.60, "Self-listed B2B directory; verify the phone first."),
     "justdial": (0.50, "Self-listed; shared leads and stale numbers are common."),
     "sulekha": (0.50, "Self-listed; leads may be resold to competitors."),
+    "in_phone": (0.65, "Directory aggregator; numbers are often stale."),
     "discovery": (0.70, "Directory fan-out; freshness varies by source."),
     "csv_import": (0.75, "Your own list — quality depends on provenance."),
 }

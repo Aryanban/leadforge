@@ -20,11 +20,15 @@ class Business(Base):
     maps_url = Column(String, nullable=True)
     extra_data = Column(JSON, nullable=True)
 
-    source = Column(String, nullable=True)
+    source = Column(String, nullable=True, index=True)
     icp_profile_id = Column(Integer, ForeignKey("icp_profiles.id"), nullable=True, index=True)
     icp_fit = Column(JSON, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    #: Persisted lead-quality score (0-100). Kept in a column, not only inside
+    #: extra_data, so the lead list can sort/filter on it in SQL.
+    score = Column(Integer, nullable=True, index=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     contacts = relationship("Contact", back_populates="business", cascade="all, delete-orphan")

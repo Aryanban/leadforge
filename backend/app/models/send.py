@@ -7,13 +7,20 @@ class Send(Base):
     __tablename__ = "sends"
 
     id = Column(Integer, primary_key=True, index=True)
-    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"))
-    step_id = Column(Integer, ForeignKey("campaign_steps.id", ondelete="CASCADE"))
-    contact_id = Column(Integer, ForeignKey("contacts.id", ondelete="CASCADE"))
-    mailbox_id = Column(Integer, ForeignKey("mailboxes.id", ondelete="SET NULL"), nullable=True)
-    
-    status = Column(String, default="pending") # pending, sent, failed
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    step_id = Column(Integer, ForeignKey("campaign_steps.id", ondelete="CASCADE"), index=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id", ondelete="CASCADE"), index=True)
+    mailbox_id = Column(Integer, ForeignKey("mailboxes.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    #: pending -> sending -> sent | failed | bounced. "sending" is committed
+    #: *before* the SMTP call so a crash mid-flight leaves an auditable row
+    #: instead of a delivered email with no record of it.
+    status = Column(String, default="pending") # pending, sending, sent, failed, bounced
     error_message = Column(String, nullable=True)
+    #: How many times this (campaign, contact, step) has been attempted. A soft
+    #: bounce is only suppressed once the retry budget is exhausted - a single
+    #: transient gateway blip must not delete a good lead for 30 days.
+    attempt = Column(Integer, default=0)
     
     opened = Column(Boolean, default=False)
     clicked = Column(Boolean, default=False)

@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sqlalchemy import select, or_, func
-from app.database import async_session_maker
+from app.database import async_session_maker, ensure_schema
 from app.models.business import Business
 from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
@@ -59,7 +59,7 @@ def format_markdown_table(leads: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def cmd_scrape(query: str, limit: int = 10, auto_enrich: bool = True, output_format: str = "markdown"):
+async def cmd_scrape(query: str, limit: int = 10, auto_enrich: bool = True, output_format: str = "markdown") -> int:
     """Scrapes leads from Google Maps, saves them, enriches them, and outputs results."""
     # 1. Create scrape job
     job_id = None
@@ -71,11 +71,19 @@ async def cmd_scrape(query: str, limit: int = 10, auto_enrich: bool = True, outp
         job_id = job.id
 
     # 2. Run scraping
-    saved_count, _new_biz_ids = await scrape_leads_and_save(query=query, max_results=limit, job_id=job_id)
+    saved_count, new_biz_ids = await scrape_leads_and_save(query=query, max_results=limit, job_id=job_id)
 
-    # 3. Query the freshly saved/updated leads
+    # 3. Query the freshly saved/updated leads.
+    #
+    # Scoped to the businesses THIS scrape created. It used to return the last
+    # N businesses in the whole database, so a scrape for "Dentists in Pune"
+    # against a database that already held 75 real-estate leads printed 75
+    # real-estate agents under a "Dentists in Pune" heading.
     async with async_session_maker() as db:
-        stmt = select(Business).order_by(Business.id.desc()).limit(limit)
+        if new_biz_ids:
+            stmt = select(Business).where(Business.id.in_(new_biz_ids)).order_by(Business.id)
+        else:
+            stmt = select(Business).where(Business.id.is_(None))
         res = await db.execute(stmt)
         businesses = res.scalars().all()
 
@@ -113,9 +121,10 @@ async def cmd_scrape(query: str, limit: int = 10, auto_enrich: bool = True, outp
         print(f"### LeadForge Results for: \"{query}\"\n")
         print(f"Discovered **{len(leads_data)}** listings ({saved_count} new leads saved into database).\n")
         print(format_markdown_table(leads_data))
+    return 0 if leads_data else 1
 
 
-async def cmd_search(search_term: Optional[str] = None, industry: Optional[str] = None, has_email: Optional[bool] = None, limit: int = 25, output_format: str = "markdown"):
+async def cmd_search(search_term: Optional[str] = None, industry: Optional[str] = None, has_email: Optional[bool] = None, limit: int = 25, output_format: str = "markdown") -> int:
     async with async_session_maker() as db:
         stmt = select(Business)
         if search_term:
@@ -123,6 +132,19 @@ async def cmd_search(search_term: Optional[str] = None, industry: Optional[str] 
             stmt = stmt.where(or_(Business.name.ilike(term), Business.address.ilike(term), Business.phone.ilike(term)))
         if industry:
             stmt = stmt.where(Business.industry.ilike(f"%{industry}%"))
+
+        # The "has email" filter is applied in SQL, BEFORE the limit. Filtering
+        # after the limit meant the --limit parameter changed the answer:
+        # "--limit 5 --has-email" returned 0 matches while "--limit 100" found
+        # 6, because the filter ran on an already-truncated set.
+        if has_email is not None:
+            email_ids = select(Contact.business_id).where(
+                Contact.email.isnot(None), Contact.email != ""
+            )
+            stmt = stmt.where(
+                Business.id.in_(email_ids) if has_email
+                else Business.id.notin_(email_ids)
+            )
 
         stmt = stmt.order_by(Business.id.desc()).limit(limit)
         res = await db.execute(stmt)
@@ -138,11 +160,6 @@ async def cmd_search(search_term: Optional[str] = None, industry: Optional[str] 
                 {"email": c.email, "is_verified": c.is_verified, "status": c.verification_status}
                 for c in contacts if c.email
             ]
-
-            if has_email is True and not emails:
-                continue
-            if has_email is False and emails:
-                continue
 
             clean_phone = (b.phone or "").replace(" ", "").replace("-", "")
             wa_link = f"https://wa.me/{clean_phone}" if clean_phone else None
@@ -165,14 +182,16 @@ async def cmd_search(search_term: Optional[str] = None, industry: Optional[str] 
         print(json.dumps({"total": len(leads_data), "leads": leads_data}, indent=2))
     else:
         print(format_markdown_table(leads_data))
+    return 0 if leads_data else 1
 
 
-async def cmd_enrich(business_id: int):
+async def cmd_enrich(business_id: int) -> int:
     res = await enrich_business_by_id(business_id)
     print(json.dumps(res, indent=2))
+    return 0
 
 
-async def cmd_stats():
+async def cmd_stats() -> int:
     async with async_session_maker() as db:
         res_b = await db.execute(select(func.count(Business.id)))
         total_leads = res_b.scalar() or 0
@@ -186,19 +205,22 @@ async def cmd_stats():
         "total_contacts": total_contacts,
         "verified_contacts": verified_contacts
     }, indent=2))
+    return 0
 
 
-async def cmd_spam(subject: str, body: str):
+async def cmd_spam(subject: str, body: str) -> int:
     res = check_cold_email_spam(subject, body)
     print(json.dumps(res, indent=2))
+    # A copy that trips the spam linter is a failure the caller must see.
+    return 0 if res.get("is_safe", True) else 1
 
 
-async def cmd_icebreaker(business_id: int):
+async def cmd_icebreaker(business_id: int) -> int:
     async with async_session_maker() as db:
         b = await db.get(Business, business_id)
         if not b:
             print(json.dumps({"error": f"Business ID {business_id} not found"}))
-            return
+            return 1
         c_stmt = select(Contact).where(Contact.business_id == b.id).limit(1)
         c_res = await db.execute(c_stmt)
         c = c_res.scalar_one_or_none()
@@ -214,6 +236,7 @@ async def cmd_icebreaker(business_id: int):
             first_name=first_name
         )
     print(json.dumps(res, indent=2))
+    return 0
 
 
 def main():
@@ -230,7 +253,8 @@ def main():
     p_search = subparsers.add_parser("search", help="Search existing leads in the database")
     p_search.add_argument("--query", type=str, default=None, help="Search term")
     p_search.add_argument("--industry", type=str, default=None, help="Industry filter")
-    p_search.add_argument("--has-email", action="store_true", default=None, help="Only leads with email")
+    p_search.add_argument("--has-email", action="store_true", default=None, help="Only leads with an email address")
+    p_search.add_argument("--no-email", action="store_true", default=None, help="Only leads WITHOUT an email address")
     p_search.add_argument("--limit", type=int, default=25, help="Limit")
     p_search.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format")
 
@@ -252,18 +276,38 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "scrape":
-        asyncio.run(cmd_scrape(query=args.query, limit=args.limit, output_format=args.format))
-    elif args.command == "search":
-        asyncio.run(cmd_search(search_term=args.query, industry=args.industry, has_email=args.has_email, limit=args.limit, output_format=args.format))
-    elif args.command == "enrich":
-        asyncio.run(cmd_enrich(business_id=args.business_id))
-    elif args.command == "spam":
-        asyncio.run(cmd_spam(subject=args.subject, body=args.body))
-    elif args.command == "icebreaker":
-        asyncio.run(cmd_icebreaker(business_id=args.business_id))
-    elif args.command == "stats":
-        asyncio.run(cmd_stats())
+    # The CLI talks to the database directly, so it must bring the schema up
+    # to date itself. It used to rely on the API process having started
+    # first, which meant a fresh clone failed with "no such column".
+    try:
+        asyncio.run(ensure_schema())
+    except Exception as schema_err:
+        print(json.dumps({"error": f"schema sync failed: {schema_err}"}), file=sys.stderr)
+        raise SystemExit(1)
+
+    # Every command returns a process exit code. A CLI that always exits 0
+    # cannot be scripted: an agent (or a shell pipeline) has no way to tell
+    # "not found" from "found". Errors now exit non-zero and print to stderr.
+    exit_code = 0
+    try:
+        if args.command == "scrape":
+            exit_code = asyncio.run(cmd_scrape(query=args.query, limit=args.limit, output_format=args.format))
+        elif args.command == "search":
+            _has_email = True if args.has_email else (False if args.no_email else None)
+            exit_code = asyncio.run(cmd_search(search_term=args.query, industry=args.industry, has_email=_has_email, limit=args.limit, output_format=args.format))
+        elif args.command == "enrich":
+            exit_code = asyncio.run(cmd_enrich(business_id=args.business_id))
+        elif args.command == "spam":
+            exit_code = asyncio.run(cmd_spam(subject=args.subject, body=args.body))
+        elif args.command == "icebreaker":
+            exit_code = asyncio.run(cmd_icebreaker(business_id=args.business_id))
+        elif args.command == "stats":
+            exit_code = asyncio.run(cmd_stats())
+    except Exception as exc:
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}), file=sys.stderr)
+        raise SystemExit(1)
+
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

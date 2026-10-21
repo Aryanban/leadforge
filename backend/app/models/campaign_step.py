@@ -7,7 +7,7 @@ class CampaignStep(Base):
     __tablename__ = "campaign_steps"
 
     id = Column(Integer, primary_key=True, index=True)
-    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"))
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
     step_number = Column(Integer)
     subject = Column(String)
     #: Optional A/B variant of the subject line. While variant_winner is NULL,

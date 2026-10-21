@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     #: browser. "*" is convenient locally but lets any website drive your API
     #: with the user's cookies, so production requires an explicit list.
     CORS_ORIGINS: str = "*"
+
+    #: Optional shared secret for the REST API. When unset, the API is open -
+    #: which is the right default for a local single-user clone-and-run, and
+    #: the wrong default the moment the port is reachable from a LAN. Set
+    #: API_KEY and every router except the mail-facing tracker requires it.
+    API_KEY: Optional[str] = None
+
+    #: Require the API key even when API_KEY is unset. Useful for a hardened
+    #: deployment that generates the key at boot.
+    REQUIRE_AUTH: bool = False
     
     # Database settings
     # Default to sqlite for instant local operation; can be overridden via DATABASE_URL in .env

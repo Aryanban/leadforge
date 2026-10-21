@@ -20,7 +20,7 @@ from typing import Dict, Any, List, Optional
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sqlalchemy import select, or_, func
-from app.database import async_session_maker
+from app.database import async_session_maker, ensure_schema
 from app.models.business import Business
 from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
@@ -202,12 +202,20 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "leadforge_launch_campaign",
-        "description": "Activates a campaign and dispatches its sequence in the background. Refuses to launch with 0 targets or 0 steps to avoid emailing the whole database. Honors suppression, warmup/health, daily limits, delays, and send jitter.",
+        "description": "Activates a campaign and dispatches its sequence in the background. Refuses to launch with 0 targets or 0 steps to avoid emailing the whole database. Honors suppression, warmup/health, daily limits, delays, and send jitter. Performs a DRY RUN by default - it returns the exact recipient list and subject lines without sending anything. Set dry_run=false only when the operator has explicitly approved the send.",
         "inputSchema": {
             "type": "object",
-            "properties": {"campaign_id": {"type": "integer", "description": "Campaign ID"}},
+            "properties": {
+                "campaign_id": {"type": "integer", "description": "Campaign ID"},
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "When true (the default), preview the recipients and subject lines WITHOUT sending. Set to false to actually send.",
+                    "default": True,
+                },
+            },
             "required": ["campaign_id"]
-        }
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False}
     },
     {
         "name": "leadforge_pause_campaign",
@@ -294,11 +302,20 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             job_id = job.id
 
         # Run scrape
-        saved_count, _new_biz_ids = await scrape_leads_and_save(query=query, max_results=max_results, job_id=job_id)
+        saved_count, new_biz_ids = await scrape_leads_and_save(query=query, max_results=max_results, job_id=job_id)
 
-        # Fetch newly scraped leads
+        # Fetch the leads THIS scrape created.
+        #
+        # The previous code returned the last N businesses in the whole
+        # database while the header said "Scrape Results for: <query>" - so an
+        # agent that scraped "Dentists in Pune" against a database that
+        # already held 75 real-estate leads got a table of real-estate agents
+        # presented as Pune dentists.
         async with async_session_maker() as db:
-            stmt = select(Business).order_by(Business.id.desc()).limit(max_results)
+            if new_biz_ids:
+                stmt = select(Business).where(Business.id.in_(new_biz_ids)).order_by(Business.id)
+            else:
+                stmt = select(Business).where(Business.id.is_(None))
             res = await db.execute(stmt)
             businesses = res.scalars().all()
 
@@ -319,6 +336,16 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
                 results.append({
                     "id": b.id,
+                    # Contact ids, so the agent can actually TARGET these
+                    # leads. `add_campaign_targets` needs contact_ids, and
+                    # contact.id != business.id for most rows - an agent that
+                    # assumed they were the same mailed the wrong 79% of the
+                    # database.
+                    "contact_ids": [c.id for c in contacts],
+                    "primary_contact_id": next(
+                        (c.id for c in contacts if c.email),
+                        contacts[0].id if contacts else None,
+                    ),
                     "name": b.name,
                     "maps_url": maps_url,
                     "phone": b.phone or "—",
@@ -334,15 +361,25 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"### LeadForge Google Maps Scrape Results for: \"{query}\"\n",
             f"• **Leads Extracted**: {len(results)}",
             f"• **New Leads Saved**: {saved_count}\n",
-            "| Business Name | Google Maps | Phone | WhatsApp | Website | Verified Emails | Rating |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+            "| Business ID | Contact ID | Business Name | Google Maps | Phone | WhatsApp | Website | Verified Emails | Rating |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
         ]
 
         for r in results:
             name_clean = r["name"].replace("|", "\\|")
             maps_link = f"[View Listing]({r['maps_url']})"
             web_link = f"[Website]({r['website']})" if r['website'] != "—" else "—"
-            md.append(f"| **{name_clean}** | {maps_link} | {r['phone']} | {r['whatsapp']} | {web_link} | {r['emails']} | {r['rating']} |")
+            contact_id = r["primary_contact_id"] if r["primary_contact_id"] else "—"
+            md.append(
+                f"| {r['id']} | {contact_id} | **{name_clean}** | {maps_link} | {r['phone']} "
+                f"| {r['whatsapp']} | {web_link} | {r['emails']} | {r['rating']} |"
+            )
+
+        md.append(
+            "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
+            "to enroll these leads in a sequence. The Contact ID is NOT the "
+            "Business ID."
+        )
 
         return "\n".join(md)
 
@@ -360,6 +397,20 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             if industry:
                 stmt = stmt.where(Business.industry.ilike(f"%{industry}%"))
 
+            # The "has email" filter is a SQL predicate applied BEFORE the
+            # limit. Filtering after the limit made the tool's own limit
+            # parameter change its answer: asking for 5 leads with
+            # has_email=true returned 0 matches, while asking for 100
+            # returned 6 - the filter was applied to an already-truncated set.
+            if has_email is not None:
+                email_ids = select(Contact.business_id).where(
+                    Contact.email.isnot(None), Contact.email != ""
+                )
+                stmt = stmt.where(
+                    Business.id.in_(email_ids) if has_email
+                    else Business.id.notin_(email_ids)
+                )
+
             stmt = stmt.order_by(Business.id.desc()).limit(limit)
             res = await db.execute(stmt)
             businesses = res.scalars().all()
@@ -375,17 +426,18 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                     for c in contacts if c.email
                 ]
 
-                if has_email is True and not emails:
-                    continue
-                if has_email is False and emails:
-                    continue
-
                 clean_phone = (b.phone or "").replace(" ", "").replace("-", "")
                 wa_link = f"[WhatsApp](https://wa.me/{clean_phone})" if clean_phone else ""
                 maps_url = b.maps_url or f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote((b.name + ' ' + (b.address or '')).strip())}"
 
                 results.append({
                     "id": b.id,
+                    # Contact ids are what `add_campaign_targets` needs.
+                    "contact_ids": [c.id for c in contacts],
+                    "primary_contact_id": next(
+                        (c.id for c in contacts if c.email),
+                        contacts[0].id if contacts else None,
+                    ),
                     "name": b.name,
                     "maps_url": maps_url,
                     "phone": b.phone or "—",
@@ -397,13 +449,23 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
         md = [
             f"### LeadForge Database Search ({len(results)} matches)\n",
-            "| ID | Business Name | Google Maps | Phone | WhatsApp | Category | Emails | Rating |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+            "| Business ID | Contact ID | Business Name | Google Maps | Phone | WhatsApp | Category | Emails | Rating |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
         ]
         for r in results:
             name_clean = r["name"].replace("|", "\\|")
             maps_link = f"[Maps]({r['maps_url']})"
-            md.append(f"| #{r['id']} | **{name_clean}** | {maps_link} | {r['phone']} | {r['whatsapp']} | {r['industry']} | {r['emails']} | {r['rating']} |")
+            contact_id = r["primary_contact_id"] if r["primary_contact_id"] else "—"
+            md.append(
+                f"| #{r['id']} | {contact_id} | **{name_clean}** | {maps_link} | {r['phone']} "
+                f"| {r['whatsapp']} | {r['industry']} | {r['emails']} | {r['rating']} |"
+            )
+
+        md.append(
+            "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
+            "to enroll these leads in a sequence. The Contact ID is NOT the "
+            "Business ID."
+        )
 
         return "\n".join(md)
 
@@ -638,6 +700,7 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
             added = 0
             skipped = 0
+            missing = 0
             for cid in dict.fromkeys(contact_ids):
                 if cid in existing:
                     continue
@@ -646,6 +709,10 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                     select(Contact).where(Contact.id == cid)
                 )).scalars().first()
                 if contact is None:
+                    # A non-existent contact id used to be silently dropped
+                    # and NOT counted, so the tool reported "Added 0 target(s)
+                    # (0 skipped)" and the agent concluded success.
+                    missing += 1
                     continue
                 if await is_suppressed(db, contact.email):
                     skipped += 1
@@ -658,11 +725,25 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
             )).scalar() or 0
 
-        return (f"Added {added} target(s) to campaign #{campaign_id} "
-                f"({skipped} skipped: suppressed). Total targets: {total}.")
+        parts = [f"Added {added} target(s) to campaign #{campaign_id}"]
+        if skipped:
+            parts.append(f"({skipped} skipped: suppressed)")
+        if missing:
+            parts.append(
+                f"**WARNING: {missing} contact id(s) did not exist and were skipped** - "
+                "check that you are using Contact IDs (from the Contact ID column) "
+                "and not Business IDs."
+            )
+        parts.append(f"Total targets: {total}.")
+        return " ".join(parts)
 
     elif name == "leadforge_launch_campaign":
         campaign_id = int(arguments["campaign_id"])
+        # Dry run by default. An autonomous agent firing real cold email at
+        # real people without a human in the loop is the single most
+        # dangerous thing this server can do, and the tool had no way to
+        # preview what would be sent.
+        dry_run = arguments.get("dry_run", True)
         async with async_session_maker() as db:
             camp = await db.get(Campaign, campaign_id)
             if not camp:
@@ -680,6 +761,40 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 return (f"Campaign #{campaign_id} cannot launch: no explicit targets. "
                         "Add recipients with `leadforge_add_campaign_targets` so we never "
                         "mail leads the operator did not pick.")
+
+            # Preview the exact recipients and subject lines.
+            recipient_rows = (await db.execute(
+                select(Contact.email, Contact.first_name)
+                .join(CampaignTarget, CampaignTarget.contact_id == Contact.id)
+                .where(CampaignTarget.campaign_id == campaign_id)
+            )).all()
+            step_rows = (await db.execute(
+                select(CampaignStep.step_number, CampaignStep.subject)
+                .where(CampaignStep.campaign_id == campaign_id)
+                .order_by(CampaignStep.step_number)
+            )).all()
+
+            if dry_run:
+                preview = [f"**DRY RUN - nothing was sent.**",
+                           f"Campaign #{campaign_id} would send {targets} email(s) "
+                           f"across {steps} step(s).",
+                           "",
+                           "**Recipients (first 10):**"]
+                for email, first_name in recipient_rows[:10]:
+                    preview.append(f"- {first_name or '—'} <{email}>")
+                if len(recipient_rows) > 10:
+                    preview.append(f"- ...and {len(recipient_rows) - 10} more")
+                preview.append("")
+                preview.append("**Steps:**")
+                for num, subject in step_rows:
+                    preview.append(f"- Step {num}: {subject}")
+                preview.append("")
+                preview.append("Re-call with `dry_run=false` to actually send.")
+                return "\n".join(preview)
+
+            if camp.status == CampaignStatus.ACTIVE.value:
+                return (f"Campaign #{campaign_id} is already active - not launching a "
+                        "second sender (that would double-send to the same leads).")
             camp.status = CampaignStatus.ACTIVE.value
             camp_name = camp.name
             await db.commit()
@@ -831,6 +946,11 @@ async def run_mcp_server():
     """Runs the Model Context Protocol stdio loop."""
     logger.info("Starting LeadForge MCP stdio server...")
 
+    # The MCP server talks to the database directly and must be able to
+    # survive a schema change on its own. It used to depend on the API
+    # process having started first.
+    await ensure_schema()
+
     loop = asyncio.get_event_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
@@ -849,6 +969,14 @@ async def run_mcp_server():
             req = json.loads(line_str)
         except Exception as parse_err:
             logger.error(f"JSON decode error: {parse_err}")
+            # JSON-RPC requires a Parse error response with a null id.
+            out_bytes = (json.dumps({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error: invalid JSON"},
+            }) + "\n").encode("utf-8")
+            sys.stdout.buffer.write(out_bytes)
+            sys.stdout.buffer.flush()
             continue
 
         req_id = req.get("id")
@@ -901,13 +1029,27 @@ async def run_mcp_server():
                     }
                 }
             except Exception as tool_err:
-                logger.error(f"Error executing tool {tool_name}: {tool_err}")
+                logger.exception("Error executing tool %s", tool_name)
+                # A tool that fails at execution time must return a RESULT
+                # with isError=true, not a transport-level JSON-RPC error.
+                # The model can read a tool result and react to it; a
+                # transport error is invisible to it and it typically retries
+                # or gives up. The raw exception text also leaked raw SQL
+                # into the transcript.
                 response = {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {
-                        "code": -32603,
-                        "message": str(tool_err)
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                f"Tool '{tool_name}' failed: {type(tool_err).__name__}. "
+                                "Check the arguments and the system state with "
+                                "`leadforge_get_stats` / `leadforge_search_leads`, then "
+                                "retry with corrected arguments."
+                            ),
+                        }],
+                        "isError": True,
                     }
                 }
         elif method == "ping":

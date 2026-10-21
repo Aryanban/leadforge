@@ -4,6 +4,7 @@ import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar } from "@/components/TopBar";
 import { FirstRunWizard } from "@/components/FirstRunWizard";
+import { Toaster } from "@/components/Toaster";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -23,10 +24,12 @@ export default function RootLayout({
         <Sidebar />
         <div className="flex-1 flex flex-col min-w-0">
           <TopBar />
-          <main className="flex-1 overflow-y-auto bg-slate-50/60 p-6">{children}</main>
+          <main className="flex-1 overflow-y-auto bg-slate-50/60 p-4 sm:p-6">{children}</main>
         </div>
         {/* First-run setup: shows only while a required connection is missing */}
         <FirstRunWizard />
+        {/* App-wide notifications (replaces blocking browser dialogs) */}
+        <Toaster />
       </body>
     </html>
   );

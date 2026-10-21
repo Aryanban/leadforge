@@ -124,7 +124,17 @@ def score_lead(
     if not signals["verified_email"]:
         add("any_email", bool(signals["any_email"]), "Email Available")
     add("phone", bool(signals["phone"]), "Direct Phone")
-    add("whatsapp", bool(signals["whatsapp"]), "WhatsApp Ready")
+    # The WhatsApp points now require a genuinely mobile number. The signal
+    # used to be derived mechanically from the same phone string, so it could
+    # never disagree with "phone" - 15 of 100 points were handed out for free
+    # and a landline-only lead scored exactly like a WhatsApp-reachable one.
+    # On WhatsApp (the primary channel for Indian SMBs) the distinction is
+    # the whole point.
+    if signals.get("whatsapp"):
+        if signals.get("mobile_line"):
+            add("whatsapp", True, "WhatsApp Ready")
+        else:
+            badges.append("Landline (no WhatsApp)")
     add("website", bool(signals["website"]), "Active Website")
 
     # Unclaimed listings always carry the badge (legacy behaviour); the score
@@ -156,7 +166,12 @@ def score_lead(
             add("running_ads", bool(signals["running_ads"]), "Running Ads")
 
     score = int(sum(breakdown.values()))
-    score = min(100, max(10, score + int(round(_trust_delta))))
+    # The trust modifier is a *bounded* number in [-8, +5]. Rounding it to an
+    # integer collapsed the whole range into +/-4, so IndiaMART (0.60) received
+    # no discount at all while JustDial (0.50) got -2 - and the promise that
+    # "a scraped-aggregator lead never outranks a primary-source one" was not
+    # kept. Apply it as a float.
+    score = min(100, max(10, score + _trust_delta))
     if _trust_known and _trust < 0.75:
         badges.append("Verify phone (directory-sourced)")
     elif _trust_known and _trust >= 0.90 and _source:

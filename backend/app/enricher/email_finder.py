@@ -12,7 +12,13 @@ from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
 from app.sources import in_phone
-from app.verifier.smtp_verifier import verify_email, verify_batch, check_catch_all_domain
+from app.verifier.smtp_verifier import (
+    verify_email,
+    verify_email_async,
+    verify_batch,
+    check_catch_all_domain,
+    check_catch_all_domain_async,
+)
 from app.verifier.email_status import detect_role_account, detect_placeholder_domain
 from app.enricher.pattern import generate_candidates
 
@@ -28,6 +34,97 @@ EXCLUDED_EMAIL_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '
 # handled by email_status.detect_placeholder_domain, which knows the difference
 # between sentry.io/example.com and a company's actual mail domain.
 EXCLUDED_EMAIL_DOMAINS = ('sentry.io', 'example.com', 'wixpress.com', 'domain.com', 'email.com', 'schema.org')
+
+#: Call-to-action and boilerplate phrases that the title regex used to
+#: mistake for people's names. "Read more - owner" became the contact
+#: "read more" with title "owner", and that garbage then consumed the
+#: candidate budget (read.more@domain, call.now@domain).
+_NOT_A_PERSON_NAME = frozenset({
+    "read more", "learn more", "view more", "see more", "click here",
+    "call now", "call us", "book now", "book appointment", "book online",
+    "get in touch", "contact us", "join us", "about us", "our services",
+    "why choose us", "our team", "the team", "meet the team", "our story",
+    "privacy policy", "terms of use", "terms and conditions", "refund policy",
+    "success stories", "client reviews", "our clients", "our projects",
+    "request a quote", "request callback", "send a message", "live chat",
+    "chat with us", "more info", "know more", "explore more", "shop now",
+    "order now", "buy now", "download", "download now", "apply now",
+})
+
+
+def _is_plausible_person_name(name: str) -> bool:
+    """Whether a scraped "name" is actually a person.
+
+    Two or three capitalised tokens that are not boilerplate and not a
+    known CTA phrase.
+    """
+    if not name:
+        return False
+    cleaned = re.sub(r"\s+", " ", name.strip().lower())
+    if cleaned in _NOT_A_PERSON_NAME:
+        return False
+    tokens = cleaned.split()
+    if len(tokens) not in (2, 3):
+        return False
+    # Reject page/section words that are never part of a person's name.
+    if any(t in ("about", "contact", "home", "terms", "service", "privacy",
+                 "policy", "page", "our", "the", "your", "and", "for")
+           for t in tokens):
+        return False
+    return True
+
+
+def _exec_for_address(email: str, execs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Finds the executive an address plausibly belongs to.
+
+    A shared mailbox (``info@``, ``sales@``) belongs to nobody. A person
+    address carries their name (or its first letter) in the local part.
+    Returns None when no executive can be bound - which is the correct
+    answer for a role mailbox.
+    """
+    if not email or "@" not in email or not execs:
+        return None
+    local = email.split("@")[0].lower().strip()
+    if not local or local in _NOT_A_PERSON_NAME:
+        return None
+    # A purely alphabetic local part that is a common role word is a mailbox.
+    if local in ("contact", "info", "sales", "office", "support", "admin", "hello"):
+        return None
+
+    tokens = [t for t in re.split(r"[._+\-]", local) if t]
+    for ex in execs:
+        name = (ex.get("name") or "").strip()
+        if not name:
+            continue
+        parts = name.lower().split()
+        first = parts[0]
+        last = parts[1] if len(parts) > 1 else ""
+        if first and first in tokens:
+            return ex
+        if last and last in tokens:
+            return ex
+        # Initials: "rsharma" for Rajesh Sharma.
+        if first and last and len(first) == 1 and tokens and tokens[0] == first:
+            return ex
+    return None
+
+
+def _address_source(email: str, harvested: Any, permutations: List[str],
+                    domain: Optional[str]) -> str:
+    """Where this address came from.
+
+    Every contact used to be stamped ``multi_source_enricher``, which made it
+    impossible to measure the thing that actually matters: how often a
+    *guessed* mailbox is right versus a harvested one.
+    """
+    local = email.split("@")[0].lower()
+    if local in ("contact", "info", "sales", "office"):
+        return "alias"
+    if permutations and email in {p.lower() for p in permutations}:
+        return "pattern_guess"
+    if domain and email.rpartition("@")[2].lower() == domain.lower():
+        return "website_scrape"
+    return "web_search"
 
 CONTACT_PRIORITY_KEYWORDS = [
     'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support', 'impressum'
@@ -234,12 +331,24 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
 
+    # Titles that actually appear on Indian SMB sites. The old list missed
+    # MD, Principal (e.g. "Principal Dentist" - the dental norm), General
+    # Manager, Promoter and Chairman, which together cover the majority of
+    # owner-operator titles in the target market.
     EXEC_TITLES = [
-        r'founder', r'co-founder', r'ceo', r'managing director', r'director',
-        r'principal broker', r'president', r'owner', r'partner', r'proprietor'
+        r'founder', r'co-founder', r'ceo', r'chief executive officer',
+        r'managing director', r'md', r'director', r'principal(?:\s+\w+)?',
+        r'general manager', r'manager', r'promoter', r'chairman',
+        r'chairperson', r'president', r'owner', r'partner', r'proprietor',
+        r'administrator', r'head of \w+', r'vice president', r'vp',
     ]
     TITLE_PATTERN = re.compile(
-        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*(?:[-–,|:]|\bis\b|\bas\b)\s*(' + '|'.join(EXEC_TITLES) + r')\b',
+        # The separator class now includes the em-dash (U+2014), en-dash
+        # (U+2013) and bullet (U+2022) - all three are used by Indian SMB
+        # sites and all three were silently failing to split name from title.
+        r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,2})\s*'
+        r'(?:[-\u2013\u2014\u2022|,;:()]|\bis\b|\bas\b|&)\s*('
+        + '|'.join(EXEC_TITLES) + r')\b',
         re.IGNORECASE
     )
 
@@ -295,8 +404,9 @@ async def crawl_website_for_contacts(url: str, max_pages: int = 4) -> Dict[str, 
                 text_clean = soup.get_text(" ", strip=True)
                 for match in TITLE_PATTERN.finditer(text_clean):
                     found_name, found_title = match.group(1).strip(), match.group(2).strip()
-                    if len(found_name.split()) in (2, 3) and not any(w in found_name.lower() for w in ["about", "contact", "home", "terms", "service", "privacy"]):
-                        executives.append({"name": found_name, "title": found_title.title()})
+                    if not _is_plausible_person_name(found_name):
+                        continue
+                    executives.append({"name": found_name, "title": found_title.title()})
                 
                 for link in soup.find_all('a', href=True):
                     href = link['href'].strip()
@@ -432,28 +542,47 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             logger.debug(f"Social enrichment skipped for {business.name}: {social_err}")
 
         # Step 2.6: Apollo-Grade Waterfall Permutations & Catch-All Validation
+        #: Filled in by the permutation stage below; reused by the contact
+        #: stage so an address confirmed by the batch is not re-probed.
+        batch: Dict[str, Any] = {}
+        learned_pattern: Optional[str] = None
+        learned_confidence: float = 0.0
         if business.website:
             try:
                 web_for_domain = business.website if business.website.startswith("http") else f"https://{business.website}"
                 parsed_w = urlparse(web_for_domain)
                 w_domain = parsed_w.netloc.lower().replace("www.", "").strip()
                 if w_domain and "." in w_domain and not any(ex in w_domain for ex in EXCLUDED_EMAIL_DOMAINS):
+                    # Use EVERY executive we found, not just the first two. The
+                    # pattern learner needs the full set to confirm a
+                    # template, and a seed belonging to the third exec used to
+                    # be discarded entirely.
                     person_names = []
-                    for ex in (crawl_res.get("executives", []) or [])[:2]:
+                    for ex in (crawl_res.get("executives", []) or []):
                         toks = (ex.get("name", "") or "").split()
                         if toks:
                             person_names.append((toks[0], " ".join(toks[1:])))
                     seeds = [e for e in all_emails if e.rpartition("@")[2].lower() == w_domain]
-                    permutations, _pat, _conf = generate_candidates(
+                    permutations, learned_pattern, learned_conf = generate_candidates(
                         w_domain, person_names=person_names or None, seeds=seeds,
                     )
                     if not person_names:
                         permutations = [q for q in permutations if q.split("@")[0] in (
                             "contact", "info", "sales", "office")]
-                    is_catch_all = check_catch_all_domain(w_domain)
 
-                    batch = await verify_batch(
-                        [c for c in permutations if c not in all_emails])
+                    # ONE batch, ONE MX connection per domain.
+                    #
+                    # The old flow opened 2-5 separate MX connections per lead
+                    # (a standalone catch-all probe, then the batch, then a
+                    # per-address verify loop that re-probed addresses the
+                    # batch had just confirmed) and performed 3-8 DNS lookups.
+                    # That is both slow and a good way to get the sending IP
+                    # blocklisted by port-25 rate limiting.
+                    to_verify = [c for c in permutations if c not in all_emails]
+                    batch = await verify_batch(to_verify) if to_verify else {}
+                    # The batch already probes the domain for catch-all, so a
+                    # separate probe would be a third connection to the same MX.
+                    is_catch_all = await check_catch_all_domain_async(w_domain)
 
                     found_perms = 0
                     for cand in permutations:
@@ -490,6 +619,9 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
 
         # Step 3: Process and verify each discovered email
         verified_count = 0
+        # Addresses we already verified as part of the permutation batch - do
+        # not open a second connection to the same MX to confirm them again.
+        pre_verified: Dict[str, Any] = dict(batch)
         for email in all_emails:
             stmt = select(Contact).where(Contact.business_id == business.id, Contact.email == email)
             res = await db.execute(stmt)
@@ -498,9 +630,25 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             # Use the rich result, not the (bool, str) shim, so sub-status,
             # confidence, MX host and role/free flags are persisted. The shim
             # collapses 20 states into one bool and loses the explanation.
-            result = verify_email(email)
-            is_valid = result.is_deliverable
+            #
+            # The async variant is mandatory here: the sync version performs a
+            # DNS lookup, a TCP connect and up to three RCPT probes with an
+            # 8-second timeout, all *inside* an async def - which freezes the
+            # entire event loop (and therefore the API and the reply poller)
+            # for the duration of every send.
+            result = pre_verified.get(email)
+            if result is None:
+                result = await verify_email_async(email)
+                pre_verified[email] = result
+
             v_status = result.status.value
+            #: "Verified" means the SMTP handshake positively confirmed the
+            #: mailbox. ``is_deliverable`` also covers role accounts and free
+            #: providers, which are classified with no network call at all -
+            #: so ``info@`` used to be stamped "verified" and awarded the full
+            #: 30-point "Verified Email" score without ever being probed.
+            is_valid = (v_status == "valid")
+            is_deliverable = result.is_deliverable
             if is_valid:
                 verified_count += 1
 
@@ -508,15 +656,39 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 business.phone or (list(all_phones)[0] if all_phones else None)
             )
             execs = crawl_res.get("executives", []) if business.website else []
-            exec_match = execs[0] if execs else None
-            c_first = exec_match["name"].split()[0] if exec_match else (business.name.split()[0] if business.name else "Owner")
-            c_last = " ".join(exec_match["name"].split()[1:]) if exec_match and len(exec_match["name"].split()) > 1 else ""
-            c_title = exec_match["title"] if exec_match else "Owner / Decision Maker"
+
+            # Bind an executive to THIS address only when the address plausibly
+            # belongs to them.
+            #
+            # The old code took ``execs[0]`` for *every* address, so
+            # ``info@acme.in`` was stored with ``first_name="Rajesh"`` and
+            # ``title="Founder"`` - a contact that was simultaneously a role
+            # mailbox and a named person. The sender then wrote "Hi Rajesh" to
+            # a shared mailbox. And with no executive found, the fallback was
+            # the *business* name, producing "Hi Apex," for Apex Realty
+            # Solutions.
+            exec_match = _exec_for_address(email, execs)
+            c_first = exec_match["name"].split()[0] if exec_match else None
+            c_last = (" ".join(exec_match["name"].split()[1:])
+                      if exec_match and len(exec_match["name"].split()) > 1 else None)
+            c_title = exec_match["title"] if exec_match else None
 
             # Person vs role: a discovered executive name means this address
             # belongs to a human. A shared mailbox (info@) is still a lead but
             # must not be counted as a person found.
             is_role = result.is_role or (exec_match is None and detect_role_account(email.split("@")[0]))
+            if not is_role and exec_match is None and detect_role_account(email.split("@")[0]):
+                is_role = True
+
+            #: Where this address came from, so guess-vs-harvest hit rate can
+            #: actually be measured.
+            address_source = _address_source(email, all_emails, permutations, w_domain)
+            contact_extra: Dict[str, Any] = {}
+            if learned_pattern:
+                contact_extra["pattern"] = learned_pattern
+                contact_extra["pattern_confidence"] = learned_confidence
+            if address_source == "pattern_guess":
+                contact_extra["is_guess"] = True
 
             if not existing_contact:
                 new_contact = Contact(
@@ -542,7 +714,8 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     preferred_channel=in_phone.preferred_channel(
                         business.phone or (list(all_phones)[0] if all_phones else None)
                     ),
-                    source="multi_source_enricher",
+                    source=address_source,
+                    extra_data=contact_extra or None,
                     verified_at=datetime.now(timezone.utc) if is_valid else None,
                 )
                 db.add(new_contact)
@@ -556,7 +729,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 existing_contact.is_role_account = is_role
                 existing_contact.is_free_email = result.is_free
                 existing_contact.verified_at = datetime.now(timezone.utc) if is_valid else None
-                if exec_match and existing_contact.first_name == business.name.split()[0]:
+                if exec_match:
                     existing_contact.first_name = c_first
                     existing_contact.last_name = c_last
                     existing_contact.title = c_title

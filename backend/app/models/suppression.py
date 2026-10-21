@@ -24,7 +24,7 @@ expires after ``expires_at`` so a transient gateway failure does not burn a
 lead forever.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import Column, Integer, String, DateTime
@@ -39,6 +39,16 @@ PERMANENT_REASONS = frozenset({
 
 #: How long a soft bounce keeps a lead out of rotation before we retry.
 SOFT_BOUNCE_RETENTION_DAYS = 30
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now.
+
+    A naive ``utcnow()`` written into a ``DateTime(timezone=True)`` column is
+    interpreted as *server-local* time by Postgres, which shifts every
+    expiry by the host's UTC offset (India is +5:30).
+    """
+    return datetime.now(timezone.utc)
 
 
 class Suppression(Base):
@@ -67,7 +77,14 @@ class Suppression(Base):
         """False only for an expired soft-bounce entry."""
         if self.expires_at is None:
             return True
-        return self.expires_at > (now or datetime.utcnow())
+        expiry = self.expires_at
+        reference = now or _utcnow()
+        # SQLite returns naive datetimes, Postgres returns aware ones.
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        return expiry > reference
 
     @classmethod
     def make(
@@ -80,9 +97,9 @@ class Suppression(Base):
         """Builds a row, setting ``expires_at`` for reasons that should age out."""
         expires_at = None
         if reason not in PERMANENT_REASONS and retention_days is not None:
-            expires_at = datetime.utcnow() + timedelta(days=retention_days)
+            expires_at = _utcnow() + timedelta(days=retention_days)
         elif reason == "soft_bounce":
-            expires_at = datetime.utcnow() + timedelta(days=SOFT_BOUNCE_RETENTION_DAYS)
+            expires_at = _utcnow() + timedelta(days=SOFT_BOUNCE_RETENTION_DAYS)
 
         return cls(
             identifier=identifier.strip().lower(),

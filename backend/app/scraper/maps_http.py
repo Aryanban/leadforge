@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import math
+import random
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -145,6 +146,67 @@ def _dig_reviews(raw: Any) -> Optional[int]:
     return None
 
 
+def _dig_phone(raw: Any) -> Optional[str]:
+    """Resolves the phone number, preferring the international form.
+
+    Google stores a phone as a small structure::
+
+        [ "075593 56392",                       # display form (leading 0)
+          [ ["075593 56392", 1],                #   type 1 = as displayed
+            ["+91 75593 56392", 2] ],          #   type 2 = international
+          null,
+          "07559356392",                       # compact local
+          null,
+          ["tel:07559356392", ...] ]
+
+    The old code took the *display* form, which for India carries a
+    leading trunk zero ("075593 56392"). That is the wrong shape for an
+    Indian mobile: it looks like a landline with STD code 075593, so the
+    STD->city resolver mis-files it and the number does not match a
+    "+91 75593 56392" stored elsewhere for the same business.
+
+    The international form is unambiguous, so it wins when present.
+    """
+    # ``_IDX_PHONE`` is (178, 0, 0) - the trailing 0 lands on the display
+    # string. We want the *enclosing* structure, so dig one level less.
+    node = _dig(raw, _IDX_PHONE[:-1])
+    if not isinstance(node, (list, tuple)) or not node:
+        return _dig_str(raw, _IDX_PHONE)
+
+    # Depending on the response, ``node`` is either the entry itself or a
+    # one-element list wrapping it.
+    entry = node
+    if isinstance(node[0], (list, tuple)) and node[0] and not isinstance(node[0], str):
+        entry = node[0]
+    if not isinstance(entry, (list, tuple)) or not entry:
+        return _dig_str(raw, _IDX_PHONE)
+
+    # entry[1] is the list of [number, type] pairs.
+    variants = entry[1] if len(entry) > 1 else None
+    if isinstance(variants, (list, tuple)):
+        international = None
+        display = None
+        for variant in variants:
+            if not (isinstance(variant, (list, tuple)) and len(variant) >= 2):
+                continue
+            number, kind = variant[0], variant[1]
+            if not isinstance(number, str) or not number.strip():
+                continue
+            if kind == 2 and international is None:
+                international = number.strip()
+            elif display is None:
+                display = number.strip()
+        if international:
+            return international
+        if display:
+            return display
+
+    # Fall back to the display field at entry[0].
+    if isinstance(entry[0], str) and entry[0].strip():
+        return entry[0].strip()
+    return _dig_str(raw, _IDX_PHONE)
+
+
 def _dig_address(raw: Any, name: Optional[str] = None) -> Optional[str]:
     """Resolves the address, which Google stores in two shapes.
 
@@ -202,12 +264,24 @@ async def _geocode(query: str, timeout: float = 10.0) -> Optional[Tuple[float, f
 
     One lookup per query, never per lead. Returns None on any failure so the
     caller can skip the HTTP path rather than guess a viewport.
+
+    The result is pinned to India. Without ``countrycodes`` a locality like
+    "Whitefield" resolves to Whitefield, **New Hampshire** and "Park Street" to
+    Park Street, **Boston** - and because this geocode is the only geographic
+    scope of the entire scrape, that silently put US businesses into an
+    India-targeted database. The ``country_code`` guard below is a hard
+    backstop in case the parameter is ignored.
     """
     headers = {
         "User-Agent": "LeadForge/1.0 (+https://github.com/Aryanban/leadforge)",
         "Accept-Language": "en",
     }
-    params = {"q": query, "format": "json", "limit": 1}
+    params = {
+        "q": query,
+        "format": "json",
+        "limit": 1,
+        "countrycodes": "in",
+    }
     try:
         async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
             resp = await client.get(_NOMINATIM, params=params)
@@ -221,6 +295,12 @@ async def _geocode(query: str, timeout: float = 10.0) -> Optional[Tuple[float, f
     if not isinstance(data, list) or not data:
         return None
     try:
+        country = str(data[0].get("country_code", "")).lower()
+        if country and country != "in":
+            logger.warning(
+                "geocode for %r resolved outside India (%s) - skipping", query, country
+            )
+            return None
         return float(data[0]["lat"]), float(data[0]["lon"])
     except (KeyError, TypeError, ValueError):
         return None
@@ -241,24 +321,51 @@ def _location_of_query(query: str) -> str:
 async def _fetch_page(query: str, lat: float, lng: float,
                       page_token: Optional[str] = None,
                       client: Optional[httpx.AsyncClient] = None,
-                      zoom: int = _DEFAULT_ZOOM) -> Optional[Any]:
-    """Fetches one page of Maps results and returns the parsed envelope."""
+                      zoom: int = _DEFAULT_ZOOM,
+                      search_term: Optional[str] = None) -> Optional[Any]:
+    """Fetches one page of Maps results and returns the parsed envelope.
+
+    ``search_term`` is what we ask Google for. It defaults to ``query`` but
+    should be the *category only* ("dentists"), never "dentists in Delhi" -
+    see ``scrape_google_maps_http``.
+    """
     params = {
         "tbm": "map",
         "hl": "en",
         "gl": "in",          # biases results to India
-        "q": query,
+        "q": search_term or query,
         "pb": build_pb(lat, lng, page_token, zoom),
     }
     headers = {
         "User-Agent": getattr(settings, "SCRAPER_USER_AGENT", None) or _DEFAULT_UA,
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
+        # httpx sends no Accept-Encoding by default, so every response comes
+        # back uncompressed - a strong bot signal and a lot of wasted bytes.
+        "Accept-Encoding": "gzip, deflate",
         "Referer": "https://www.google.com/maps/",
     }
 
-    async def _do(c: httpx.AsyncClient) -> Optional[Any]:
-        resp = await c.get(_ENDPOINT, params=params, headers=headers)
+    async def _do(c: httpx.AsyncClient, attempt: int = 0) -> Optional[Any]:
+        try:
+            resp = await c.get(_ENDPOINT, params=params, headers=headers)
+        except Exception as exc:
+            if attempt < 2:
+                delay = (2 ** attempt) * 1.5 + random.uniform(0, 0.8)
+                logger.debug("Maps request error (%s), retrying in %.1fs", exc, delay)
+                await asyncio.sleep(delay)
+                return await _do(c, attempt + 1)
+            logger.debug("Maps request failed for %r: %s", query, exc)
+            return None
+
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            # A throttled cell silently contributed nothing before, which cost
+            # a third of the results on a bad run. Back off and retry.
+            delay = (2 ** attempt) * 2.0 + random.uniform(0, 1.0)
+            logger.info("Maps returned %s, retrying in %.1fs", resp.status_code, delay)
+            await asyncio.sleep(delay)
+            return await _do(c, attempt + 1)
+
         if resp.status_code != 200:
             logger.debug("Maps pb= returned %s for %r", resp.status_code, query)
             return None
@@ -284,6 +391,10 @@ def _viewport_grid(lat: float, lng: float, max_cells: int,
     centre itself (highest relevance), then a ring, then an outer square.
 
     ``max_cells`` is rounded up to a square so the grid stays symmetrical.
+
+    The true centre is emitted exactly once. The grid used to add the centre
+    explicitly *and* emit it again from the loop, so a 8-cell grid made only
+    7 distinct HTTP requests - one of them a 100% duplicate of the centre.
     """
     if max_cells <= 1:
         return [(lat, lng)]
@@ -295,9 +406,13 @@ def _viewport_grid(lat: float, lng: float, max_cells: int,
 
     cells: List[Tuple[float, float]] = [(lat, lng)]
     offset = (side - 1) / 2.0
+    centre_i = centre_j = offset
     for i in range(side):
         for j in range(side):
             if i == j == 0:
+                continue
+            if float(i) == centre_i and float(j) == centre_j:
+                # Already emitted as the first cell.
                 continue
             cells.append((lat + (i - offset) * d_lat, lng + (j - offset) * d_lng))
             if len(cells) >= max_cells:
@@ -382,7 +497,7 @@ def parse_place(raw: List[Any], query: str) -> Optional[Dict[str, Any]]:
 
     return {
         "name": name,
-        "phone": _dig_str(raw, _IDX_PHONE),
+        "phone": _dig_phone(raw),
         "website": website,
         # Downstream uses the address as a location hint; losing it loses the
         # city for the whole lead, so fall back to the queried area.
@@ -404,8 +519,9 @@ def parse_place(raw: List[Any], query: str) -> Optional[Dict[str, Any]]:
 
 
 async def scrape_google_maps_http(query: str, max_results: int = 60,
-                                  max_cells: int = 8,
-                                  zoom: int = _DEFAULT_ZOOM) -> List[Dict[str, Any]]:
+                                  max_cells: int = 0,
+                                  zoom: int = _DEFAULT_ZOOM,
+                                  search_term: Optional[str] = None) -> List[Dict[str, Any]]:
     """Scrapes Google Maps over plain HTTP, sweeping a grid of viewports.
 
     Google returns at most 20 results per request and, on this endpoint, offers
@@ -419,12 +535,43 @@ async def scrape_google_maps_http(query: str, max_results: int = 60,
 
     Returns the same dict shape as its Playwright counterpart, so callers need
     not care which ran.
+
+    IMPORTANT - the text query must stay category-only
+    ----------------------------------------------------
+    ``query`` is the human-facing label ("dentists in Delhi") and is used for
+    the industry, the address fallback and the logs. The string actually sent
+    to Google is ``search_term``, which must be the **category only**
+    ("dentists").
+
+    Sending "dentists in Delhi" makes Google return one city-wide relevance
+    set, so every viewport in the grid returned a near-identical top-20 and
+    the sweep was wasted. Measured live on the same 8-cell grid:
+
+        q="dentists in Delhi"  -> 160 raw rows, 30 unique leads
+        q="dentists"           -> 160 raw rows, 103 unique leads
+
+    The distance distribution proves it: with the category-only query the
+    median result sits 1.3 km from its own viewport centre (p90 = 5.0 km);
+    with the city in the query it sits 5.4 km away and the sets are
+    identical across cells. The viewport grid only does geographic scoping
+    when the text query leaves the geography to the viewport.
     """
     coords = await _geocode(_location_of_query(query))
     if not coords:
         logger.info("Could not geocode %r - skipping HTTP Maps path", query)
         return []
     lat, lng = coords
+
+    # Default to the category part of the query.
+    if search_term is None:
+        search_term = industry_of_query(query)
+
+    # Size the grid to the requested result count. Each viewport yields roughly
+    # 15 unique businesses after overlap, so asking for 100 leads from 8
+    # viewports threw away 60% of what we had already paid for.
+    # ``max_cells=0`` means "choose for me"; an explicit value is respected.
+    if max_cells <= 0:
+        max_cells = max(4, min(25, int(math.ceil(max_results / 15)) or 4))
 
     cells = _viewport_grid(lat, lng, max_cells)
     results: List[Dict[str, Any]] = []
@@ -437,7 +584,10 @@ async def scrape_google_maps_http(query: str, max_results: int = 60,
 
         async def _sweep(cell: Tuple[float, float]) -> List[Dict[str, Any]]:
             async with semaphore:
-                envelope = await _fetch_page(query, cell[0], cell[1], client=client, zoom=zoom)
+                envelope = await _fetch_page(
+                    query, cell[0], cell[1], client=client, zoom=zoom,
+                    search_term=search_term,
+                )
                 if envelope is None:
                     return []
                 found: List[Dict[str, Any]] = []
@@ -469,8 +619,8 @@ async def scrape_google_maps_http(query: str, max_results: int = 60,
                 break
 
     logger.info(
-        "HTTP Maps scrape for %r returned %d leads across %d viewports",
-        query, len(results), len(cells),
+        "HTTP Maps scrape for %r (q=%r) returned %d leads across %d viewports",
+        query, search_term, len(results), len(cells),
     )
     return results[:max_results]
 

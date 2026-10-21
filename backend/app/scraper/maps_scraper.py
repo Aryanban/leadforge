@@ -25,6 +25,19 @@ _QUERY_SPLIT_RE = re.compile(
 )
 
 
+#: Unicode Private Use Area (U+E000-U+F8FF). Google renders category icons
+#: from this block; ``innerText`` exposes them as the raw character, so they
+#: end up glued onto the front of a card's metadata line.
+_PUA_RE = re.compile("[\\ue000-\\uf8ff]")
+
+
+def _strip_pua(text: str) -> str:
+    """Removes Private-Use-Area icon glyphs from scraped card text."""
+    if not text:
+        return ""
+    return _PUA_RE.sub("", text).strip()
+
+
 def industry_of_query(query: str) -> str:
     """Extracts the category from a Maps search query.
 
@@ -106,14 +119,18 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
         browser = await _launch_browser(p)
         context = await browser.new_context(
             user_agent=get_random_user_agent(),
-            viewport={"width": 1280, "height": 900},
-            locale="en-US"
+            viewport=get_random_viewport(),
+            locale="en-US",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
         )
         page = await context.new_page()
 
-        # Performance Turbo: abort heavy images, media, and fonts to accelerate DOM parsing 3x-5x
+        # Performance Turbo: abort heavy images, media, fonts and stylesheets
+        # to accelerate DOM parsing 3x-5x. Stylesheets were missing from the
+        # original list, which meant the biggest single asset class was still
+        # being downloaded in full.
         async def _block_heavy_assets(route):
-            if route.request.resource_type in ["image", "media", "font"]:
+            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
                 await route.abort()
             else:
                 await route.continue_()
@@ -122,7 +139,10 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
         try:
             logger.info(f"Opening Google Maps search for: {query}")
             await page.goto(url, timeout=35000, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
+            # Humanised deceleration: a fixed 3s wait is a metronome, and a
+            # metronome is a fingerprint. ``random_delay`` was imported here
+            # for a long time and never called.
+            await random_delay(1800, 3600)
 
             # Accept consent/cookies if present
             try:
@@ -247,11 +267,19 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                             pass
 
                     # Extract Category & Address
+                    #
+                    # The card's metadata line is "<icon glyph> · <category> ·
+                    # <address>". The icon is a Private-Use-Area codepoint
+                    # (U+E000-U+F8FF) that the DOM renders as a glyph but
+                    # ``innerText`` exposes as the raw character. Splitting on
+                    # "·" and keeping parts[0] therefore stored the icon as the
+                    # category and the address became the category + street.
                     category = ""
                     address = ""
                     for l in lines[1:]:
                         if "·" in l and not any(l.startswith(x) for x in ["Closed", "Open", "Opens"]):
-                            parts = [p.strip() for p in l.split("·") if p.strip()]
+                            cleaned = _strip_pua(l)
+                            parts = [p.strip() for p in cleaned.split("·") if p.strip()]
                             if parts:
                                 category = parts[0]
                                 if len(parts) > 1:
@@ -303,6 +331,19 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
 
                     maps_url = href.split("?")[0] if (href and href.startswith("http")) else f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(name + ' ' + (address or query))}"
 
+                    # Place id: Google puts the CID in the card href as
+                    # ``!1s0x...:0x...``. The old code took the last 60
+                    # characters of the URL path, which is a truncated URL
+                    # fragment - not a place id at all. ``Business.place_id`` is
+                    # UNIQUE and is the primary dedupe key, so a Playwright
+                    # row and an HTTP row for the same business had
+                    # incompatible keys and never matched.
+                    place_id = None
+                    if href:
+                        cid_match = re.search(r"!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)", href)
+                        if cid_match:
+                            place_id = cid_match.group(1)
+
                     results.append({
                         "name": name,
                         "phone": phone,
@@ -312,7 +353,7 @@ async def scrape_google_maps_playwright(query: str, max_results: int = 20) -> Li
                         "rating": rating,
                         "reviews_count": reviews,
                         "industry": category or (query.split(" in ")[0] if " in " in query else "Local Business"),
-                        "place_id": href.split("?")[0][-60:] if href else None,
+                        "place_id": place_id,
                         "latitude": latitude,
                         "longitude": longitude,
                         "is_claimed": is_claimed,
@@ -425,21 +466,45 @@ async def scrape_leads_and_save(
     raw_leads = []
     error_msg = None
 
-    # Step 1: Attempt Playwright
+    # Step 1: HTTP first.
+    #
+    # The order used to be Playwright first, which meant the endpoint the
+    # dashboard actually calls ran the slow path by default. Measured on the
+    # same query:
+    #
+    #     HTTP       2.4s   20/20 phones, 17/20 websites, valid place ids
+    #     Playwright 8.9s    0/20 phones,  0/20 websites, PUA-glyph addresses
+    #
+    # The browser path needs a launch plus a scroll loop to reach the same 20
+    # places, and it cannot extract the phone or website at all. It is a
+    # fallback for when the HTTP transport is blocked, not the default.
     try:
-        raw_leads = await scrape_google_maps_playwright(query, max_results)
+        # Imported lazily: maps_http imports ``industry_of_query`` from this
+        # module at import time, so a module-level import would be circular.
+        from app.scraper.maps_http import scrape_google_maps_http
+        raw_leads = await scrape_google_maps_http(query, max_results=max_results)
+        if not raw_leads:
+            logger.info("HTTP Maps path returned nothing for %r - trying Playwright", query)
     except Exception as e:
-        logger.warning(f"Playwright scraper error: {e}, falling back to HTTP scraper")
+        logger.warning(f"HTTP Maps scraper error: {e}, falling back to Playwright")
         error_msg = str(e)
 
-    # Step 2: Fallback if Playwright returned 0 or errored
+    # Step 2: Fallback to the browser path if HTTP returned 0 or errored.
+    if not raw_leads:
+        try:
+            raw_leads = await scrape_google_maps_playwright(query, max_results)
+        except Exception as e:
+            logger.warning(f"Playwright scraper error: {e}")
+            error_msg = f"HTTP: {error_msg}; Playwright: {e}"
+
+    # Step 3: Last resort - plain web search.
     if not raw_leads:
         try:
             logger.info(f"Running search fallback for: {query}")
             raw_leads = await scrape_google_http_fallback(query, max_results)
         except Exception as e:
             logger.error(f"HTTP fallback also failed: {e}")
-            error_msg = f"Playwright: {error_msg}; HTTP: {e}"
+            error_msg = f"HTTP: {error_msg}; Playwright: {e}; Search: {e}"
 
     # Step 3: Persist into database with deduplication
     saved_count = 0
@@ -513,25 +578,54 @@ async def scrape_leads_and_save(
                     if icp_profile_id and not existing.icp_profile_id:
                         existing.icp_profile_id = icp_profile_id
 
-            # Finalize ScrapeJob
+            # Finalize ScrapeJob - but NOT as "completed" yet. The job is only
+            # really finished once enrichment has run, and marking it complete
+            # before then is how a scrape job "reported 100% done" while the
+            # leads were still raw.
             if job:
-                job.status = "completed"
                 job.total_found = len(raw_leads)
                 job.leads_saved = saved_count
-                job.finished_at = datetime.utcnow()
                 if error_msg and len(raw_leads) == 0:
                     job.error = error_msg
+                else:
+                    job.status = "enriching"
             await db.commit()
-            logger.info(f"Scrape job {job_id} completed: found {len(raw_leads)}, saved {saved_count} new leads")
+            logger.info(
+                "Scrape job %s scraped: found %d, saved %d new leads", job_id, len(raw_leads), saved_count
+            )
 
-            # Trigger multi-source web enrichment for newly discovered businesses in background
+            # Trigger multi-source web enrichment for newly discovered businesses.
+            #
+            # The old code fired an unbounded ``asyncio.create_task`` per lead
+            # and dropped the reference. That meant (a) N leads produced N
+            # concurrent Yahoo+Bing+SMTP bursts with no throttle, (b) CPython
+            # was free to garbage-collect a still-running task, and (c) a
+            # restart lost every pending enrichment. Now it is a bounded,
+            # awaited fan-out.
             if enrich and new_biz_ids:
                 from app.enricher.email_finder import enrich_business_by_id
-                for biz_id in new_biz_ids:
-                    try:
-                        asyncio.create_task(enrich_business_by_id(biz_id))
-                    except Exception as enrich_err:
-                        logger.warning(f"Error initiating auto-enrichment for lead {biz_id}: {enrich_err}")
+                from app.discovery.pipeline import ENRICH_CONCURRENCY
+
+                _sem = asyncio.Semaphore(max(1, ENRICH_CONCURRENCY))
+
+                async def _enrich_one(biz_id: int) -> None:
+                    async with _sem:
+                        try:
+                            await enrich_business_by_id(biz_id)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as enrich_err:
+                            logger.warning(
+                                "Auto-enrichment failed for lead %s: %s", biz_id, enrich_err
+                            )
+
+                await asyncio.gather(*(_enrich_one(bid) for bid in new_biz_ids))
+
+            if job:
+                job.status = "completed"
+                job.finished_at = datetime.utcnow()
+                await db.commit()
+            logger.info(f"Scrape job {job_id} completed (enriched {len(new_biz_ids)} lead(s))")
 
         except Exception as e:
             logger.error(f"Error persisting scrape results: {e}")
