@@ -171,7 +171,11 @@ def score_lead(
     # no discount at all while JustDial (0.50) got -2 - and the promise that
     # "a scraped-aggregator lead never outranks a primary-source one" was not
     # kept. Apply it as a float.
-    score = min(100, max(10, score + _trust_delta))
+    #
+    # The final score is still rounded to an integer: a lead score is a 0-100
+    # number and "84.35 HOT" in the UI looks broken. The trust delta stays
+    # at full precision internally so the ranking is not distorted.
+    score = int(round(min(100, max(10, score + _trust_delta))))
     if _trust_known and _trust < 0.75:
         badges.append("Verify phone (directory-sourced)")
     elif _trust_known and _trust >= 0.90 and _source:

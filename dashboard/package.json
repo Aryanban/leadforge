@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "start:prod": "node scripts/start-prod.mjs",
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test e2e/a11y.spec.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
@@ -36,6 +38,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.5.6",
+    "axe-core": "^4.13.0",
     "eslint": "^8",
     "eslint-config-next": "15.5.25",
     "postcss": "^8",

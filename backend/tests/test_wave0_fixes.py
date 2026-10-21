@@ -511,3 +511,52 @@ async def test_batched_suppression_matches_the_per_address_check():
     assert batched.get("someone@banned-domain.in") == "manual"
     assert "retry@example.in" not in batched, "an expired soft bounce must not block"
     assert "clean@example.in" not in batched
+
+
+# --------------------------------------------------------------------------
+# The lead score is a clean 0-100 integer, and source trust actually ranks
+# --------------------------------------------------------------------------
+
+def test_lead_score_is_an_integer():
+    """A score shown as "84.35 HOT" reads as broken.
+
+    The trust modifier is applied at full precision internally, but the
+    score the operator sees is a whole number.
+    """
+    from app.qualifier.scorer import score_lead
+
+    business = {
+        "name": "Top Realtors", "phone": "+91 98765 43210",
+        "website": "https://toprealtors.in", "rating": 4.9,
+        "reviews_count": 25, "industry": "Real Estate",
+        "source": "google_maps_seed",
+    }
+    contacts = [{"email": "contact@toprealtors.in", "is_verified": True}]
+    result = score_lead(business, contacts)
+    assert isinstance(result["score"], int), f"score should be an int, got {result['score']!r}"
+    assert 0 <= result["score"] <= 100
+
+
+def test_a_directory_lead_never_outranks_a_live_gbp_lead():
+    """The README promises this, so it needs a test.
+
+    The trust modifier used to be rounded to an integer, which collapsed the
+    whole trust range into +/-4 points - and IndiaMART (0.60) received no
+    discount at all while JustDial (0.50) got -2.
+    """
+    from app.qualifier.scorer import score_lead
+
+    def _score(source):
+        business = {
+            "name": "Same Business", "phone": "+91 98765 43210",
+            "website": "https://same.in", "rating": 4.9,
+            "reviews_count": 25, "industry": "Real Estate", "source": source,
+        }
+        contacts = [{"email": "contact@same.in", "is_verified": True}]
+        return score_lead(business, contacts)["score"]
+
+    live = _score("google_maps_seed")
+    for directory in ("indiamart", "justdial", "sulekha"):
+        assert _score(directory) < live, (
+            f"a {directory} lead must score below a live Google Maps lead"
+        )
