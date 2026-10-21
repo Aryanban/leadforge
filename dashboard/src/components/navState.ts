@@ -14,6 +14,26 @@ import { useSyncExternalStore } from "react";
 let open = false;
 const listeners = new Set<() => void>();
 
+/** Id of the hamburger button that opens the drawer (TopBar). */
+export const MOBILE_NAV_TRIGGER_ID = "lf-mobile-nav-trigger";
+/** Id of the mobile drawer panel (Sidebar), referenced by aria-controls. */
+export const MOBILE_NAV_PANEL_ID = "lf-mobile-nav";
+
+/**
+ * The hamburger button that opens the drawer. It lives in the TopBar, the
+ * drawer lives in the Sidebar, so the Sidebar needs a handle on it to hand
+ * keyboard focus back when the drawer closes.
+ */
+let triggerEl: HTMLElement | null = null;
+
+export function setMobileNavTrigger(el: HTMLElement | null) {
+  triggerEl = el;
+}
+
+export function getMobileNavTrigger() {
+  return triggerEl;
+}
+
 function emit() {
   for (const listener of listeners) listener();
 }

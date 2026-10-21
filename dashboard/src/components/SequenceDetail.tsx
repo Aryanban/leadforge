@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { X, Play, Pause, Loader2, Users, Mail, Trophy, AlertTriangle } from "lucide-react";
 import { api, StepStat, CampaignTargetItem } from "@/lib/api";
 import { toast } from "@/components/Toaster";
+import { FOCUS_RING } from "@/components/focusRing";
 
 const STATUS_STYLE: Record<string, string> = {
   active: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -78,11 +79,16 @@ export function SequenceDetail({
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
-      <div className="absolute inset-0 bg-slate-900/30" onClick={onClose} />
-      <div className="relative w-full max-w-xl h-full bg-white border-l border-slate-200 shadow-xl flex flex-col">
+      <div className="absolute inset-0 bg-slate-900/30" onClick={onClose} aria-hidden="true" />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Sequence details"
+        className="relative w-full max-w-xl h-full bg-white border-l border-slate-200 shadow-xl flex flex-col"
+      >
         <div className="h-14 shrink-0 border-b border-slate-200 flex items-center gap-3 px-5">
           {loading ? (
-            <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+            <Loader2 aria-hidden="true" className="w-4 h-4 motion-safe:animate-spin motion-reduce:animate-pulse text-blue-600" />
           ) : (
             <>
               <h2 className="text-sm font-bold text-slate-900 truncate">
@@ -100,9 +106,9 @@ export function SequenceDetail({
           <button
             onClick={onClose}
             aria-label="Close"
-            className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400"
+            className={`ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 ${FOCUS_RING}`}
           >
-            <X className="w-4 h-4" />
+            <X aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
 
@@ -118,18 +124,18 @@ export function SequenceDetail({
               <button
                 onClick={() => setConfirmLaunch(true)}
                 disabled={busy}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 text-white px-4 py-2 text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                className={`inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 text-white px-4 py-2 text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50 ${FOCUS_RING}`}
               >
-                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {busy ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
                 Launch
               </button>
             ) : (
               <button
                 onClick={() => act("pause")}
                 disabled={busy}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 text-white px-4 py-2 text-xs font-semibold hover:bg-amber-600 disabled:opacity-50"
+                className={`inline-flex items-center gap-1.5 rounded-xl bg-amber-500 text-white px-4 py-2 text-xs font-semibold hover:bg-amber-600 disabled:opacity-50 ${FOCUS_RING}`}
               >
-                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Pause className="w-3.5 h-3.5" />}
+                {busy ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Pause aria-hidden="true" className="w-3.5 h-3.5" />}
                 Pause
               </button>
             )}
@@ -137,16 +143,16 @@ export function SequenceDetail({
 
           <section>
             <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2 flex items-center gap-1.5">
-              <Mail className="w-3.5 h-3.5" /> Sequence steps & performance
+              <Mail aria-hidden="true" className="w-3.5 h-3.5" /> Sequence steps & performance
             </h3>
             <div className="space-y-2">
               {stats.length === 0 && !loading && (
-                <p className="text-xs text-slate-400">No steps.</p>
+                <p className="text-xs text-slate-600">No steps.</p>
               )}
               {stats.map((s) => (
                 <div key={s.step_id} className="rounded-xl border border-slate-200 p-3.5">
                   <div className="flex items-start gap-2">
-                    <span className="shrink-0 rounded-lg bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                    <span className="shrink-0 rounded-lg bg-slate-100 px-1.5 py-0.5 text-[11px] font-bold text-slate-500">
                       Step {s.step_number}
                     </span>
                     <div className="min-w-0">
@@ -162,8 +168,8 @@ export function SequenceDetail({
                     <span>{s.bounced} bounced</span>
                     <span className="font-semibold text-slate-700">{s.reply_rate}% reply rate</span>
                     {s.variants?.winner && (
-                      <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
-                        <Trophy className="w-3 h-3" /> Winner: {s.variants.winner.toUpperCase()}
+                      <span className="inline-flex items-center gap-1 rounded-lg bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[11px] font-bold text-amber-700">
+                        <Trophy aria-hidden="true" className="w-3 h-3" /> Winner: {s.variants.winner.toUpperCase()}
                       </span>
                     )}
                   </div>
@@ -190,11 +196,11 @@ export function SequenceDetail({
 
           <section>
             <h3 className="text-xs font-bold uppercase tracking-wide text-slate-500 mb-2 flex items-center gap-1.5">
-              <Users className="w-3.5 h-3.5" /> Recipients ({targets.length})
+              <Users aria-hidden="true" className="w-3.5 h-3.5" /> Recipients ({targets.length})
             </h3>
             <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-72 overflow-y-auto">
               {targets.length === 0 && (
-                <p className="text-xs text-slate-400 p-3">No recipients yet.</p>
+                <p className="text-xs text-slate-600 p-3">No recipients yet.</p>
               )}
               {targets.map((t) => (
                 <div key={t.contact_id} className="flex items-center gap-3 px-3.5 py-2.5">
@@ -207,7 +213,7 @@ export function SequenceDetail({
                     )}
                   </div>
                   {t.is_verified && (
-                    <span className="ml-auto shrink-0 rounded-lg bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                    <span className="ml-auto shrink-0 rounded-lg bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[11px] font-bold text-emerald-700">
                       verified
                     </span>
                   )}
@@ -231,7 +237,7 @@ export function SequenceDetail({
           >
             <div className="flex items-start gap-3">
               <span className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-4 h-4" />
+                <AlertTriangle aria-hidden="true" className="w-4 h-4" />
               </span>
               <div className="min-w-0">
                 <h3 id="launch-confirm-title" className="text-sm font-bold text-slate-900">
@@ -246,14 +252,14 @@ export function SequenceDetail({
 
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">
+                <span className="text-[11px] uppercase font-bold text-slate-600 block mb-0.5">
                   Recipients
                 </span>
                 <div className="text-xl font-extrabold text-slate-900">{targets.length}</div>
                 <div className="text-[11px] text-slate-500">email{targets.length === 1 ? "" : "s"} in this blast</div>
               </div>
               <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">
+                <span className="text-[11px] uppercase font-bold text-slate-600 block mb-0.5">
                   Steps
                 </span>
                 <div className="text-xl font-extrabold text-slate-900">{stats.length}</div>
@@ -272,16 +278,16 @@ export function SequenceDetail({
             <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100">
               <button
                 onClick={() => setConfirmLaunch(false)}
-                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs"
+                className={`px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs ${FOCUS_RING}`}
               >
                 Cancel
               </button>
               <button
                 onClick={() => act("launch")}
                 disabled={busy || targets.length === 0}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs disabled:opacity-50"
+                className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs disabled:opacity-50 ${FOCUS_RING}`}
               >
-                {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {busy ? <Loader2 aria-hidden="true" className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
                 Launch {targets.length} recipient{targets.length === 1 ? "" : "s"}
               </button>
             </div>

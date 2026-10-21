@@ -3,6 +3,7 @@
 import * as Toast from "@radix-ui/react-toast";
 import { useSyncExternalStore } from "react";
 import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
+import { FOCUS_RING } from "@/components/focusRing";
 
 /**
  * Toaster — the app-wide notification surface.
@@ -109,9 +110,9 @@ export function Toaster() {
             }}
             className={`pointer-events-auto flex items-start gap-3 rounded-xl border bg-white p-4 shadow-lg ${
               meta.ringClass
-            } data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom-2 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-right-full`}
+            } motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-2 motion-safe:data-[state=open]:fade-in-0 motion-safe:data-[state=closed]:animate-out motion-safe:data-[state=closed]:fade-out-80 motion-safe:data-[state=closed]:slide-out-to-right-full`}
           >
-            <Icon className={`w-5 h-5 shrink-0 mt-0.5 ${meta.iconClass}`} />
+            <Icon aria-hidden="true" className={`w-5 h-5 shrink-0 mt-0.5 ${meta.iconClass}`} />
             <div className="min-w-0 flex-1">
               <Toast.Title className="text-[13px] font-semibold text-slate-900 leading-snug">
                 {t.title}
@@ -124,9 +125,9 @@ export function Toaster() {
             </div>
             <Toast.Close
               aria-label="Dismiss notification"
-              className="shrink-0 rounded-md p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              className={`shrink-0 rounded-md p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-100 motion-safe:transition-colors ${FOCUS_RING}`}
             >
-              <X className="w-3.5 h-3.5" />
+              <X aria-hidden="true" className="w-3.5 h-3.5" />
             </Toast.Close>
           </Toast.Root>
         );

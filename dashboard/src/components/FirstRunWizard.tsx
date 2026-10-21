@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Rocket,
@@ -13,6 +13,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { api, ProviderPreset } from "@/lib/api";
+import { FOCUS_RING } from "@/components/focusRing";
 
 const STORAGE_KEY = "leadforge.setup.v1";
 
@@ -40,6 +41,7 @@ export function FirstRunWizard() {
   const [warned, setWarned] = useState(false);
   const [tracking, setTracking] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,6 +77,47 @@ export function FirstRunWizard() {
     }
     setOpen(false);
   };
+
+  // Move focus into the wizard when it opens so keyboard users are not left
+  // behind on the page underneath, and keep Tab inside the dialog while it is
+  // open (it is a modal — the page behind it is not reachable).
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => dialogRef.current?.focus(), 0);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusables = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.getClientRects().length > 0);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
 
   const pick = (p: ProviderPreset) => {
     setProvider(p);
@@ -147,22 +190,32 @@ export function FirstRunWizard() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/50" />
-      <div className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden">
+      <div className="absolute inset-0 bg-slate-900/50" aria-hidden="true" />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lf-wizard-title"
+        tabIndex={-1}
+        className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden focus-visible:outline-none"
+      >
         {/* Header */}
         <div className="border-b border-slate-200 px-6 py-4 flex items-center gap-3">
-          <span className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+          <span
+            aria-hidden="true"
+            className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"
+          >
             <Wand2 className="w-4 h-4" />
           </span>
           <div>
-            <h2 className="text-sm font-bold text-slate-900">
+            <h2 id="lf-wizard-title" className="text-sm font-bold text-slate-900">
               {step < 4 ? stepTitles[step] || "Almost done!" : "You're all set!"}
             </h2>
             <div className="flex items-center gap-1.5 mt-1">
               {[0, 1, 2, 3].map((i) => (
                 <span
                   key={i}
-                  className={`h-1 w-6 rounded-full transition-colors ${
+                  className={`h-1 w-6 rounded-full motion-safe:transition-colors ${
                     step >= i ? "bg-blue-500" : "bg-slate-200"
                   }`}
                 />
@@ -172,9 +225,9 @@ export function FirstRunWizard() {
           <button
             onClick={() => finish(step === 4 ? "done" : "skipped")}
             aria-label={step === 4 ? "Close" : "Skip setup"}
-            className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400"
+            className={`ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 ${FOCUS_RING}`}
           >
-            <X className="w-4 h-4" />
+            <X aria-hidden="true" className="w-4 h-4" />
           </button>
         </div>
 
@@ -207,14 +260,14 @@ export function FirstRunWizard() {
                   </span>
                 </li>
               </ul>
-              <p className="text-[11px] text-slate-400">
+              <p className="text-[11px] text-slate-600">
                 No credit card, no API keys, no AI keys needed. Everything runs on your machine.
               </p>
               <button
                 onClick={() => setStep(1)}
-                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700"
+                className={`w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 ${FOCUS_RING}`}
               >
-                Get started <ArrowRight className="w-4 h-4" />
+                Get started <ArrowRight aria-hidden="true" className="w-4 h-4" />
               </button>
             </div>
           )}
@@ -229,14 +282,14 @@ export function FirstRunWizard() {
                   <button
                     key={p.id}
                     onClick={() => pick(p)}
-                    className="rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-blue-400 hover:bg-blue-50/40 transition-colors"
+                    className={`rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-blue-400 hover:bg-blue-50/40 motion-safe:transition-colors ${FOCUS_RING}`}
                   >
                     <span className="text-sm font-semibold text-slate-900">{p.label}</span>
                   </button>
                 ))}
               </div>
               {!provider && (
-                <p className="text-[11px] text-slate-400">
+                <p className="text-[11px] text-slate-600">
                   Not sure? Gmail and Outlook are the most common.
                 </p>
               )}
@@ -260,13 +313,13 @@ export function FirstRunWizard() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@gmail.com"
-                  className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                  className={`w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:outline-none focus:border-blue-300 ${FOCUS_RING}`}
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   App password{" "}
-                  <span className="font-normal text-slate-400">
+                  <span className="font-normal text-slate-600">
                     (the special one, not your login password)
                   </span>
                 </label>
@@ -275,29 +328,31 @@ export function FirstRunWizard() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="16-character app password"
-                  className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                  className={`w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm focus:bg-white focus:outline-none focus:border-blue-300 ${FOCUS_RING}`}
                 />
               </div>
               <details className="rounded-xl border border-slate-200 px-3.5 py-2.5">
-                <summary className="text-[11px] font-semibold text-slate-500 cursor-pointer">
+                <summary
+                  className={`text-[11px] font-semibold text-slate-500 cursor-pointer ${FOCUS_RING}`}
+                >
                   Advanced — server settings (auto-filled, expand to edit)
                 </summary>
                 <div className="grid grid-cols-3 gap-2 mt-2.5">
                   <input
                     value={smtpHost}
                     onChange={(e) => setSmtpHost(e.target.value)}
-                    className="col-span-2 h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono"
+                    className={`col-span-2 h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono ${FOCUS_RING}`}
                     aria-label="SMTP host"
                   />
                   <input
                     type="number"
                     value={smtpPort}
                     onChange={(e) => setSmtpPort(parseInt(e.target.value) || 587)}
-                    className="h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono text-center"
+                    className={`h-9 px-2.5 rounded-lg border border-slate-200 text-xs font-mono text-center ${FOCUS_RING}`}
                     aria-label="SMTP port"
                   />
                 </div>
-                <p className="text-[10px] text-slate-400 mt-1.5">
+                <p className="text-[11px] text-slate-600 mt-1.5">
                   Reply detection will use {imapHost || "your provider's IMAP"} automatically.
                 </p>
               </details>
@@ -317,23 +372,27 @@ export function FirstRunWizard() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setStep(1)}
-                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  className={`rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 ${FOCUS_RING}`}
                 >
                   Back
                 </button>
                 <button
                   onClick={connect}
                   disabled={busy || !email.trim() || !password || !smtpHost.trim()}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 ${FOCUS_RING}`}
                 >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+                  {busy ? (
+                    <Loader2 aria-hidden="true" className="w-4 h-4 motion-safe:animate-spin motion-reduce:animate-pulse" />
+                  ) : (
+                    <Mail aria-hidden="true" className="w-4 h-4" />
+                  )}
                   Connect &amp; test
                 </button>
               </div>
               {warned && (
                 <button
                   onClick={() => setStep(3)}
-                  className="w-full text-[11px] font-semibold text-slate-400 hover:text-slate-600"
+                  className={`w-full text-[11px] font-semibold text-slate-600 hover:text-slate-800 ${FOCUS_RING}`}
                 >
                   Continue anyway (I&apos;ll fix it later from Settings)
                 </button>
@@ -358,7 +417,7 @@ export function FirstRunWizard() {
                 value={tracking}
                 onChange={(e) => setTracking(e.target.value)}
                 placeholder="https://api.yourdomain.com"
-                className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-300"
+                className={`w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50/50 text-sm font-mono focus:bg-white focus:outline-none focus:border-blue-300 ${FOCUS_RING}`}
                 aria-label="Public backend URL"
               />
               {error && (
@@ -374,22 +433,22 @@ export function FirstRunWizard() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setStep(2)}
-                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  className={`rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 ${FOCUS_RING}`}
                 >
                   Back
                 </button>
                 <button
                   onClick={() => saveTracking(true)}
                   disabled={busy}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 ${FOCUS_RING}`}
                 >
-                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  {busy ? <Loader2 aria-hidden="true" className="w-4 h-4 motion-safe:animate-spin motion-reduce:animate-pulse" /> : null}
                   Save &amp; finish
                 </button>
               </div>
               <button
                 onClick={() => saveTracking(false)}
-                className="w-full text-[11px] font-semibold text-slate-400 hover:text-slate-600"
+                className={`w-full text-[11px] font-semibold text-slate-600 hover:text-slate-800 ${FOCUS_RING}`}
               >
                 Skip this step
               </button>
@@ -410,14 +469,14 @@ export function FirstRunWizard() {
                 <Link
                   href="/find"
                   onClick={() => finish("done")}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700"
+                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 text-white py-2.5 text-sm font-semibold hover:bg-blue-700 ${FOCUS_RING}`}
                 >
-                  Find leads <ArrowRight className="w-4 h-4" />
+                  Find leads <ArrowRight aria-hidden="true" className="w-4 h-4" />
                 </Link>
                 <Link
                   href="/sequences"
                   onClick={() => finish("done")}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                  className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 ${FOCUS_RING}`}
                 >
                   Build a sequence
                 </Link>
