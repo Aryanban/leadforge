@@ -9,8 +9,8 @@
 
 ## ✅ Status: Wave 0 + Wave 1 shipped, plus the People table
 
-**345 backend tests pass** (was 196). Frontend: `tsc --noEmit` clean, `npm run build` green,
-46 Playwright specs that can now actually fail the build.
+**404 backend tests pass**. The dashboard currently lists 51 Playwright tests, including
+route accessibility checks. Type checking and production builds are enforced in CI.
 
 | # | Fix | Before | After |
 |---|-----|--------|-------|
@@ -652,19 +652,20 @@ surfaced in the wizard. **Fix (full):** a structured `ICPFilters` model — `ind
 `cities`, `areas`, `pincodes`, `company_size_min/max`, `revenue_band`, `tech`, `titles`,
 `seniority`, `has_gstin`, `city_tier`.
 
-### 2c. Source trust is a hand-written table that isn't applied to most leads
+### 2c. Source trust still needs outcome-based calibration
 
-`qualifier/source_trust.py:25-36` is a literal dict of 10 constants. The primary scrape
-path writes `source` values `"playwright_maps"`, `"playwright_single"`, `"http_fallback"`,
-`"google_maps_seed"` — **none of which are in the table**, so the modifier is skipped
-entirely for every lead the dashboard produces. The API then *reports* a modifier that was
-never applied (verified mismatch). And `int(round(delta))` collapses the whole trust range
-into ±4 points, so IndiaMART (0.60) gets **no discount** while JustDial (0.50) gets −2.
+The code now recognizes the live scrape source names, applies the trust modifier at full
+precision, and records each source's own deduplicated ranked leads. Its running average is
+weighted by the number of leads ranked, so duplicate results from a second source no longer
+inherit the first source's score.
 
-Separately, `discovery/pipeline.py:152-157` records **the same `avg_score` for every
-source** in every run (it ranks the union across all sources, then attributes that list to
-each source). So the "learned" source routing prefers whichever source returns the most
-junk.
+What remains: `qualifier/source_trust.py` still uses fixed priors. `SourceStats.avg_score`
+is an ICP-relative quality score, not an observed email-deliverability, phone-validity, or
+positive-reply rate. A future calibration pass should use those explicit outcomes, keep a
+minimum sample threshold, and retain the prior where evidence is sparse. Until then, the
+score modifier is a documented prior and source ordering is the part that learns from
+observed discovery results. A `score_samples` counter marks legacy blended averages so
+their first correctly attributed score replaces the old value instead of inheriting it.
 
 ### 2d. The score is cached at enrichment time and never recomputed
 

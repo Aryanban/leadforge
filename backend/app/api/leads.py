@@ -18,7 +18,7 @@ from app.models.campaign import Campaign
 from app.models.campaign_step import CampaignStep
 from app.campaigns.sender import resolve_city
 from app.campaigns.suppression import is_suppressed, add_suppression
-from app.enricher.email_finder import calculate_lead_quality_score
+from app.enricher.email_finder import calculate_lead_quality_score, EMAIL_REGEX as SCRAPED_EMAIL_REGEX
 from app.enricher.ai_icebreaker import generate_ai_icebreaker
 from app.dedupe.match import find_existing_business, normalize_phone, canonical_domain
 
@@ -722,6 +722,7 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
             lead = item["lead"]
             raw_phone = item["phone"]
             raw_email = item["email"]
+            emails = item.get("emails") or ([raw_email] if raw_email else [])
             raw_name = lead["name"]
 
             digits_only = "".join(filter(str.isdigit, raw_phone or ""))
@@ -745,7 +746,7 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
                     "email": raw_email,
                     "is_verified": False,
                     "whatsapp_link": wa_link,
-                }],
+                } for email in (emails or [None])],
             )
 
             payloads.append({
@@ -767,9 +768,9 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
                 "score": score_info["score"],
             })
 
-            item["_contact"] = {
+            item["_contacts"] = [{
                 "first_name": raw_name.split()[0] if raw_name else "Contact",
-                "email": raw_email,
+                "email": email,
                 "phone": raw_phone,
                 "whatsapp_link": wa_link,
                 "is_verified": False,
@@ -778,7 +779,7 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
                 "is_free_email": False,
                 "unsubscribed": False,
                 "source": "csv_import",
-            }
+            } for email in (emails or [None])]
 
         result = await db.execute(
             Business.__table__.insert().returning(Business.__table__.c.id),
@@ -791,9 +792,10 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
             index.add(business_id, place_id=item["lead"].get("place_id"),
                       phone=item["phone"], website=item["lead"].get("website"),
                       name=item["lead"]["name"])
-            contact = dict(item["_contact"])
-            contact["business_id"] = business_id
-            contact_payloads.append(contact)
+            for contact in item["_contacts"]:
+                contact_row = dict(contact)
+                contact_row["business_id"] = business_id
+                contact_payloads.append(contact_row)
 
         if contact_payloads:
             await db.execute(Contact.__table__.insert(), contact_payloads)
@@ -841,38 +843,38 @@ async def _flush_import_chunk(db: AsyncSession, chunk: List[dict],
         business = item["business"]
         business_id = item["business_id"]
         raw_email = item["email"]
+        emails = item.get("emails") or ([raw_email] if raw_email else [])
         raw_phone = item["phone"]
         raw_name = item["lead"]["name"]
 
         contact_list = []
-        if raw_email or raw_phone:
-            existing_contact = None
-            if raw_email:
+        if emails or raw_phone:
+            existing_contacts = contacts_by_business.get(business_id, [])
+            for email in emails or [None]:
                 existing_contact = next(
-                    (c for c in contacts_by_business.get(business_id, [])
-                     if c.email == raw_email),
+                    (c for c in existing_contacts if c.email and c.email.lower() == (email or "").lower()),
                     None,
-                )
-
-            if existing_contact is not None:
-                if raw_phone and not existing_contact.phone:
-                    existing_contact.phone = raw_phone
-                contact_list.append(existing_contact)
-            else:
-                digits_only = "".join(filter(str.isdigit, raw_phone or ""))
-                wa_link = f"https://wa.me/{digits_only}" if digits_only else None
-                contact = Contact(
-                    business_id=business_id,
-                    first_name=raw_name.split()[0] if raw_name else "Contact",
-                    email=raw_email,
-                    phone=raw_phone,
-                    whatsapp_link=wa_link,
-                    is_verified=False,
-                    source="csv_import"
-                )
-                db.add(contact)
-                contact_list.append(contact)
-                contacts_by_business.setdefault(business_id, []).append(contact)
+                ) if email else None
+                if existing_contact is not None:
+                    if raw_phone and not existing_contact.phone:
+                        existing_contact.phone = raw_phone
+                    contact_list.append(existing_contact)
+                else:
+                    digits_only = "".join(filter(str.isdigit, raw_phone or ""))
+                    wa_link = f"https://wa.me/{digits_only}" if digits_only else None
+                    contact = Contact(
+                        business_id=business_id,
+                        first_name=raw_name.split()[0] if raw_name else "Contact",
+                        email=email,
+                        phone=raw_phone,
+                        whatsapp_link=wa_link,
+                        is_verified=False,
+                        source="csv_import"
+                    )
+                    db.add(contact)
+                    contact_list.append(contact)
+                    existing_contacts.append(contact)
+            contacts_by_business.setdefault(business_id, existing_contacts)
 
         score_info = calculate_lead_quality_score(business, contact_list)
         business.extra_data = {
@@ -985,6 +987,23 @@ async def import_leads_csv(
 
         raw_phone = (row.get(phone_col) or "").strip() if phone_col else None
         raw_email = (row.get(email_col) or "").strip() if email_col else None
+        # One cell can hold several addresses.
+        #
+        # An Excel export of a "primary contact" column routinely comes out
+        # as "a@acme.in,b@acme.in", and the cell was stored verbatim - so the
+        # contact's email was a string that was not an address at all, and
+        # the two real addresses behind it were lost. The first address is
+        # the contact; the rest become their own contacts.
+        email_matches = SCRAPED_EMAIL_REGEX.findall(raw_email or "")
+        emails: List[str] = []
+        seen_emails = set()
+        for address in email_matches:
+            normalized = address.strip().lower()
+            if normalized and normalized not in seen_emails:
+                seen_emails.add(normalized)
+                emails.append(address.strip())
+        if emails:
+            raw_email = emails[0]
         raw_website = (row.get(website_col) or "").strip() if website_col else None
         raw_address = (row.get(address_col) or "").strip() if address_col else None
         raw_industry = (row.get(industry_col) or "").strip() if industry_col else "General"
@@ -1007,6 +1026,7 @@ async def import_leads_csv(
                 "business_id": matched_id,
                 "lead": lead,
                 "email": raw_email,
+                "emails": emails,
                 "phone": raw_phone,
                 "industry": raw_industry,
                 "raw_phone": raw_phone,
@@ -1021,6 +1041,7 @@ async def import_leads_csv(
                 "business_id": None,
                 "lead": lead,
                 "email": raw_email,
+                "emails": emails,
                 "phone": raw_phone,
                 "industry": raw_industry,
                 "raw_phone": raw_phone,
@@ -1036,7 +1057,6 @@ async def import_leads_csv(
 
     if pending:
         await _flush_import_chunk(db, pending, index)
-
     await db.commit()
     return {
         "status": "success",
@@ -1184,4 +1204,3 @@ async def suppress_lead(business_id: int, db: AsyncSession = Depends(get_db)):
         c.unsubscribed = True
     await db.commit()
     return {"business_id": business_id, "suppressed": added}
-

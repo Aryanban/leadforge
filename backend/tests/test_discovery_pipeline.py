@@ -2,10 +2,11 @@ import pytest
 from sqlalchemy import select
 
 from app.database import async_session_maker
-from app.discovery.pipeline import run_discovery
+from app.discovery.pipeline import _record_source_stats, run_discovery
 from app.models.business import Business
 from app.models.icp_profile import ICPProfile
 from app.models.scrape_job import ScrapeJob
+from app.models.source_stats import SourceStats
 
 
 @pytest.fixture
@@ -74,6 +75,16 @@ async def test_run_discovery_dedupes_and_ranks(db_session, icp_profile, stub_sou
         assert saved_job.result["per_source_counts"]["fake_source"] == 2
         assert saved_job.result["per_source_counts"]["second_source"] == 1
 
+        # Source performance is measured against businesses that source
+        # actually contributed after deduplication. The duplicate returned by
+        # second_source must not inherit fake_source's ranked scores.
+        stats = (await db.execute(select(SourceStats))).scalars().all()
+        stats_by_source = {row.source: row for row in stats}
+        assert stats_by_source["fake_source"].enriched > 0
+        assert stats_by_source["fake_source"].avg_score > 0
+        assert stats_by_source["second_source"].enriched == 0
+        assert stats_by_source["second_source"].avg_score == 0
+
         # The duplicate lead across the two sources must only exist once.
         businesses = (await db.execute(select(Business))).scalars().all()
         names = [b.name for b in businesses]
@@ -82,3 +93,33 @@ async def test_run_discovery_dedupes_and_ranks(db_session, icp_profile, stub_sou
 
         for lead in saved_job.result["ranked_leads"]:
             assert lead["score"] >= icp_profile.min_score
+
+
+@pytest.mark.asyncio
+async def test_source_stats_replace_legacy_average_then_weight_new_observations(db_session):
+    legacy = SourceStats(
+        source="example_source",
+        niche="Dentist",
+        area="Delhi",
+        leads_found=100,
+        enriched=100,
+        avg_score=90.0,
+        score_samples=0,
+    )
+    db_session.add(legacy)
+    await db_session.commit()
+
+    await _record_source_stats(
+        "example_source", "Dentist", "Delhi", 5,
+        [{"score": 40, "tier": "WARM"}],
+    )
+    await _record_source_stats(
+        "example_source", "Dentist", "Delhi", 5,
+        [{"score": 60, "tier": "HOT"}],
+    )
+
+    async with async_session_maker() as db:
+        stats = (await db.execute(select(SourceStats))).scalars().one()
+        assert stats.avg_score == 50.0
+        assert stats.score_samples == 2
+        assert stats.enriched == 102

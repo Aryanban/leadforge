@@ -35,7 +35,10 @@ from app.verifier.email_status import (
 
 logger = logging.getLogger(__name__)
 
-EMAIL_REGEX = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+#: The last domain label must be letters. Without that, "bootstrap@4.0.0"
+#: - a package version scraped out of a script URL - passes as a
+#: well-formed address.
+EMAIL_REGEX = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$'
 
 #: SMTP codes that mean "try again later" - never "valid".
 _GREYLIST_CODES = (450, 451, 452, 453, 421)

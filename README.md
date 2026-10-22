@@ -10,7 +10,7 @@
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-Native%20Server-8A2BE2.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Twenty CRM](https://img.shields.io/badge/CRM-Twenty%20Compatible-indigo.svg?style=for-the-badge)](https://twenty.com/)
-[![Tests Passing](https://img.shields.io/badge/Tests-223%2F223%20Passing_(100%25)-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
+[![Backend Tests](https://img.shields.io/badge/Backend%20Tests-404%20Passing-10b981.svg?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/Aryanban/leadforge)
 [![Docker](https://img.shields.io/badge/Deployment-Docker%20Compose-2496ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
 <br />
@@ -353,7 +353,7 @@ Prefer the terminal? The **CLI** and **MCP agent** usage are documented below.
 
 ---
 
-## 🧪 Automated Test Suite (234/234 Passing)
+## 🧪 Automated Test Suite
 
 LeadForge includes a comprehensive Pytest suite covering email status/role/free/typo/gibberish classification, multi-probe catch-all sentinel, SMTP verification status mapping, per-domain pattern learning, seed harvesting, lead scoring and source-trust ranking, spam checking, AI icebreakers, Indian phone/STD normalisation and DND scrubbing, deliverability (bounce classification, suppression, warm-up ramps, India send-timing advice), deduplication/entity resolution, discovery pipeline, and the sources + leads/campaign/ICP APIs:
 
@@ -365,7 +365,7 @@ LeadForge includes a comprehensive Pytest suite covering email status/role/free/
 (cd backend && ../.venv/bin/python -m pytest -q tests/)
 ```
 
-All **234/234 tests pass synchronously** in under 2s — no network, no browser, no external services required.
+The current backend suite has **404 passing tests** and runs without external network services. The dashboard has **51 Playwright tests**, including route accessibility checks; those require the dashboard test environment.
 
 ### Accessibility & layout stability are enforced in CI
 

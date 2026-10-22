@@ -89,7 +89,17 @@ SITE_HEADERS = {
     "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
 }
 
-EMAIL_REGEX = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+')
+#: An address, with the last domain label required to be letters.
+#:
+#: The old pattern ended in ``[a-zA-Z0-9-.]+``, so it matched the package
+#: version in a script URL: ``bootstrap@4.0.0``, ``lodash@4.18.1``,
+#: ``core-js-bundle@3.2.1``. Those became contact rows - junk addresses
+#: for a JavaScript library, attached to a real business. A domain's last
+#: label is always alphabetic (or punycode), so requiring two or more
+#: letters at the end rejects the version and keeps the address.
+EMAIL_REGEX = re.compile(
+    r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}'
+)
 PHONE_REGEX = re.compile(r'(\+?91[\s-]?[6789]\d{9}|0?[6789]\d{4}\s*\d{5}|0?[6789]\d{9}|\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})')
 
 EXCLUDED_EMAIL_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.css', '.js', '.woff', '.pdf')
