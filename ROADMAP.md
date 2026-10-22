@@ -7,10 +7,10 @@
 
 ---
 
-## ✅ Status: Wave 0 + Wave 1 shipped
+## ✅ Status: Wave 0 + Wave 1 shipped, plus the People table
 
-**229 backend tests pass** (was 196). Frontend: `tsc --noEmit` clean, `npm run build` green,
-21 Playwright specs that can now actually fail the build.
+**345 backend tests pass** (was 196). Frontend: `tsc --noEmit` clean, `npm run build` green,
+46 Playwright specs that can now actually fail the build.
 
 | # | Fix | Before | After |
 |---|-----|--------|-------|
@@ -34,7 +34,32 @@
 | — | Click tracking | didn't exist → WhatsApp handoff permanently empty | `/click` route + link rewriting; handoff now populates |
 | — | A/B testing | raw rates at n=10 | two-proportion z-test, n≥50, positive replies only |
 | — | ICP parser | silently dropped constraints | reports `unsupported_terms` + warnings; fixed corrupt exclusions |
-| — | Dashboard | dead Cmd+K, 15 `alert()`, no mobile, CI ignored types | wired search, toasts, mobile drawer, type-checked CI, 21 real e2e specs |
+| — | Dashboard | dead Cmd+K, 15 `alert()`, no mobile, CI ignored types | wired search, toasts, mobile drawer, type-checked CI, 46 real e2e specs |
+
+### Wave 2 — The People table, and the honesty work
+
+Apollo's core surface is **one row per human**, with attributes you can filter on.
+LeadForge had a business table with a nested contact, so the question the product
+exists to answer — *"show me every owner in Pune"* — could not even be expressed.
+
+| # | Fix | Before | After |
+|---|-----|--------|-------|
+| P1 | People endpoint | no person list at all | `GET /api/v1/contacts` — one row per human, 14 server-side filters, honest totals |
+| P2 | Fabricated founders | `first_name="Gurucity"`, `title="Owner / Decision Maker"` on every business | 126 of 149 rows counted as founders; now **no** invented names, and `person_identified` says which rows are real people |
+| P3 | Location | a free-text address blob | `city` / `state` / `market_tier` derived on write; "Jain Mandir Rd" is not a city |
+| P4 | Role taxonomy | US/EU titles only | `Proprietor`, `Promoter`, `Managing Director`, `Principal` — and word-boundary matching, because `"director"` contains `"cto"` |
+| P5 | Decision-maker extraction | a 4-title regex | JSON-LD, `Name — Title`, `Title: Name`, `Name is a Role`; testimonials stripped first |
+| P6 | People without an email | dropped on the floor | kept — a site that names its proprietor has told you who the decision maker is |
+| P7 | Company attributes | columns that nothing wrote | headcount, turnover band and technology read off the company's own site |
+| P8 | ICP-relative score | one global "how complete is this record" number | scored against the profile; the same lead moves when the ICP does |
+| P9 | Structured ICP | a word list — the one thing a salesperson cannot work with | headcount, turnover, size, tier, state, role, decision-makers-only, require-email |
+| P10 | Funnel | four flat counters | nine stages from "businesses found" to "interested", with the drop-off per stage |
+| P11 | Directory sources | 1 of 4 working — silently | Sulekha **working**; JustDial and IndiaMART **say why** they cannot be read |
+| P12 | HTTP layer | every directory request raised `TypeError` and was swallowed | httpx 0.26 proxy handling fixed; the layer works at all |
+| P13 | Boot backfills | reported success, changed nothing | raw SQL; two silent ORM traps that undid every correction |
+| P14 | Interrupted jobs | stuck at "running" forever | failed with the reason, so the operator can start them again |
+| P15 | India features | built, called from nowhere | festival line localised, WhatsApp routing live, A/B winner declared by the sender |
+| P16 | Copy kit | served by the API, reachable only by hand | in the step editor, where the email is written |
 
 ### Measured performance (500,000-lead SQLite database)
 
@@ -70,6 +95,10 @@ compares the SQL aggregation against a Python reference day by day.
 
 ## 0. Verdict
 
+> **This section is the original audit, kept as the record of what was wrong.**
+> The scorecard below is the *audit's* view, before Wave 0, Wave 1 and the
+> People table landed. The current state is in **Wave 2** above.
+
 LeadForge is a **competent single-shot mailer with a reply inbox attached**. The README
 describes Apollo. The code describes something meaningfully different.
 
@@ -83,7 +112,7 @@ But five product-killing bugs mean **the core loop does not work today**, and ro
 of the README's headline claims are false. Fixing the five blockers plus Wave 1 is roughly
 **3–5 days of work** and converts this from a demo into a product.
 
-**Scorecard vs Apollo (today):**
+**Scorecard vs Apollo (at the time of the audit):**
 
 | Capability | Apollo | LeadForge | Gap severity |
 |---|---|---|---|
@@ -734,6 +763,10 @@ context**. These are the features that make an Apollo clone irrelevant.
 
 ## 5. README truth-check (credibility)
 
+> **Kept as the record of what was false.** Most of these have since been
+> fixed, and the README now states the source coverage honestly — including
+> which directories cannot be read and why.
+
 Roughly a third of the README's headline claims are **false against the code**. A reviewer
 who runs the documented commands and finds them broken costs more credibility than any
 feature gap.
@@ -780,15 +813,31 @@ S24 token fallback + preview parity · S18+S19 MCP contact-ids and scrape scopin
 ICP-relative scoring · 2b structured ICP filters + honest warnings · 2c real source-trust
 feedback loop · S14/S15 decision-maker extraction · 2e analytics funnel · 2f A/B statistics ·
 S25 click tracking · S17 India-aware spam linter.
+> **Shipped.** The People table (`/contacts` + `/people`), ICP-relative scoring, structured
+> ICP criteria, decision-maker extraction, the analytics funnel, click tracking and the
+> A/B statistics are all in. Still open from this week: **2c** — the source-trust table is
+> hand-written constants and has never been *observed* — and **S17**, the India-aware spam
+> linter.
 
 **Week 3 — Make it ours** (2 weeks): GSTIN/Udyam registry · WhatsApp-first channel routing
 · real festival/IST send windows · multilingual copy · directory ecosystem expansion
 (JustDial/Sulekha/IndiaMART fixes) · rupee-denominated cost-vs-Apollo UI · a real design
 system + dark mode + mobile.
+> **Partly shipped.** WhatsApp-first routing now reaches the sender, the festival line is
+> localised, the copy kit is in the step editor, and Sulekha works. JustDial and IndiaMART
+> need a browser engine and are now honest about it rather than silently returning zero.
+> Still open: **GSTIN/Udyam**, **regional-language copy** beyond Hinglish, and
+> **festival/IST send windows** (the greeting is local, the *timing* is not).
 
 **Week 4 — Harden** (1 week): job queue with retries/DLQ · audit log · Prometheus metrics ·
 Alembic migrations (the dep is already in `requirements.txt` with zero migrations) ·
 Postgres in CI · e2e tests that actually fail the build.
+> **Partly shipped.** The e2e tests now fail the build (46 specs, including an axe-core
+> accessibility gate on every route), and an interrupted job is failed with its reason
+> instead of sitting at "running" forever. Still open: **a real job queue** (the in-process
+> path is still `BackgroundTasks`, which dies with the process), **audit log**,
+> **Prometheus metrics** and **Alembic migrations** (the schema sync is still additive-only
+> DDL, which works but is not versioned).
 
 ---
 
