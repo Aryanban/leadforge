@@ -23,6 +23,13 @@ class RawLead(TypedDict, total=False):
     price_tier: Optional[str]
     source: str
     query: str
+    #: A source-specific quality score on its own scale. Sulekha rates out of
+    #: 10, Google out of 5 - folding them into one `rating` field would
+    #: silently corrupt the 0-5 scale the scorer uses.
+    source_score: Optional[float]
+    source_score_max: Optional[float]
+    #: Whether the directory verified the listing itself.
+    source_verified: Optional[bool]
 
 
 class SourceHealth(TypedDict):
@@ -38,6 +45,11 @@ class Source(ABC):
     supports_india: bool = False
     supports_global: bool = False
 
+    #: Set by :meth:`_failed` so ``health()`` can explain an empty result.
+    #: A source that silently returns [] is indistinguishable from a niche
+    #: with no businesses, which is how a broken adapter hides for months.
+    _last_note: Optional[str] = None
+
     @abstractmethod
     def supports(self, niche: str, area: Optional[str]) -> bool:
         """Whether this source can serve the given niche/location."""
@@ -47,13 +59,18 @@ class Source(ABC):
         """Return raw leads for the niche+area. Failures must return []."""
 
     async def health(self) -> SourceHealth:
-        return {"source": self.name, "available": True, "note": None}
+        return {
+            "source": self.name,
+            "available": self._last_note is None,
+            "note": self._last_note,
+        }
 
     def build_query(self, niche: str, area: Optional[str]) -> str:
         return f"{niche} in {area}".strip() if area else niche.strip()
 
     def _failed(self, message: str) -> List[RawLead]:
         logger.warning(f"Source '{self.name}' failed: {message}")
+        self._last_note = message
         return []
 
 
@@ -72,6 +89,9 @@ def raw_lead(**fields: Any) -> RawLead:
         "is_claimed": True,
         "operational_status": None,
         "price_tier": None,
+        "source_score": None,
+        "source_score_max": None,
+        "source_verified": None,
     }
     base.update(fields)
     return RawLead(base)  # type: ignore[arg-type]

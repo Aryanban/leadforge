@@ -144,6 +144,24 @@ flowchart TD
 * **Review Sentiment Analysis**: Evaluates customer reviews, Google star ratings, municipal locations, and business categories.
 * **Personalized Hooks**: Automatically synthesizes authentic opening hooks, hyper-specific compliments, and category-relevant pain points tailored to each individual business prospect.
 
+### Source coverage
+
+Not every directory can be read without a browser, and this table says so
+rather than implying a coverage that is not there. The live status of each
+source is available at runtime: `GET /api/v1/icp/sources/health` probes every
+adapter concurrently and returns the reason for any failure.
+
+| Source | Status | What it actually returns |
+| :--- | :--- | :--- |
+| **Google Maps** | ✅ Working (primary) | Name, phone, website, address, rating, reviews, coordinates. Fastest path — no browser in the loop. |
+| **Sulekha** | ✅ Working | Name, address, locality, the Sulekha quality score (out of 10) and the "Verified by Sulekha" badge. **No phone** — the number sits behind a click-to-call wall. |
+| **IndiaMART** | ⚠️ Limited | A *product* supplier directory. Only the static promoted slots are server-rendered, so this returns real suppliers for a manufacturing/wholesale niche and nothing for a service niche. |
+| **JustDial** | ❌ Not readable server-side | The listing grid is loaded by a client-side XHR from a private endpoint, and JustDial resolves the city from the request IP (a `/Pune/` URL still returns Mumbai). Needs a browser engine. |
+
+The Sulekha score is kept in its own field rather than folded into the Google
+rating, because it is out of 10 and mixing the two would silently corrupt the
+0–5 scale the scorer uses.
+
 ### 5. Deterministic Lead Scoring & Bounce Suppression
 * **0–100 Weighted Quality Score**: Evaluates each lead across email deliverability ($w_e$), phone presence ($w_p$), website activity ($w_w$), Google rating ($w_r$), and unclaimed status ($w_u$):
   * **🔥 HOT (75–100)**: Verified email, active website, top ratings ($\ge 4.5$), high reviews.
@@ -280,7 +298,7 @@ how to fix it:
 | :--- | :--- | :--- |
 | 0 | **`/setup`** | **Connections hub + guided wizard.** First-time visitors get a 3-step wizard in plain English: pick your email provider (Gmail/Outlook/Zoho/Yahoo presets fill every server setting and explain exactly where to find an app password), connect + live-test the mailbox, optionally set your public URL. Afterwards the hub shows a readiness checklist, mailbox overview, every environment variable with its purpose, **editable quick settings** (public URL + proxies — saved for you, no file editing), a copy-paste MCP config, and the confirmation that **no AI API key is needed**. |
 | 1 | **`/scrape`** | Enter a query like *"Dentists in Austin TX"* → concurrent Google Maps scrape saves listings, then auto-discovers public emails from the businesses' websites and directories. |
-| 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (JustDial, directories, web). |
+| 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (Google Maps, Sulekha, and the directory adapters — see [Source coverage](#source-coverage)). |
 | 3 | **`/leads`** | Browse & search your database. Click any row to open the **detail drawer**: contacts, verification badges, full send history, one-click company suppression. Save current filters as **saved views** (Apollo dynamic lists) and bulk-select → Add to Sequence. |
 | 4 | **`/companies`** | The Accounts view: one row per company with contact coverage (total vs verified), rating, and location. |
 | 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — the only hard requirement for sending. Daily limit is capped at 50/day for warmup safety. |

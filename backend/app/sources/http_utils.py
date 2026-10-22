@@ -1,8 +1,9 @@
 import asyncio
+import inspect
 import logging
 import random
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 from bs4 import BeautifulSoup
@@ -80,6 +81,27 @@ def _proxy_pool() -> List[Optional[str]]:
     return urls or [None]
 
 
+def _supports_per_request_proxy() -> bool:
+    """True when the installed httpx accepts ``proxy=`` on a request.
+
+    httpx 0.26 (the version this project pins) takes the proxy on the
+    *client* only - ``AsyncClient.get()`` has no ``proxy`` keyword. httpx
+    0.28 added it to ``request()``/``get()``.
+
+    Passing ``proxy=`` to a 0.26 client raises
+    ``TypeError: get() got an unexpected keyword argument 'proxy'`` on the
+    first request, which ``fetch_html`` swallowed as a generic failure and
+    retried three more times before returning None. That made *every*
+    directory source - Sulekha included - look like it was simply returning
+    no results, when in fact nothing had ever been fetched.
+    """
+    try:
+        params = inspect.signature(httpx.AsyncClient.request).parameters
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+    return "proxy" in params
+
+
 def looks_blocked(html: Optional[str]) -> bool:
     """True when the response is an interstitial/captcha rather than content.
 
@@ -126,16 +148,35 @@ async def fetch_html(
     attempts = max(1, retries + 1)
     last_reason = "unknown"
 
-    # One client for the whole retry loop. A client per attempt meant a new
-    # TLS handshake and no connection reuse on every single request - the
-    # single cheapest performance win in this module.
-    client = httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=True,
-        headers={},
-        proxy=pool[0],
-        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-    )
+    # One client per proxy for the whole retry loop, created lazily.
+    #
+    # A client per *attempt* meant a new TLS handshake and no connection
+    # reuse on every single request - the single cheapest performance win
+    # in this module. But httpx 0.26 only accepts the proxy on the client,
+    # so a per-attempt proxy needs a per-proxy client. Keying the clients
+    # by proxy gives both: one reused connection pool for the common
+    # no-proxy case, and one client per egress when a pool is configured.
+    clients: Dict[Optional[str], httpx.AsyncClient] = {}
+
+    def _client_for(p: Optional[str]) -> httpx.AsyncClient:
+        client = clients.get(p)
+        if client is None:
+            kwargs = dict(
+                timeout=timeout,
+                follow_redirects=True,
+                headers={},
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+            if p:
+                kwargs["proxy"] = p
+            client = httpx.AsyncClient(**kwargs)
+            clients[p] = client
+        return client
+
+    # httpx >= 0.28 can take the proxy per request, so a single direct
+    # client is enough and the proxy can be rotated per attempt.
+    per_request_proxy = _supports_per_request_proxy()
+
     try:
         for attempt in range(attempts):
             chosen_proxy = proxy or random.choice(pool)
@@ -157,7 +198,12 @@ async def fetch_html(
                 "Cache-Control": "max-age=0",
             }
             try:
-                response = await client.get(url, headers=headers, proxy=chosen_proxy)
+                if per_request_proxy:
+                    response = await _client_for(None).get(
+                        url, headers=headers, proxy=chosen_proxy
+                    )
+                else:
+                    response = await _client_for(chosen_proxy).get(url, headers=headers)
 
                 if response.status_code == 200:
                     body = response.text
@@ -186,7 +232,8 @@ async def fetch_html(
         logger.debug(f"fetch_html {url} gave up after {attempts} attempts ({last_reason})")
         return None
     finally:
-        await client.aclose()
+        for client in clients.values():
+            await client.aclose()
 
 
 def slugify(value: str) -> str:

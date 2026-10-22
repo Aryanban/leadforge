@@ -166,6 +166,19 @@ async def list_sources():
     return list_available_sources()
 
 
+@router.get("/sources/health")
+async def sources_health():
+    """Live availability of every source, with the reason for any failure.
+
+    Probes the directories for real, so this is a moment-to-moment answer:
+    it is what tells the operator that "Sulekha found 10 dentists" and
+    "JustDial could not be read" are different situations.
+    """
+    from app.sources.router import source_health
+
+    return await source_health()
+
+
 @router.post("/{profile_id}/rank")
 async def rank_leads_for_profile(
     profile_id: int,

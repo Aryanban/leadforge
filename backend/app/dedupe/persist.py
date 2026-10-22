@@ -64,6 +64,12 @@ async def persist_raw_leads(
                 "is_claimed": lead.get("is_claimed", True),
                 "operational_status": lead.get("operational_status"),
                 "price_tier": lead.get("price_tier"),
+                # A directory's own quality score, kept apart from the
+                # 0-5 Google rating because it is on a different scale
+                # (Sulekha rates out of 10).
+                "source_score": lead.get("source_score"),
+                "source_score_max": lead.get("source_score_max"),
+                "source_verified": lead.get("source_verified"),
             },
         )
         db.add(business)

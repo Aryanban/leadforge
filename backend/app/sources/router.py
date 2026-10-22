@@ -159,3 +159,27 @@ def list_available_sources() -> List[Dict[str, Any]]:
         }
         for source in REGISTRY
     ]
+
+
+async def source_health() -> List[Dict[str, Any]]:
+    """Live availability for every registered source, probed concurrently.
+
+    A source that returns nothing must say why. "This niche has no
+    businesses" and "this adapter is broken" look identical from the
+    outside, which is how a dead source sits in a product that advertises
+    itself as multi-source for months.
+    """
+    async def _probe(source: Source) -> Dict[str, Any]:
+        try:
+            health = await source.health()
+        except Exception as e:  # a broken adapter must not break the probe
+            health = {"available": False, "note": f"{type(e).__name__}: {e}"}
+        return {
+            "name": source.name,
+            "supports_india": source.supports_india,
+            "supports_global": source.supports_global,
+            "available": bool(health.get("available")),
+            "note": health.get("note"),
+        }
+
+    return list(await asyncio.gather(*(_probe(s) for s in REGISTRY)))
