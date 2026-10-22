@@ -208,7 +208,11 @@ async def seed_initial_data_if_empty():
         # 4. Insert Sample Outreach Campaign
         camp = Campaign(
             name="Rohini Real Estate Dealers — DDA Blueprint Intro",
-            status=CampaignStatus.ACTIVE.value
+            # DRAFT, not ACTIVE. The scheduler advances every ACTIVE campaign
+            # on its own, so a seeded ACTIVE campaign meant that the moment a
+            # new user connected a sending mailbox, LeadForge started cold
+            # emailing the sample leads without anyone asking it to.
+            status=CampaignStatus.DRAFT.value
         )
         db.add(camp)
         await db.flush()

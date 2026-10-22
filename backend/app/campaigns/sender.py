@@ -488,7 +488,6 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         # round-trip per candidate, so a 500-target campaign spent 500
         # queries deciding who not to email.
         candidate_emails = [c.email for c, _b in candidates if c.email]
-        suppressed_emails = await filter_suppressed(db, candidate_emails)
         suppression_reasons = await suppressed_reasons(db, candidate_emails)
 
         for contact, business in candidates:
@@ -667,7 +666,9 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             # rewritten to the click tracker.
             if rendered_body_html:
                 rendered_body_html = _rewrite_links_for_tracking(
-                    rendered_body_html, tracking_base, send_record.id
+                    rendered_body_html,
+                    settings.TRACKING_DOMAIN.rstrip("/"),
+                    send_record.id,
                 )
 
             success, err = await send_single_email_async(

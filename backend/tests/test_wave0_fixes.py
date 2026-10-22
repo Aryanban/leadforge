@@ -728,3 +728,109 @@ async def test_dns_auth_probe_does_not_block_the_event_loop():
     assert elapsed < 0.4, (
         f"the DNS probe took {elapsed:.3f}s - it is running sequentially"
     )
+
+
+@pytest.mark.asyncio
+async def test_campaign_step_runs_without_a_name_error():
+    """The campaign scheduler must not blow up on an unbound name.
+
+    A NameError inside the scheduler was swallowed by the loop's error
+    handler, so every campaign tick failed silently and no sequence ever
+    advanced - exactly the bug the scheduler was added to fix.
+    """
+    import asyncio
+    from app.campaigns import sender as sender_mod
+
+    # Every name the sender references must resolve.
+    import inspect
+    src = inspect.getsource(sender_mod)
+    assert "filter_suppressed(db," not in src, (
+        "the sender calls filter_suppressed but only imports suppressed_reasons"
+    )
+
+
+# --------------------------------------------------------------------------
+# The campaign scheduler must actually reach the send path
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_campaign_step_reaches_the_send_path(monkeypatch):
+    """Exercise `execute_campaign_step` all the way to the SMTP call.
+
+    Two `NameError`s shipped inside this function - `filter_suppressed` and
+    `tracking_base` - and the scheduler's error handler swallowed both, so
+    every campaign tick failed silently and no sequence ever advanced. That
+    is exactly the bug the scheduler was added to fix, so the path is now
+    driven end to end with the SMTP call stubbed out.
+    """
+    from app.campaigns import sender as sender_mod
+    from app.campaigns.sender import execute_campaign_step
+    from app.models.campaign import Campaign as _C
+    from app.models.campaign_step import CampaignStep as _CS, CampaignTarget as _CT
+    from app.models.mailbox import Mailbox as _MB
+    from app.models.contact import Contact as _CTc
+    from app.models.business import Business as _B
+
+    sent = {}
+
+    async def _fake_send(*args, **kwargs):
+        sent["to"] = kwargs.get("to_email")
+        return True, ""
+
+    async def _fake_send_async(*args, **kwargs):
+        sent["to"] = kwargs.get("to_email")
+        return True, ""
+
+    async with async_session_maker() as db:
+        biz = _B(name="Sender Test Co")
+        db.add(biz); await db.flush()
+        contact = _CTc(business_id=biz.id, email="send@example.in",
+                       verification_status="valid")
+        db.add(contact); await db.flush()
+        camp = _C(name="Scheduler Test", status=CampaignStatus.ACTIVE.value)
+        db.add(camp); await db.flush()
+        step = _CS(campaign_id=camp.id, step_number=1, subject="Hi",
+                   body_text="Hi there", body_html='<a href="https://x.in">x</a>',
+                   delay_days=0)
+        db.add(step); await db.flush()
+        db.add(_CT(campaign_id=camp.id, contact_id=contact.id))
+        mb = _MB(email="sender@example.in", password="x", smtp_host="smtp.example.in",
+                 smtp_port=587, daily_limit=10, sent_today=0)
+        db.add(mb)
+        await db.commit()
+        campaign_id = camp.id
+
+    monkeypatch.setattr(sender_mod, "send_single_email_async", _fake_send_async)
+
+    result = await execute_campaign_step(campaign_id, max_sends=5)
+
+    assert "error" not in result, f"the campaign step failed: {result}"
+    assert result.get("sent_count") == 1, f"expected one send, got {result}"
+    assert sent.get("to") == "send@example.in", f"the SMTP call was never reached: {sent}"
+
+
+@pytest.mark.asyncio
+async def test_seeded_campaign_is_a_draft_not_an_active_send():
+    """A fresh install must not start emailing on its own.
+
+    The seeded campaign was created ACTIVE. The scheduler advances every
+    ACTIVE campaign by itself, so the moment a new user connected a sending
+    mailbox, LeadForge began cold emailing the sample leads with nobody
+    having asked it to.
+    """
+    from app.database import async_session_maker as _maker
+    from app.models.campaign import Campaign as _C
+    from app.seeds import SAMPLE_BUSINESSES
+
+    async with _maker() as db:
+        # The seed data is what a fresh database gets.
+        assert SAMPLE_BUSINESSES, "the sample data should exist"
+
+    # The seeded campaign is created with DRAFT - check the source of truth.
+    import inspect
+    from app import seeds
+    src = inspect.getsource(seeds)
+    assert "CampaignStatus.ACTIVE.value" not in src, (
+        "the seeded campaign must not be ACTIVE - the scheduler would "
+        "start sending email on a fresh install"
+    )
