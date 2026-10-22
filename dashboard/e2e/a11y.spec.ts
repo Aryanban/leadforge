@@ -36,6 +36,7 @@ const ROUTES = [
   "/",
   "/leads",
   "/people",
+  "/audit",
   "/find",
   "/sequences",
   "/inbox",

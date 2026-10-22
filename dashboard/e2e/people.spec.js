@@ -108,19 +108,24 @@ test('clicking a filter changes the rows on screen', async ({ page: pw }) => {
   await pw.goto(BASE + '/people', { waitUntil: 'networkidle' });
   await pw.waitForTimeout(700);
 
-  const before = await pw.locator('tbody tr').count();
+  // The row *count* is not a reliable signal here: the page size is 25, and
+  // a page of people and a page of business targets are both a full page.
+  // The total in the footer is the thing that actually changes.
+  const totalText = () => pw.getByText(/· \d+ people/).first().innerText();
+  const before = await totalText();
+
   const toggle = pw.getByRole('button', { name: 'Show business targets' });
   await toggle.click();
-  await pw.waitForTimeout(1200);
+  await pw.waitForTimeout(1500);
 
-  const after = await pw.locator('tbody tr').count();
-  expect(after, 'the filter should change the visible rows').not.toBe(before);
+  const after = await totalText();
+  expect(after, 'the filter did not change the result set').not.toBe(before);
 
   // And the filter chip must be removable.
   await expect(pw.getByRole('button', { name: /Including business targets/ })).toBeVisible();
   await pw.getByRole('button', { name: /Remove filter: Rows/ }).click();
-  await pw.waitForTimeout(1200);
-  expect(await pw.locator('tbody tr').count()).toBe(before);
+  await pw.waitForTimeout(1500);
+  expect(await totalText()).toBe(before);
 });
 
 test('the people table is a real table with headers on a desktop viewport', async ({ page: pw }) => {

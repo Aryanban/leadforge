@@ -14,9 +14,11 @@ from .suppression import Suppression
 # missing from `create_all` - which is how `saved_lists` ended up absent
 # from freshly-created databases (and blew up the test-suite reset).
 from .saved_list import SavedList
+from .audit_event import AuditEvent
 
 __all__ = [
     "Business",
+    "AuditEvent",
     "Contact",
     "Campaign",
     "CampaignStatus",

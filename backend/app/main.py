@@ -7,7 +7,7 @@ import logging
 
 from app.config import settings
 from typing import Optional, Any, Dict, List
-from app.api import scraper, leads, people, enricher, campaigns, analytics, mailboxes, icp, inbox, lists, suppression, setup
+from app.api import scraper, leads, people, enricher, campaigns, analytics, audit, mailboxes, icp, inbox, lists, suppression, setup
 from app.campaigns import tracker
 from app.database import Base, engine, async_session_maker, ensure_schema
 from app.seeds import seed_initial_data_if_empty
@@ -191,6 +191,7 @@ app.include_router(inbox.router, prefix=f"{settings.API_V1_STR}/inbox", tags=["I
 app.include_router(lists.router, prefix=f"{settings.API_V1_STR}/lists", tags=["Saved Lists"], dependencies=_auth_dependency)
 app.include_router(suppression.router, prefix=f"{settings.API_V1_STR}/suppression", tags=["Suppression"], dependencies=_auth_dependency)
 app.include_router(setup.router, prefix=f"{settings.API_V1_STR}/setup", tags=["Setup"], dependencies=_auth_dependency)
+app.include_router(audit.router, prefix=f"{settings.API_V1_STR}/audit", tags=["Audit Log"], dependencies=_auth_dependency)
 
 # Aliases without /v1 for backwards compatibility (/api/...)
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics Legacy"], dependencies=_auth_dependency)

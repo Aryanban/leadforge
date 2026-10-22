@@ -27,6 +27,7 @@ import {
 import dynamic from "next/dynamic";
 import { api, DashboardStats, FunnelResponse, TaskItem, TimeSeriesResponse } from "@/lib/api";
 import FunnelCard from "@/components/FunnelCard";
+import ActivityFeed from "@/components/ActivityFeed";
 import {
   CardSkeleton,
   EmptyState,
@@ -426,7 +427,10 @@ export default function Home() {
       {/* The funnel. Placed right after the KPI cards because it is the
           answer to "where do my leads go?" - the KPIs say how much there
           is, the funnel says where it is lost. */}
-      {funnel && <FunnelCard funnel={funnel} />}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <FunnelCard funnel={funnel} />
+        <ActivityFeed />
+      </div>
 
       {/* Quick Launch Panel */}
       <div className="rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white p-6 shadow-xs">

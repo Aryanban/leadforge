@@ -70,6 +70,7 @@ test('API health and core endpoints respond', async ({ request }) => {
     '/icp/sources/list', '/campaigns/india/advisor',
     '/contacts', '/contacts/stats', '/contacts/facets',
     '/analytics/funnel',
+    '/audit', '/audit/types',
   ];
   // Health lives outside /api, so it is asked of the backend directly.
   const health = await request.get(DIRECT_API + '/health');

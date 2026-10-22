@@ -26,6 +26,7 @@ from app.campaigns.bounces import classify_bounce, HARD, SOFT
 from app.campaigns.suppression import is_suppressed, add_suppression, suppressed_reasons
 from app.models.suppression import PERMANENT_REASONS
 from app.campaigns.india_copy import localize_template
+from app.models.audit_event import record as record_audit
 from app.sources import in_phone
 from app.campaigns.warmup import (
     mailbox_age_days, ramp_limit, mailbox_health, is_mailbox_usable,
@@ -786,6 +787,20 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 mailbox.sent_today = (mailbox.sent_today or 0) + 1
                 mailbox.sent_today_date = today
                 sent_count += 1
+                await record_audit(
+                    db,
+                    "email_sent",
+                    f"Emailed {contact.email}"
+                    + (f" at {business.name}" if business else ""),
+                    entity_type="contact",
+                    entity_id=contact.id,
+                    detail={
+                        "campaign_id": campaign_id,
+                        "step_id": step.id,
+                        "mailbox_id": mailbox.id,
+                        "variant": getattr(send_record, "variant_used", None),
+                    },
+                )
             elif bounce_reason == HARD:
                 send_record.status = "bounced"
                 send_record.error_message = err
@@ -794,6 +809,17 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 contact.is_verified = False
                 await add_suppression(db, contact.email, HARD, detail=err)
                 bounced_count += 1
+                await record_audit(
+                    db,
+                    "email_bounced",
+                    f"{contact.email} bounced permanently and was suppressed",
+                    entity_type="contact",
+                    entity_id=contact.id,
+                    detail={
+                        "campaign_id": campaign_id,
+                        "reason": err[:200] if err else None,
+                    },
+                )
             elif bounce_reason == SOFT:
                 send_record.status = "failed"
                 send_record.error_message = err
@@ -832,6 +858,15 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         # to the end of the campaign with both variants still live and no
         # verdict - which is exactly when you want the answer.
         ab_winner = await _finalise_ab_winner(db, campaign_id)
+        if ab_winner:
+            await record_audit(
+                db,
+                "ab_winner_declared",
+                f"Subject variant {ab_winner.upper()} won the A/B test",
+                entity_type="campaign",
+                entity_id=campaign_id,
+                detail={"winner": ab_winner},
+            )
 
         result = {
             "campaign_id": campaign_id,
@@ -847,6 +882,15 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             # difference between "we will send this" and "we lost this".
             result["deferred_count"] = deferred_count
             result["deferred_until"] = deferred_until
+            await record_audit(
+                db,
+                "send_deferred",
+                f"{deferred_count} send(s) deferred - outside the India send "
+                f"window (opens at {deferred_until})",
+                entity_type="campaign",
+                entity_id=campaign_id,
+                detail={"deferred": deferred_count, "opens_at": deferred_until},
+            )
             result["message"] = (
                 f"{deferred_count} send(s) deferred: it is outside the India "
                 f"send window. The next window opens at {deferred_until}, and "

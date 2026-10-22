@@ -93,6 +93,23 @@ export interface TimeSeriesResponse {
   period_days: number;
 }
 
+export interface AuditEvent {
+  id: number;
+  event_type: string;
+  event_label: string;
+  entity_type: string | null;
+  entity_id: number | null;
+  actor: string;
+  summary: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface AuditResponse {
+  total: number;
+  events: AuditEvent[];
+}
+
 export interface FunnelStage {
   key: string;
   label: string;
@@ -914,6 +931,16 @@ export const api = {
     request<TimeSeriesResponse>(`/analytics/timeseries?days=${days}`),
   getFunnel: (days = 90) =>
     request<FunnelResponse>(`/analytics/funnel?days=${days}`),
+  getAuditEvents: (params: { limit?: number; offset?: number; event_type?: string; entity_type?: string; entity_id?: number } = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === "") return;
+      q.set(k, String(v));
+    });
+    return request<AuditResponse>(`/audit?${q.toString()}`);
+  },
+  getAuditTypes: () =>
+    request<{ types: Array<{ event_type: string; label: string; count: number }> }>("/audit/types"),
   getTasks: () => request<{ tasks: TaskItem[] }>("/analytics/tasks"),
   listInbox: (category?: string) =>
     request<InboxResponse>(`/inbox${category ? `?category=${encodeURIComponent(category)}` : ""}`),

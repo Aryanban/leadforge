@@ -17,6 +17,7 @@ import {
   Inbox,
   Building2,
   Activity,
+  History,
   Plug,
   UserRound,
   X,
@@ -59,7 +60,10 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     title: "Deliverability",
-    items: [{ href: "/email-health", label: "Email Health", icon: Activity }],
+    items: [
+      { href: "/email-health", label: "Email Health", icon: Activity },
+      { href: "/audit", label: "Activity Log", icon: History },
+    ],
   },
   {
     title: "Setup",
