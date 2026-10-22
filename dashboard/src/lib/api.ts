@@ -93,6 +93,31 @@ export interface TimeSeriesResponse {
   period_days: number;
 }
 
+export interface FunnelStage {
+  key: string;
+  label: string;
+  count: number;
+  hint: string;
+}
+
+export interface FunnelResponse {
+  days: number;
+  stages: FunnelStage[];
+  rates: Record<string, number | null>;
+  by_source: Array<{ source: string; count: number }>;
+  by_mailbox: Array<{
+    email: string;
+    sent: number;
+    opened: number;
+    replied: number;
+    bounced: number;
+    open_rate: number | null;
+    reply_rate: number | null;
+    bounce_rate: number | null;
+  }>;
+  reply_categories: Array<{ category: string; count: number }>;
+}
+
 export interface TaskItem {
   key: string;
   label: string;
@@ -847,6 +872,8 @@ export const api = {
   // --- Apollo parity: analytics, tasks, inbox, saved lists, suppression ----
   getTimeseries: (days = 30) =>
     request<TimeSeriesResponse>(`/analytics/timeseries?days=${days}`),
+  getFunnel: (days = 90) =>
+    request<FunnelResponse>(`/analytics/funnel?days=${days}`),
   getTasks: () => request<{ tasks: TaskItem[] }>("/analytics/tasks"),
   listInbox: (category?: string) =>
     request<InboxResponse>(`/inbox${category ? `?category=${encodeURIComponent(category)}` : ""}`),

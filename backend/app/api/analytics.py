@@ -1,8 +1,8 @@
 import urllib.parse
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, case, or_
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 
 from app.database import get_db
@@ -15,6 +15,11 @@ from app.models.mailbox import Mailbox
 from app.models.suppression import Suppression
 
 router = APIRouter()
+
+#: The reply categories that count as a positive outcome. Kept in step with
+#: the A/B winner's definition, so "Interested" means the same thing in the
+#: funnel as it does in a subject-line test.
+POSITIVE_REPLY_CATEGORIES = ("interested",)
 
 @router.get("/stats")
 async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
@@ -113,6 +118,206 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)) -> Dict[str, A
         "active_campaigns": active_campaigns,
         "recent_leads": recent_leads,
         "recent_jobs": recent_jobs
+    }
+
+
+@router.get("/funnel")
+async def get_funnel(
+    days: int = Query(90, ge=7, le=730),
+    include_demo: bool = Query(
+        True, description="Include the sample rows a fresh database is seeded with."
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """The pipeline, stage by stage.
+
+    The dashboard used to show four flat counters - businesses, contacts,
+    verified, sent - which cannot answer the only question that matters:
+    *where does the pipeline leak?* A list of 500 businesses that produced
+    12 emails and 1 reply looks the same as a list of 12 businesses that
+    produced 1 email and 1 reply, and the operator cannot tell which part
+    to fix.
+
+    Every stage is a real predicate over the data, and each stage's rate
+    is relative to the one before it, so the drop-off is visible.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    demo_clause = [] if include_demo else [
+        or_(Business.is_demo == False, Business.is_demo.is_(None))
+    ]
+
+    # --- stage 1: businesses discovered ------------------------------------
+    res = await db.execute(
+        select(func.count(Business.id)).where(*demo_clause)
+    )
+    discovered = res.scalar() or 0
+
+    # --- stage 2: a business with a reachable phone ------------------------
+    res = await db.execute(
+        select(func.count(Business.id)).where(
+            *demo_clause, Business.phone.isnot(None), Business.phone != ""
+        )
+    )
+    with_phone = res.scalar() or 0
+
+    # --- stage 3: a contact with an email address --------------------------
+    res = await db.execute(
+        select(func.count(func.distinct(Contact.business_id)))
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Contact.email.isnot(None), Contact.email != "")
+    )
+    with_email = res.scalar() or 0
+
+    # --- stage 4: an email that verified as deliverable ---------------------
+    res = await db.execute(
+        select(func.count(func.distinct(Contact.business_id)))
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Contact.is_verified == True)
+    )
+    verified = res.scalar() or 0
+
+    # --- stage 5: targeted in a campaign -----------------------------------
+    res = await db.execute(
+        select(func.count(func.distinct(Send.contact_id)))
+        .join(Contact, Send.contact_id == Contact.id)
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Send.created_at >= since)
+    )
+    targeted = res.scalar() or 0
+
+    # --- stage 6: actually sent --------------------------------------------
+    res = await db.execute(
+        select(func.count(Send.id))
+        .join(Contact, Send.contact_id == Contact.id)
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Send.status == "sent", func.coalesce(Send.sent_at, Send.created_at) >= since)
+    )
+    sent = res.scalar() or 0
+
+    # --- stage 7: opened ----------------------------------------------------
+    res = await db.execute(
+        select(func.count(Send.id))
+        .join(Contact, Send.contact_id == Contact.id)
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Send.status == "sent", Send.opened == True,
+               func.coalesce(Send.sent_at, Send.created_at) >= since)
+    )
+    opened = res.scalar() or 0
+
+    # --- stage 8: replied ---------------------------------------------------
+    res = await db.execute(
+        select(func.count(Send.id))
+        .join(Contact, Send.contact_id == Contact.id)
+        .join(Business, Contact.business_id == Business.id)
+        .where(*demo_clause, Send.replied == True, func.coalesce(Send.sent_at, Send.created_at) >= since)
+    )
+    replied = res.scalar() or 0
+
+    # --- stage 9: a positive reply ------------------------------------------
+    res = await db.execute(
+        select(func.count(Send.id))
+        .join(Contact, Send.contact_id == Contact.id)
+        .join(Business, Contact.business_id == Business.id)
+        .where(
+            *demo_clause, Send.replied == True, func.coalesce(Send.sent_at, Send.created_at) >= since,
+            Send.reply_category.in_(POSITIVE_REPLY_CATEGORIES),
+        )
+    )
+    positive = res.scalar() or 0
+
+    stages = [
+        {"key": "discovered", "label": "Businesses found", "count": discovered,
+         "hint": "Every business in the database"},
+        {"key": "phone", "label": "With a phone", "count": with_phone,
+         "hint": "Reachable on a call or WhatsApp"},
+        {"key": "email", "label": "With an email", "count": with_email,
+         "hint": "An address was found for the business"},
+        {"key": "verified", "label": "Verified email", "count": verified,
+         "hint": "The address passed deliverability checks"},
+        {"key": "targeted", "label": "In a sequence", "count": targeted,
+         "hint": f"Targeted in the last {days} days"},
+        {"key": "sent", "label": "Emails sent", "count": sent,
+         "hint": f"Delivered in the last {days} days"},
+        {"key": "opened", "label": "Opened", "count": opened,
+         "hint": "The recipient opened it"},
+        {"key": "replied", "label": "Replied", "count": replied,
+         "hint": "Any reply at all"},
+        {"key": "positive", "label": "Interested", "count": positive,
+         "hint": "A reply the operator can act on"},
+    ]
+
+    def _rate(numerator: int, denominator: int) -> Optional[float]:
+        if not denominator:
+            return None
+        return round((numerator / denominator) * 100, 1)
+
+    # --- where the leads came from -----------------------------------------
+    source_rows = (await db.execute(
+        select(Business.source, func.count(Business.id))
+        .where(*demo_clause)
+        .group_by(Business.source)
+        .order_by(func.count(Business.id).desc())
+        .limit(15)
+    )).all()
+    by_source = [
+        {"source": source or "unknown", "count": count}
+        for source, count in source_rows
+    ]
+
+    # --- reply categories ---------------------------------------------------
+    category_rows = (await db.execute(
+        select(Send.reply_category, func.count(Send.id))
+        .where(Send.replied == True, func.coalesce(Send.sent_at, Send.created_at) >= since)
+        .group_by(Send.reply_category)
+    )).all()
+    reply_categories = [
+        {"category": category or "uncategorised", "count": count}
+        for category, count in category_rows
+    ]
+
+    # --- per mailbox --------------------------------------------------------
+    mailbox_rows = (await db.execute(
+        select(Mailbox.email, func.count(Send.id),
+               func.count(Send.id).filter(Send.opened == True),
+               func.count(Send.id).filter(Send.replied == True),
+               func.count(Send.id).filter(Send.bounced == True))
+        .join(Send, Send.mailbox_id == Mailbox.id)
+        .where(Send.status == "sent", func.coalesce(Send.sent_at, Send.created_at) >= since)
+        .group_by(Mailbox.email)
+        .order_by(func.count(Send.id).desc())
+    )).all()
+    by_mailbox = [
+        {
+            "email": email,
+            "sent": sent,
+            "opened": opened,
+            "replied": replied,
+            "bounced": bounced,
+            "open_rate": _rate(opened, sent),
+            "reply_rate": _rate(replied, sent),
+            "bounce_rate": _rate(bounced, sent),
+        }
+        for email, sent, opened, replied, bounced in mailbox_rows
+    ]
+
+    return {
+        "days": days,
+        "stages": stages,
+        "rates": {
+            "phone": _rate(with_phone, discovered),
+            "email": _rate(with_email, with_phone),
+            "verified": _rate(verified, with_email),
+            "sent": _rate(sent, targeted),
+            "open": _rate(opened, sent),
+            "reply": _rate(replied, sent),
+            "positive": _rate(positive, replied),
+        },
+        "by_source": by_source,
+        "by_mailbox": by_mailbox,
+        "reply_categories": reply_categories,
     }
 
 

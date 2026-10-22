@@ -25,7 +25,8 @@ import {
   Database
 } from "lucide-react";
 import dynamic from "next/dynamic";
-import { api, DashboardStats, TaskItem, TimeSeriesResponse } from "@/lib/api";
+import { api, DashboardStats, FunnelResponse, TaskItem, TimeSeriesResponse } from "@/lib/api";
+import FunnelCard from "@/components/FunnelCard";
 import {
   CardSkeleton,
   EmptyState,
@@ -176,6 +177,7 @@ function HomeReadiness() {
 export default function Home() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [series, setSeries] = useState<TimeSeriesResponse | null>(null);
+  const [funnel, setFunnel] = useState<FunnelResponse | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -187,18 +189,21 @@ export default function Home() {
       // Real data only — an offline/empty backend shows empty states, never
       // fake demo numbers (old behaviour lied to the operator about their
       // actual outreach volume).
-      const [data, ts, taskRes] = await Promise.all([
+      const [data, ts, taskRes, fn] = await Promise.all([
         api.getStats(),
         api.getTimeseries(30),
         api.getTasks(),
+        api.getFunnel(90).catch(() => null),
       ]);
       setStats(data);
       setSeries(ts);
       setTasks(taskRes.tasks ?? []);
+      setFunnel(fn);
     } catch (err) {
       console.warn("Could not fetch dashboard data:", err);
       setStats(null);
       setSeries(null);
+      setFunnel(null);
       setTasks([]);
       setError(
         err instanceof Error && err.message
@@ -417,6 +422,11 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* The funnel. Placed right after the KPI cards because it is the
+          answer to "where do my leads go?" - the KPIs say how much there
+          is, the funnel says where it is lost. */}
+      {funnel && <FunnelCard funnel={funnel} />}
 
       {/* Quick Launch Panel */}
       <div className="rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white p-6 shadow-xs">

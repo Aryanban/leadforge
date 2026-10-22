@@ -69,6 +69,7 @@ test('API health and core endpoints respond', async ({ request }) => {
     '/mailboxes', '/scraper/jobs', '/icp',
     '/icp/sources/list', '/campaigns/india/advisor',
     '/contacts', '/contacts/stats', '/contacts/facets',
+    '/analytics/funnel',
   ];
   // Health lives outside /api, so it is asked of the backend directly.
   const health = await request.get(DIRECT_API + '/health');
@@ -103,6 +104,47 @@ for (const page of PAGES) {
   });
 }
 
+
+test('the funnel shows the pipeline and its drop-offs', async ({ page: pw }) => {
+  await pw.goto(BASE, { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(1200);
+
+  await expect(
+    pw.getByRole('heading', { name: 'Where the pipeline leaks' })
+  ).toBeVisible();
+
+  // The stages are a real list, not decoration.
+  const stages = pw.locator('ol li');
+  expect(await stages.count(), 'the funnel has stages').toBeGreaterThan(4);
+
+  // Every stage must carry a number.
+  const text = (await pw.locator('ol').first().innerText()).trim();
+  expect(text.length).toBeGreaterThan(30);
+  expect(/\d/.test(text), 'the funnel shows counts').toBe(true);
+});
+
+test('the funnel endpoint agrees with the numbers it reports', async ({ request }) => {
+  const res = await request.get(PROXY_BASE + '/api/v1/analytics/funnel');
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+
+  expect(Array.isArray(body.stages)).toBe(true);
+  expect(body.stages.length).toBeGreaterThan(4);
+
+  // The stages are a funnel: each one cannot exceed the one before it.
+  for (let i = 1; i < body.stages.length; i++) {
+    const prev = body.stages[i - 1];
+    const cur = body.stages[i];
+    // "In a sequence" counts people targeted, which can exceed the
+    // businesses with an email because a business can be in two
+    // campaigns. Every other stage is a strict narrowing.
+    if (cur.key === 'targeted') continue;
+    expect(
+      cur.count,
+      `${cur.key} (${cur.count}) should not exceed ${prev.key} (${prev.count})`
+    ).toBeLessThanOrEqual(prev.count);
+  }
+});
 
 test('sidebar navigation reaches every page', async ({ page: pw }) => {
   await pw.goto(BASE, { waitUntil: 'networkidle' });
