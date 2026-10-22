@@ -7,7 +7,7 @@
 
 ---
 
-## ✅ Status: Wave 0 + Wave 1 shipped, plus the People table
+## ✅ Status: core reliability, People, and India workflow waves shipped
 
 **404 backend tests pass**. The dashboard currently lists 51 Playwright tests, including
 route accessibility checks. Type checking and production builds are enforced in CI.
@@ -819,30 +819,30 @@ ICP-relative scoring · 2b structured ICP filters + honest warnings · 2c real s
 feedback loop · S14/S15 decision-maker extraction · 2e analytics funnel · 2f A/B statistics ·
 S25 click tracking · S17 India-aware spam linter.
 > **Shipped.** The People table (`/contacts` + `/people`), ICP-relative scoring, structured
-> ICP criteria, decision-maker extraction, the analytics funnel, click tracking and the
-> A/B statistics are all in. Still open from this week: **2c** — the source-trust table is
-> hand-written constants and has never been *observed* — and **S17**, the India-aware spam
-> linter.
+> ICP criteria, decision-maker extraction, the analytics funnel, click tracking, A/B
+> statistics and the India-aware spam linter are in. Still open from this week: **2c** —
+> the score modifier uses fixed source priors, while learned source ordering uses discovery
+> quality rather than verified deliverability or outreach outcomes.
 
 **Week 3 — Make it ours** (2 weeks): GSTIN/Udyam registry · WhatsApp-first channel routing
 · real festival/IST send windows · multilingual copy · directory ecosystem expansion
 (JustDial/Sulekha/IndiaMART fixes) · rupee-denominated cost-vs-Apollo UI · a real design
 system + dark mode + mobile.
-> **Partly shipped.** WhatsApp-first routing now reaches the sender, the festival line is
-> localised, the copy kit is in the step editor, and Sulekha works. JustDial and IndiaMART
-> need a browser engine and are now honest about it rather than silently returning zero.
-> Still open: **GSTIN/Udyam**, **regional-language copy** beyond Hinglish, and
-> **festival/IST send windows** (the greeting is local, the *timing* is not).
+> **Core workflow shipped.** GSTIN and Udyam identifiers can be extracted from company
+> sites; mobile leads can route to the WhatsApp handoff; festival copy, regional-language
+> closers and 09:00–20:00 IST send windows are wired into the workflow. Sulekha returns live
+> results. JustDial and IndiaMART still require a browser engine and report that limitation.
+> Remaining: verified government-registry lookup for GSTIN/Udyam, direct WhatsApp messaging,
+> broader localization beyond email closers, and additional accessible directory sources.
 
 **Week 4 — Harden** (1 week): job queue with retries/DLQ · audit log · Prometheus metrics ·
 Alembic migrations (the dep is already in `requirements.txt` with zero migrations) ·
 Postgres in CI · e2e tests that actually fail the build.
-> **Partly shipped.** The e2e tests now fail the build (46 specs, including an axe-core
-> accessibility gate on every route), and an interrupted job is failed with its reason
-> instead of sitting at "running" forever. Still open: **a real job queue** (the in-process
-> path is still `BackgroundTasks`, which dies with the process), **audit log**,
-> **Prometheus metrics** and **Alembic migrations** (the schema sync is still additive-only
-> DDL, which works but is not versioned).
+> **Partly shipped.** Celery workers and beat are available when enabled, with an in-process
+> fallback; interrupted jobs are failed with their reason. The audit log is shipped, and
+> the current Playwright suite lists 51 tests with route accessibility checks. Remaining:
+> make durable queue operation the production default, add Prometheus metrics, add versioned
+> Alembic migrations, and run Postgres in CI (schema sync remains additive-only DDL).
 
 ---
 
