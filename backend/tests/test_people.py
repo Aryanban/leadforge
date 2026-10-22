@@ -23,10 +23,12 @@ from app.enricher.people_extraction import (
     is_plausible_person_name,
     merge_executives,
 )
+from app.enricher.email_finder import _merge_company_profile
 from app.enricher.seniority import (
     DECISION_MAKER_BANDS,
     classify_seniority,
     detect_technologies,
+    extract_company_profile,
     is_decision_maker,
     parse_employee_count,
     parse_revenue,
@@ -138,6 +140,54 @@ def test_detect_technologies_only_reports_what_is_present():
     assert "Tally" in found
     assert "WordPress" not in found
     assert detect_technologies("") == []
+
+
+def test_company_profile_reads_size_revenue_and_technology():
+    """The attributes an ICP is expressed in - size, turnover, stack."""
+    html = """
+    <html><body>
+      <script>var x = "500 employees";</script>
+      <p>We are a team of 35 employees serving Pune.</p>
+      <p>Annual turnover of 12 crore.</p>
+      <script src="https://cdn.shopify.com/s.js"></script>
+      <a href="/tally">Accounting with Tally</a>
+    </body></html>
+    """
+    profile = extract_company_profile(html)
+    assert profile["employee_count"] == 35
+    assert profile["size_bucket"] == "11-50"
+    assert profile["revenue_band"] == "10-50Cr"
+    assert "Shopify" in profile["technologies"]
+    assert "Tally" in profile["technologies"]
+
+
+def test_company_profile_reports_nothing_when_the_site_says_nothing():
+    """A guessed headcount is worse than a blank one."""
+    profile = extract_company_profile("<html><body><p>Welcome to our site.</p></body></html>")
+    assert "employee_count" not in profile
+    assert "revenue" not in profile
+    assert "technologies" not in profile
+    assert extract_company_profile(None) == {}
+
+
+def test_company_profile_ignores_numbers_in_script_tags():
+    """A copyright year or a JS constant is not a headcount."""
+    profile = extract_company_profile(
+        "<html><body><script>var founded = 1998; var staff = 200;</script>"
+        "<p>Quality service since 1998.</p></body></html>"
+    )
+    assert "employee_count" not in profile
+
+
+def test_company_profile_merges_across_pages():
+    """The first page that states a value wins; technologies accumulate."""
+    target: dict = {}
+    _merge_company_profile(target, {"employee_count": 35, "size_bucket": "11-50"})
+    _merge_company_profile(target, {"technologies": ["Shopify"]})
+    _merge_company_profile(target, {"employee_count": 2, "technologies": ["Tally"]})
+    assert target["employee_count"] == 35
+    assert target["size_bucket"] == "11-50"
+    assert target["technologies"] == ["Shopify", "Tally"]
 
 
 # --------------------------------------------------------------------------

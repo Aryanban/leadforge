@@ -21,6 +21,7 @@ from app.enricher.people_extraction import (
     merge_executives,
     _strip_testimonials,
 )
+from app.enricher.seniority import extract_company_profile
 from app.sources import in_phone
 from app.verifier.smtp_verifier import (
     verify_email,
@@ -733,7 +734,29 @@ def _extract_page_contacts(
         "socials": socials,
         "executives": executives,
         "internal_links": internal_links,
+        "company_profile": extract_company_profile(html_text),
     }
+
+
+def _merge_company_profile(
+    target: Dict[str, Any],
+    addition: Optional[Dict[str, Any]],
+) -> None:
+    """Folds one page's company profile into the crawl's running total.
+
+    The first page that states a value wins for the numeric fields, and
+    technologies accumulate. A later page that merely repeats a number
+    ("© 2024, 50 employees") must not overwrite a specific one.
+    """
+    if not addition:
+        return
+    for key in ("employee_count", "size_bucket", "revenue", "revenue_band"):
+        if target.get(key) is None and addition.get(key) is not None:
+            target[key] = addition[key]
+    techs = set(target.get("technologies") or [])
+    techs.update(addition.get("technologies") or [])
+    if techs:
+        target["technologies"] = sorted(techs)
 
 
 async def _fetch_page_html(client: httpx.AsyncClient, url: str) -> Optional[str]:
@@ -762,6 +785,8 @@ async def _crawl_with_client(
     whatsapp_links: Set[str] = set()
     socials: Dict[str, str] = {}
     executives: List[Dict[str, str]] = []
+    #: Company size / revenue / technology, merged across the pages crawled.
+    company_profile: Dict[str, Any] = {}
 
     parsed_base = urlparse(url)
     base_domain = parsed_base.netloc.lower().replace("www.", "")
@@ -862,6 +887,7 @@ async def _crawl_with_client(
             whatsapp_links.update(data["whatsapp"])
             socials.update(data["socials"])
             executives.extend(data["executives"])
+            _merge_company_profile(company_profile, data.get("company_profile"))
 
             for link in data["internal_links"]:
                 norm = _normalize_crawl_url(link)
@@ -880,6 +906,7 @@ async def _crawl_with_client(
         "whatsapp": list(whatsapp_links)[0] if whatsapp_links else None,
         "socials": socials,
         "executives": merge_executives(executives)[:8],
+        "company_profile": company_profile,
         "homepage_html": homepage_used,
     }
 
@@ -1028,6 +1055,20 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     discovered_whatsapp = crawl_res.get("whatsapp")
                 if crawl_res.get("socials"):
                     discovered_socials.update(crawl_res.get("socials"))
+                # Company size / revenue / technology, read off the company's
+                # own site. These are the attributes an ICP is expressed in
+                # ("11-50 employees, over 10Cr turnover, uses Shopify"), so
+                # without them the filter can only be "has an email".
+                profile = crawl_res.get("company_profile") or {}
+                if profile:
+                    if profile.get("employee_count") is not None:
+                        business.employee_count = profile["employee_count"]
+                        business.size_bucket = profile.get("size_bucket")
+                    if profile.get("revenue") is not None:
+                        business.revenue = profile["revenue"]
+                        business.revenue_band = profile.get("revenue_band")
+                    if profile.get("technologies"):
+                        business.technologies = profile["technologies"]
             except Exception as crawl_err:
                 logger.warning(f"Error crawling website for {business.name}: {crawl_err}")
 
@@ -1161,6 +1202,14 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 if contact.email:
                     existing_by_email[contact.email.lower()] = contact
 
+        #: The people identified on the company's own site.
+        #:
+        #: Assigned here, outside the per-address loop, because it is also
+        #: needed when there are no addresses at all - a business whose site
+        #: names its proprietor but whose mailbox could not be found still
+        #: has a decision maker.
+        execs = crawl_res.get("executives", []) if business.website else []
+
         for email in all_emails:
             existing_contact = existing_by_email.get(email.lower())
 
@@ -1192,7 +1241,6 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             clean_phone = in_phone.to_e164(
                 business.phone or (list(all_phones)[0] if all_phones else None)
             )
-            execs = crawl_res.get("executives", []) if business.website else []
 
             # Bind an executive to THIS address only when the address plausibly
             # belongs to them.

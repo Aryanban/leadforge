@@ -334,7 +334,34 @@ async def people_facets(
         "industry": await _counts(Business.industry, 30),
         "size_bucket": await _counts(Business.size_bucket, 10),
         "revenue_band": await _counts(Business.revenue_band, 10),
+        "technologies": await _technology_counts(db),
     }
+
+
+async def _technology_counts(db: AsyncSession) -> List[Dict[str, Any]]:
+    """Counts per technology.
+
+    The column is a JSON array, so this reads every row and counts in
+    Python. It is a small table - the lead database, not a warehouse - and
+    a JSON1 query would be a portability problem for no real gain.
+    """
+    rows = (await db.execute(
+        select(Business.technologies)
+        .join(Contact, Contact.business_id == Business.id)
+        .where(Contact.person_identified.is_(True))
+    )).all()
+    counts: Dict[str, int] = {}
+    for (techs,) in rows:
+        if not isinstance(techs, (list, tuple)):
+            continue
+        for tech in techs:
+            if not tech:
+                continue
+            counts[tech] = counts.get(tech, 0) + 1
+    return [
+        {"value": tech, "count": count}
+        for tech, count in sorted(counts.items(), key=lambda kv: -kv[1])
+    ][:30]
 
 
 @router.get("/stats")

@@ -367,6 +367,7 @@ export interface PeopleFacets {
   industry: Array<{ value: string; count: number }>;
   size_bucket: Array<{ value: string; count: number }>;
   revenue_band: Array<{ value: string; count: number }>;
+  technologies: Array<{ value: string; count: number }>;
 }
 
 export interface PeopleQuery {

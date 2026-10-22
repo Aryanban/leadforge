@@ -5,6 +5,7 @@ import {
   Briefcase,
   Building2,
   CheckCircle2,
+  Cpu,
   Loader2,
   Mail,
   MapPin,
@@ -90,6 +91,9 @@ export default function PeoplePage() {
   const [seniority, setSeniority] = useState("");
   const [city, setCity] = useState("");
   const [marketTier, setMarketTier] = useState("");
+  const [sizeBucket, setSizeBucket] = useState("");
+  const [revenueBand, setRevenueBand] = useState("");
+  const [technology, setTechnology] = useState("");
   const [hasEmail, setHasEmail] = useState<"" | "yes" | "no">("");
   const [decisionOnly, setDecisionOnly] = useState(false);
   const [verifiedOnly, setVerifiedOnly] = useState(false);
@@ -120,6 +124,9 @@ export default function PeoplePage() {
     if (seniority) q.seniority = seniority;
     if (city) q.city = city;
     if (marketTier) q.market_tier = marketTier;
+    if (sizeBucket) q.size_bucket = sizeBucket;
+    if (revenueBand) q.revenue_band = revenueBand;
+    if (technology) q.technology = technology;
     if (hasEmail === "yes") q.has_email = true;
     if (hasEmail === "no") q.has_email = false;
     if (decisionOnly) q.decision_makers_only = true;
@@ -127,7 +134,8 @@ export default function PeoplePage() {
     return q;
   }, [
     page, sort, desc, personOnly, debouncedSearch, seniority, city,
-    marketTier, hasEmail, decisionOnly, verifiedOnly,
+    marketTier, sizeBucket, revenueBand, technology, hasEmail,
+    decisionOnly, verifiedOnly,
   ]);
 
   const load = useCallback(async () => {
@@ -190,6 +198,12 @@ export default function PeoplePage() {
         label: "Market",
         value: TIER_LABELS[marketTier] || marketTier,
       });
+    if (sizeBucket)
+      out.push({ key: "size_bucket", label: "Size", value: `${sizeBucket} staff` });
+    if (revenueBand)
+      out.push({ key: "revenue_band", label: "Turnover", value: revenueBand });
+    if (technology)
+      out.push({ key: "technology", label: "Tech", value: technology });
     if (hasEmail)
       out.push({
         key: "has_email",
@@ -212,8 +226,8 @@ export default function PeoplePage() {
       });
     return out;
   }, [
-    debouncedSearch, seniority, city, marketTier, hasEmail, decisionOnly,
-    verifiedOnly, personOnly,
+    debouncedSearch, seniority, city, marketTier, sizeBucket, revenueBand,
+    technology, hasEmail, decisionOnly, verifiedOnly, personOnly,
   ]);
 
   const clearFilter = (key: keyof PeopleQuery) => {
@@ -223,6 +237,9 @@ export default function PeoplePage() {
       case "seniority": setSeniority(""); break;
       case "city": setCity(""); break;
       case "market_tier": setMarketTier(""); break;
+      case "size_bucket": setSizeBucket(""); break;
+      case "revenue_band": setRevenueBand(""); break;
+      case "technology": setTechnology(""); break;
       case "has_email": setHasEmail(""); break;
       case "decision_makers_only": setDecisionOnly(false); break;
       case "verified_only": setVerifiedOnly(false); break;
@@ -233,6 +250,7 @@ export default function PeoplePage() {
   const clearAll = () => {
     setSearch(""); setDebouncedSearch("");
     setSeniority(""); setCity(""); setMarketTier("");
+    setSizeBucket(""); setRevenueBand(""); setTechnology("");
     setHasEmail(""); setDecisionOnly(false); setVerifiedOnly(false);
     setPersonOnly(true);
     setPage(1);
@@ -356,6 +374,39 @@ export default function PeoplePage() {
               label: TIER_LABELS[f.value] || f.value,
               count: f.count,
             }))}
+          />
+          <FilterSelect
+            label="Size"
+            value={sizeBucket}
+            onChange={(v) => { setSizeBucket(v); setPage(1); }}
+            options={(facets?.size_bucket || []).map((f) => ({
+              value: f.value,
+              label: `${f.value} staff`,
+              count: f.count,
+            }))}
+            emptyLabel="No size data yet"
+          />
+          <FilterSelect
+            label="Turnover"
+            value={revenueBand}
+            onChange={(v) => { setRevenueBand(v); setPage(1); }}
+            options={(facets?.revenue_band || []).map((f) => ({
+              value: f.value,
+              label: f.value,
+              count: f.count,
+            }))}
+            emptyLabel="No turnover data yet"
+          />
+          <FilterSelect
+            label="Tech"
+            value={technology}
+            onChange={(v) => { setTechnology(v); setPage(1); }}
+            options={(facets?.technologies || []).map((f) => ({
+              value: f.value,
+              label: f.value,
+              count: f.count,
+            }))}
+            emptyLabel="No tech detected yet"
           />
           <FilterSelect
             label="Email"
@@ -761,9 +812,11 @@ function PersonRowDesktop({ person }: { person: PersonRow }) {
         <p className="truncate text-xs font-medium text-slate-800">
           {person.business_name || "—"}
         </p>
-        {person.industry && (
-          <p className="truncate text-[11px] text-slate-500">{person.industry}</p>
-        )}
+        <p className="truncate text-[11px] text-slate-500">
+          {person.industry || "—"}
+          {person.size_bucket ? ` · ${person.size_bucket} staff` : ""}
+          {person.revenue_band ? ` · ${person.revenue_band}` : ""}
+        </p>
       </td>
       <td className="px-4 py-3">
         <p className="truncate text-xs text-slate-700">
@@ -818,8 +871,15 @@ function PersonRowMobile({ person }: { person: PersonRow }) {
           <span className="inline-flex items-center gap-1">
             <Building2 className="h-3 w-3" />
             {person.business_name}
+            {person.size_bucket ? ` · ${person.size_bucket} staff` : ""}
           </span>
         )}
+        {person.technologies?.length ? (
+          <span className="inline-flex items-center gap-1">
+            <Cpu className="h-3 w-3" />
+            {person.technologies.slice(0, 3).join(", ")}
+          </span>
+        ) : null}
       </div>
       <div className="pt-0.5">
         <ReachCell person={person} />

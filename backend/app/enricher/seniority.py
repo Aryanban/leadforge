@@ -14,7 +14,7 @@ decision-maker filter.
 """
 
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # --------------------------------------------------------------------------
 # Seniority
@@ -459,3 +459,53 @@ def enrich_person_fields(
 
 def unique_technologies(values: Optional[Set[str]]) -> List[str]:
     return sorted(v for v in (values or set()) if v)
+
+
+# --------------------------------------------------------------------------
+# Company profile
+# --------------------------------------------------------------------------
+
+
+def extract_company_profile(page_html: Optional[str]) -> Dict[str, Any]:
+    """Company size, revenue and technology, read off the company's site.
+
+    This is what makes an ICP expressible as "11-50 employees, over 10Cr
+    turnover, uses Shopify" - the attributes Apollo filters on and that a
+    LeadForge lead row had no column for.
+
+    The signals are only reported when the page actually states them. A
+    guessed headcount is worse than a blank one: it would put a business
+    into a segment it does not belong to, and the operator would never
+    know.
+    """
+    out: Dict[str, Any] = {}
+    if not page_html:
+        return out
+
+    # Strip the markup: headcount and turnover are written in prose, and
+    # script tags carry numbers that are not the company's.
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(page_html, "html.parser")
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = soup.get_text(" ", strip=True)
+    except Exception:
+        text = str(page_html)
+
+    employees = parse_employee_count(text)
+    if employees is not None:
+        out["employee_count"] = employees
+        out["size_bucket"] = size_bucket(employees)
+
+    revenue = parse_revenue(text)
+    if revenue is not None:
+        out["revenue"] = revenue
+        out["revenue_band"] = revenue_band(revenue)
+
+    technologies = detect_technologies(page_html)
+    if technologies:
+        out["technologies"] = technologies
+
+    return out
