@@ -359,6 +359,12 @@ export interface PersonRow {
   revenue: number | null;
   revenue_band: string | null;
   technologies: string[];
+  /** The company's GSTIN - the Indian business registration. */
+  gstin?: string | null;
+  /** The company's Udyam (MSME) registration. */
+  udyam_number?: string | null;
+  /** The state the GSTIN is registered in - a stronger signal than the address. */
+  gstin_state?: string | null;
   lead_score: number | null;
   /**
    * The score computed against the ICP this row is being judged by. It

@@ -371,7 +371,12 @@ def _address_source(email: str, harvested: Any, permutations: List[str],
     return "web_search"
 
 CONTACT_PRIORITY_KEYWORDS = [
-    'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support', 'impressum'
+    'contact', 'about', 'reach', 'touch', 'team', 'connect', 'help', 'info', 'support', 'impressum',
+    # An Indian company prints its GSTIN and its Udyam registration in the
+    # footer of its legal pages, not on the homepage - so the pages that
+    # carry the registrations are the ones worth visiting first.
+    'terms', 'legal', 'privacy', 'policy', 'policies', 'disclaimer', 'gst',
+    'company', 'corporate',
 ]
 
 
@@ -1076,6 +1081,12 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                         business.revenue_band = profile.get("revenue_band")
                     if profile.get("technologies"):
                         business.technologies = profile["technologies"]
+                    # The Indian registrations, off the company's own footer.
+                    if profile.get("gstin"):
+                        business.gstin = profile["gstin"]
+                        business.gstin_state = profile.get("gstin_state")
+                    if profile.get("udyam_number"):
+                        business.udyam_number = profile["udyam_number"]
             except Exception as crawl_err:
                 logger.warning(f"Error crawling website for {business.name}: {crawl_err}")
 

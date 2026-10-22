@@ -850,6 +850,19 @@ function PersonRowDesktop({ person }: { person: PersonRow }) {
           {person.size_bucket ? ` · ${person.size_bucket} staff` : ""}
           {person.revenue_band ? ` · ${person.revenue_band}` : ""}
         </p>
+        {person.gstin && (
+          <p
+            className="truncate font-mono text-[10px] text-slate-500"
+            title={
+              person.gstin_state
+                ? `GSTIN — registered in ${person.gstin_state}`
+                : "GSTIN"
+            }
+          >
+            {person.gstin}
+            {person.gstin_state ? ` · ${person.gstin_state}` : ""}
+          </p>
+        )}
       </td>
       <td className="px-4 py-3">
         <p className="truncate text-xs text-slate-700">

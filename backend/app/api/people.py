@@ -93,6 +93,12 @@ def _person_row(contact: Contact, business: Optional[Business]) -> Dict[str, Any
         "revenue": business.revenue if business else None,
         "revenue_band": business.revenue_band if business else None,
         "technologies": (business.technologies or []) if business else [],
+        #: The Indian registrations. Neither Apollo nor any Western directory
+        #: knows what a GSTIN is; the state's first two digits are a stronger
+        #: location signal than a free-text address.
+        "gstin": business.gstin if business else None,
+        "udyam_number": business.udyam_number if business else None,
+        "gstin_state": business.gstin_state if business else None,
         "lead_score": business.score if business else None,
         "created_at": contact.created_at.isoformat() if contact.created_at else None,
     }

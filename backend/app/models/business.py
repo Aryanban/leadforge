@@ -47,6 +47,19 @@ class Business(Base):
     revenue_band = Column(String, nullable=True, index=True)
     #: Technology names detected on the company's site.
     technologies = Column(JSON, nullable=True)
+    #: The company's GSTIN and Udyam registration, read off its own site.
+    #:
+    #: These are the two identifiers an Indian business is registered under,
+    #: and neither Apollo nor any Western directory knows what they are. The
+    #: GSTIN's first two digits are the *registered* state, which is a
+    #: stronger location signal than a free-text address.
+    gstin = Column(String, nullable=True, index=True)
+    udyam_number = Column(String, nullable=True, index=True)
+    #: The state the GSTIN is registered in, kept apart from ``state`` (the
+    #: address). A mismatch is a real signal - a branch office, a
+    #: registered-elsewhere business - and silently preferring one over the
+    #: other would hide it.
+    gstin_state = Column(String, nullable=True)
     extra_data = Column(JSON, nullable=True)
 
     source = Column(String, nullable=True, index=True)

@@ -508,4 +508,16 @@ def extract_company_profile(page_html: Optional[str]) -> Dict[str, Any]:
     if technologies:
         out["technologies"] = technologies
 
+    # The Indian registrations, read off the company's own footer - which is
+    # where every Indian company puts them.
+    from app.locations.gstin import extract_gstin, extract_udyam, gstin_state
+
+    gstin = extract_gstin(text)
+    if gstin:
+        out["gstin"] = gstin
+        out["gstin_state"] = gstin_state(gstin)
+    udyam = extract_udyam(text)
+    if udyam:
+        out["udyam_number"] = udyam
+
     return out
