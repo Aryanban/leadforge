@@ -146,6 +146,61 @@ async def list_people(
     db: AsyncSession = Depends(get_db),
 ):
     """Lists people, one row per human, with company attributes joined in."""
+    return await query_people(
+        db,
+        page=page,
+        limit=limit,
+        search=search,
+        seniority=seniority,
+        decision_makers_only=decision_makers_only,
+        city=city,
+        state=state,
+        market_tier=market_tier,
+        industry=industry,
+        has_email=has_email,
+        verified_only=verified_only,
+        size_bucket=size_bucket,
+        min_employees=min_employees,
+        max_employees=max_employees,
+        revenue_band=revenue_band,
+        technology=technology,
+        sort=sort,
+        desc=desc,
+        include_demo=include_demo,
+        person_only=person_only,
+    )
+
+
+async def query_people(
+    db: AsyncSession,
+    page: int = 1,
+    limit: int = 50,
+    search: Optional[str] = None,
+    seniority: Optional[str] = None,
+    decision_makers_only: bool = False,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+    market_tier: Optional[str] = None,
+    industry: Optional[str] = None,
+    has_email: Optional[bool] = None,
+    verified_only: bool = False,
+    size_bucket: Optional[str] = None,
+    min_employees: Optional[int] = None,
+    max_employees: Optional[int] = None,
+    revenue_band: Optional[str] = None,
+    technology: Optional[str] = None,
+    sort: str = "created",
+    desc: bool = True,
+    include_demo: bool = True,
+    person_only: bool = True,
+) -> Dict[str, Any]:
+    """The People query, as a plain function.
+
+    The HTTP route is a thin wrapper over this, so the MCP tool and the
+    dashboard filter by exactly the same rules. Calling the FastAPI
+    handler directly would not work: its defaults are ``Query`` objects,
+    not values.
+    """
     offset = (page - 1) * limit
 
     # The People table is a person list: a contact with a business is a

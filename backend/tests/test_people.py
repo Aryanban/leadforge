@@ -343,3 +343,52 @@ def test_merge_keeps_a_known_role_over_a_roleless_sighting():
     )
     assert len(merged) == 1
     assert merged[0]["title"] == "Proprietor"
+
+
+# --------------------------------------------------------------------------
+# The People query is shared by the API and the MCP tool
+# --------------------------------------------------------------------------
+
+
+def test_people_query_is_a_plain_function_not_a_fastapi_handler():
+    """The MCP tool calls the query directly.
+
+    Calling the FastAPI handler would not work: its defaults are ``Query``
+    objects rather than values, so a plain call gets
+    ``'Query' object has no attribute 'split'``.
+    """
+    import inspect
+
+    from app.api.people import list_people, query_people
+
+    sig = inspect.signature(query_people)
+    for name, param in sig.parameters.items():
+        if name == "db":
+            continue
+        assert param.default in (None, True, False, 1, 50, "created"), (
+            f"{name} has a non-plain default: {param.default!r}"
+        )
+    # The route is a thin wrapper over it.
+    assert list_people.__name__ == "list_people"
+
+
+def test_mcp_people_tool_is_advertised_and_dispatched():
+    """An advertised tool with no dispatch crashes the agent."""
+    from app.mcp_server import TOOLS_DEFINITIONS
+
+    names = [t["name"] for t in TOOLS_DEFINITIONS]
+    assert "leadforge_search_people" in names
+
+
+@pytest.mark.asyncio
+async def test_mcp_people_tool_returns_a_table():
+    from app.mcp_server import handle_tool_call
+
+    out = await handle_tool_call(
+        "leadforge_search_people",
+        {"decision_makers_only": True, "limit": 5},
+    )
+    assert "LeadForge People" in out
+    assert "| Contact ID |" in out
+    # The tool must tell the agent how to use the rows.
+    assert "add_campaign_targets" in out

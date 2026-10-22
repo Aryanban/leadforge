@@ -129,6 +129,64 @@ TOOLS_DEFINITIONS = [
         }
     },
     {
+        "name": "leadforge_search_people",
+        "description": "Searches and filters the People table: one row per identified human, with their company, role, seniority band, location and reachability. Use this to answer questions like 'every owner in Pune' or 'all directors at companies over 10Cr turnover'.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {
+                    "type": "string",
+                    "description": "Search keyword matching the person's name, title, email, company or city"
+                },
+                "seniority": {
+                    "type": "string",
+                    "description": "Comma-separated role bands: owner, c_level, vp, director, head, manager, senior, staff, other, unknown"
+                },
+                "decision_makers_only": {
+                    "type": "boolean",
+                    "description": "Only people who can actually say yes (owner, C-level, VP, director, head)"
+                },
+                "city": {
+                    "type": "string",
+                    "description": "Filter by city"
+                },
+                "state": {
+                    "type": "string",
+                    "description": "Filter by state"
+                },
+                "market_tier": {
+                    "type": "string",
+                    "description": "Filter by market tier: metro, tier_2, tier_3"
+                },
+                "has_email": {
+                    "type": "boolean",
+                    "description": "Filter by whether the person has a reachable email address"
+                },
+                "size_bucket": {
+                    "type": "string",
+                    "description": "Filter by company size: 1, 2-10, 11-50, 51-200, 201-500, 500+"
+                },
+                "revenue_band": {
+                    "type": "string",
+                    "description": "Filter by turnover band: <1Cr, 1-10Cr, 10-50Cr, 50-100Cr, 100-500Cr, 500Cr+"
+                },
+                "technology": {
+                    "type": "string",
+                    "description": "Filter by a technology detected on the company's site (Shopify, Tally, Razorpay, ...)"
+                },
+                "include_business_targets": {
+                    "type": "boolean",
+                    "description": "Also include companies with no identified person behind them (default false)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of people to retrieve (default: 25)",
+                    "default": 25
+                }
+            }
+        }
+    },
+    {
         "name": "leadforge_enrich_lead",
         "description": "Runs multi-source web enrichment (Yahoo/Bing search, directory extraction, website crawling, and DNS/SMTP verification) on a business to find emails, phone numbers, and WhatsApp links.",
         "inputSchema": {
@@ -652,6 +710,72 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
             "to enroll these leads in a sequence. The Contact ID is NOT the "
             "Business ID."
+        )
+
+        return "\n".join(md)
+
+    elif name == "leadforge_search_people":
+        limit = min(int(arguments.get("limit", 25)), 200)
+        # The same filters as the People table, applied as SQL predicates
+        # BEFORE the limit so the tool's own limit parameter cannot change
+        # its answer.
+        from app.api.people import query_people
+
+        params: Dict[str, Any] = {
+            "page": 1,
+            "limit": limit,
+            "person_only": not bool(arguments.get("include_business_targets")),
+        }
+        for key in (
+            "search", "seniority", "city", "state", "market_tier",
+            "size_bucket", "revenue_band", "technology",
+        ):
+            value = arguments.get(key)
+            if value:
+                params[key] = value
+        if arguments.get("decision_makers_only"):
+            params["decision_makers_only"] = True
+        if arguments.get("has_email") is not None:
+            params["has_email"] = bool(arguments.get("has_email"))
+
+        async with async_session_maker() as db:
+            people_payload = await query_people(db, **params)
+        people = people_payload.get("people") or []
+        total = people_payload.get("total", 0)
+
+        md = [
+            f"### LeadForge People ({len(people)} of {total} matches)\n",
+            "| Contact ID | Name | Role | Band | Company | Location | Size | Turnover | Reach |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for p in people:
+            if p.get("email"):
+                reach = p["email"]
+            elif p.get("whatsapp_link"):
+                reach = f"[WhatsApp]({p['whatsapp_link']})"
+            elif p.get("phone"):
+                reach = p["phone"]
+            else:
+                reach = "—"
+            name_clean = str(p.get("name") or "—").replace("|", "\\|")
+            role = str(p.get("title") or "—").replace("|", "\\|")
+            company = str(p.get("business_name") or "—").replace("|", "\\|")
+            location = "—"
+            if p.get("city"):
+                location = p["city"]
+                if p.get("state"):
+                    location += f", {p['state']}"
+            md.append(
+                f"| #{p['id']} | **{name_clean}** | {role} | {p.get('seniority_label') or '—'} "
+                f"| {company} | {location} | {p.get('size_bucket') or '—'} "
+                f"| {p.get('revenue_band') or '—'} | {reach} |"
+            )
+
+        md.append(
+            "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
+            "to enroll these people in a sequence. A row with no role is a "
+            "business target - a company with a phone but no person behind it "
+            "identified yet."
         )
 
         return "\n".join(md)

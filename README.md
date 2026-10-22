@@ -53,8 +53,10 @@ Modern B2B revenue and agency teams spend thousands of dollars annually on SaaS 
 | **Catch-All & Safe SMTP Verification** | **Yes (multi-probe catch-all, 20-status enum, never defaults to valid)** | Paid | Yes | No | Add-on |
 | **Cold Email Spam & Deliverability Linter**| **Yes (80+ words, 0-100 score)** | No | No | No | Included |
 | **Algorithmic 1-to-1 AI Icebreakers** | **Yes (Sentiment & pain points)** | Paid Add-on | No | No | Included |
+| **People Table (one row per human)** | **Yes (role, city, size, turnover, stack — all filterable)** | Yes | No | No | No |
+| **India-Aware Role Taxonomy** | **Yes (Proprietor, Promoter, MD, Principal)** | No | No | No | No |
 | **Multi-Step Sequences & Bounce Guard** | **Yes (autonomous step delays, hard/soft bounce auto-suppress)**| Included | Add-on | No | Included |
-| **AI Agent Native (MCP Server)** | **Yes (17 tools, Claude, Cursor, AGY)** | No | No | No | No |
+| **AI Agent Native (MCP Server)** | **Yes (19 tools, Claude, Cursor, AGY)** | No | No | No | No |
 | **Open-Source CRM Integration** | **Twenty CRM & Webhooks** | HubSpot / SF only | Zapier only | Webhooks only | Zapier only |
 
 ---
@@ -139,6 +141,13 @@ flowchart TD
 * **Hinglish & Festival-Aware Copy**: Generates regionally natural phrasing and surfaces culturally appropriate timing windows, so the operator can adapt a step to a festival week before sending.
 * **Source-Trust Scoring**: Weights leads by the documented reliability of each source (live Google Maps vs. self-listed aggregator directories), so a scraped-aggregator lead never outranks a primary-source one. The trust table covers every source the scrapers actually write — including the primary scrape path — and the modifier reported by the API is the one actually applied to the score.
 * **Warm WhatsApp Handoff**: Emits a pre-filled `wa.me` deep link so the operator can continue in the channel the lead will actually reply on.
+
+### 7. A People Table That Doesn't Lie
+* **One row per human, with the company joined in** — the surface Apollo is actually built around, and the one LeadForge was missing entirely. Every filter is a server-side predicate applied *before* the page limit, so a filtered page reports an honest total and every matching row is reachable.
+* **An India-aware role taxonomy**: `Proprietor`, `Promoter`, `Managing Director`, `Principal` and `Partner` are how Indian SMBs name the person who can sign off. A US/EU title list files all five as "unknown" — and an unknown title is a founder the table cannot show you. Matching is on word boundaries, not substrings, because `"director"` contains `"cto"`.
+* **People are read off the company's own website** — from JSON-LD (`Person` / `Organization.employee` with a `jobTitle`), from "Name — Title", from "Title: Name", and from "Name is a Role". Testimonials and reviews are stripped first, so a customer writing *"I bought my office from Mr. Omkar"* does not become a lead.
+* **A person with no email is still a person.** A site that names its proprietor has told you who the decision maker is, even when the mailbox is role-only or the domain is catch-all. Dropping them for want of a verified address is what left the table with 13 rows out of 149 businesses.
+* **Business targets are labelled as such.** Discovery finds companies; the people behind them may not be known yet. A row without a person is shown as a business target, never as a founder.
 
 ### 4. Algorithmic 1-on-1 AI Outreach Icebreakers
 * **Review Sentiment Analysis**: Evaluates customer reviews, Google star ratings, municipal locations, and business categories.
@@ -226,7 +235,7 @@ sending anything. An agent must pass `dry_run=false` to actually send.
 | **Maps Extraction** | HTTP `pb=` endpoint (primary), headless-Chromium fallback | Primary path parses Maps' positional-JSON envelope with no browser; fallback uses headless Chromium with asset-blocking. |
 | **Frontend Dashboard** | Next.js 15 (App Router) + Tailwind CSS | Modern, responsive interface with client-side live job-status polling, instant search filtering, and a working mobile layout. |
 | **Persistence Layer** | SQLAlchemy 2.0 Async + SQLite/PostgreSQL | Zero-configuration local development via SQLite with seamless production migration to PostgreSQL. |
-| **Agent Interface** | Model Context Protocol (MCP), stdio JSON-RPC 2.0 | First-class integration with modern AI coding assistants and autonomous agents. Hand-rolled transport (no SDK dependency), 17 tools, JSON-RPC error handling that surfaces tool failures to the model, and a `dry_run` default on campaign launch. |
+| **Agent Interface** | Model Context Protocol (MCP), stdio JSON-RPC 2.0 | First-class integration with modern AI coding assistants and autonomous agents. Hand-rolled transport (no SDK dependency), 19 tools, JSON-RPC error handling that surfaces tool failures to the model, and a `dry_run` default on campaign launch. |
 | **CRM Integration** | Twenty CRM export & a standard REST webhook POST | Pushes a lead export to modern open-source CRMs without vendor lock-in. (Push-only today — no inbound sync and no signed retrying event stream.) |
 
 ---
@@ -301,10 +310,11 @@ how to fix it:
 | 2 | **`/find`** | Alternative entry point: save an **Ideal Customer Profile** and run multi-source discovery against it (Google Maps, Sulekha, and the directory adapters — see [Source coverage](#source-coverage)). |
 | 3 | **`/leads`** | Browse & search your database. Click any row to open the **detail drawer**: contacts, verification badges, full send history, one-click company suppression. Save current filters as **saved views** (Apollo dynamic lists) and bulk-select → Add to Sequence. |
 | 4 | **`/companies`** | The Accounts view: one row per company with contact coverage (total vs verified), rating, and location. |
-| 5 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — the only hard requirement for sending. Daily limit is capped at 50/day for warmup safety. |
-| 6 | **`/sequences`** | Apollo-style execution: stat-tabbed list (Active/Paused/Draft/Completed) → build sequences with `{{first_name}}`-style variables, **A/B subject variants** (winner auto-declared on reply rate once both variants clear 10 sends), select leads → **Add to Sequence** → **Launch** → monitor per-step performance → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
-| 7 | **`/inbox`** | Inbound replies detected by the IMAP reply poller (every 5 min, or "Poll now" on Email Health). Thread-attributed via stored Message-IDs; categorized Interested / Not interested / Opt-out / Away / Needs triage. **A "stop" reply auto-suppresses the address workspace-wide** — compliance gate 4 of 4. Humans can re-categorize. |
-| 8 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, per-mailbox **IMAP settings editor** (reply-detection host/port, empty = auto-derive from SMTP), and one-click reply polling. |
+| 5 | **`/people`** | The People view: **one row per human**, with the company joined in. Filter by role, city, market tier, company size, turnover band and technology — the attributes an ICP is expressed in. A row says whether it is a **person** or a **business target** (a company with a phone and a WhatsApp number, but no human behind it yet), because a table that calls a company's phone-only row a "founder" is worse than no table at all. |
+| 6 | **`/settings`** | **Add an SMTP mailbox** (e.g. Gmail + App Password) — the only hard requirement for sending. Daily limit is capped at 50/day for warmup safety. |
+| 7 | **`/sequences`** | Apollo-style execution: stat-tabbed list (Active/Paused/Draft/Completed) → build sequences with `{{first_name}}`-style variables, **A/B subject variants** (winner auto-declared on reply rate once both variants clear 10 sends), select leads → **Add to Sequence** → **Launch** → monitor per-step performance → **Pause** anytime. Suppression, warmup ramps, daily limits and randomized send jitter are enforced automatically. |
+| 8 | **`/inbox`** | Inbound replies detected by the IMAP reply poller (every 5 min, or "Poll now" on Email Health). Thread-attributed via stored Message-IDs; categorized Interested / Not interested / Opt-out / Away / Needs triage. **A "stop" reply auto-suppresses the address workspace-wide** — compliance gate 4 of 4. Humans can re-categorize. |
+| 9 | **`/email-health`** | Mailbox reputation, warmup progress (ramp stage), daily budget bars, health-paused banners, per-mailbox **IMAP settings editor** (reply-detection host/port, empty = auto-derive from SMTP), and one-click reply polling. |
 
 ### What you need to provide (and what you don't)
 
