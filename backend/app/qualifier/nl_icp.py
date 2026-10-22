@@ -18,6 +18,10 @@ HIGH_INTENT_HINTS = ("high intent", "hot lead", "hot leads", "best lead", "best 
 #: like an answer but is not - the single most trust-destroying thing this
 #: parser could do. So the terms are detected and reported back as warnings
 #: instead of being dropped in silence.
+#:
+#: The terms that are now *supported* (headcount, turnover, market tier,
+#: role) are parsed into structured criteria instead, so they are listed in
+#: SUPPORTED_TERMS below and do not appear here.
 UNSUPPORTED_TERMS = re.compile(
     r"\b("
     r"\d+\s*(?:employees?|staff|people|persons?|members?)"
@@ -35,6 +39,160 @@ UNSUPPORTED_TERMS = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+#: ---------------------------------------------------------------------------
+#: Structured criteria. These are the constraints the model can now express,
+#: so they are parsed out of the sentence instead of being reported as
+#: unsupported.
+#: ---------------------------------------------------------------------------
+
+#: "11-50 employees", "50+ staff", "under 20 people"
+_RANGE_EMPLOYEES_RE = re.compile(
+    r"(\d{1,5})\s*(?:-|to|and)\s*(\d{1,5})\s*(?:employees?|staff|people|persons?|members?)",
+    re.IGNORECASE,
+)
+_OVER_EMPLOYEES_RE = re.compile(
+    r"(\d{1,5})\s*\+?\s*(?:employees?|staff|people|persons?|members?)",
+    re.IGNORECASE,
+)
+_UNDER_EMPLOYEES_RE = re.compile(
+    r"(?:under|below|less than|fewer than|up to|max(?:imum)?)\s*(\d{1,5})\s*"
+    r"(?:employees?|staff|people|persons?|members?)",
+    re.IGNORECASE,
+)
+_OVER_TURNOVER_RE = re.compile(
+    r"(?:turnover|revenue)\s*(?:of\s*)?(?:over|above|more than|greater than|at least|min)?\s*"
+    r"(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(crore|cr|lakh|lakhs|lacs|million|crore+)?",
+    re.IGNORECASE,
+)
+_UNDER_TURNOVER_RE = re.compile(
+    r"(?:turnover|revenue)\s*(?:under|below|less than|up to)?\s*"
+    r"(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(crore|cr|lakh|lakhs|lacs|million)?",
+    re.IGNORECASE,
+)
+
+#: "tier 2 cities", "metro", "tier-3"
+_TIER_RE = re.compile(
+    r"\b(?:tier[\s-]?(\d)|metro|metropolitan)\b", re.IGNORECASE
+)
+
+#: The roles an operator asks for, mapped to the seniority bands.
+_ROLE_HINTS: Dict[str, List[str]] = {
+    "owner": ["owner"],
+    "founder": ["owner"],
+    "proprietor": ["owner"],
+    "promoter": ["owner"],
+    "partner": ["owner"],
+    "principal": ["owner"],
+    "ceo": ["c_level"],
+    "c-level": ["c_level"],
+    "c level": ["c_level"],
+    "managing director": ["c_level"],
+    "md": ["c_level"],
+    "chief": ["c_level"],
+    "vp": ["vp"],
+    "vice president": ["vp"],
+    "director": ["director"],
+    "head of": ["head"],
+    "head": ["head"],
+    "manager": ["manager"],
+    "senior": ["senior"],
+    "founder ceo": ["owner", "c_level"],
+}
+
+_DECISION_MAKER_RE = re.compile(
+    r"\bdecision[\s-]?makers?\b|\bowners?\s+and\s+directors\b", re.IGNORECASE
+)
+
+#: The turnover bands, in rupees, matching the scorer's ladder.
+_TURNOVER_BANDS: List[tuple] = [
+    ("<1Cr", 0.0, 1_00_00_000.0),
+    ("1-10Cr", 1_00_00_000.0, 10_00_00_000.0),
+    ("10-50Cr", 10_00_00_000.0, 50_00_00_000.0),
+    ("50-100Cr", 50_00_00_000.0, 100_00_00_000.0),
+    ("100-500Cr", 100_00_00_000.0, 500_00_00_000.0),
+    ("500Cr+", 500_00_00_000.0, None),
+]
+
+_SCALE = {
+    "crore": 1_00_00_000.0, "crores": 1_00_00_000.0, "cr": 1_00_00_000.0,
+    "lakh": 1_00_000.0, "lakhs": 1_00_000.0, "lac": 1_00_000.0,
+    "lacs": 1_00_000.0, "million": 1_00_000.0,
+}
+
+
+def _band_for_amount(amount: float) -> str:
+    for label, low, high in _TURNOVER_BANDS:
+        if low is not None and amount < low:
+            continue
+        if high is not None and amount >= high:
+            continue
+        return label
+    return _TURNOVER_BANDS[-1][0]
+
+
+def _parse_structured_criteria(text: str) -> Dict[str, Any]:
+    """Pulls the expressible constraints out of a sentence.
+
+    Returns only the keys it could fill, so the caller can merge them into
+    the draft profile without clobbering anything.
+    """
+    out: Dict[str, Any] = {}
+
+    match = _RANGE_EMPLOYEES_RE.search(text)
+    if match:
+        low, high = int(match.group(1)), int(match.group(2))
+        if low <= high:
+            out["min_employees"] = low
+            out["max_employees"] = high
+    else:
+        match = _UNDER_EMPLOYEES_RE.search(text)
+        if match:
+            out["max_employees"] = int(match.group(1))
+        else:
+            match = _OVER_EMPLOYEES_RE.search(text)
+            if match:
+                out["min_employees"] = int(match.group(1))
+
+    bands: List[str] = []
+    match = _OVER_TURNOVER_RE.search(text)
+    if match:
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError):
+            value = 0.0
+        unit = (match.group(2) or "crore").lower()
+        amount = value * _SCALE.get(unit, 1_00_00_000.0)
+        band = _band_for_amount(amount)
+        if band not in bands:
+            bands.append(band)
+    if bands:
+        out["revenue_bands"] = bands
+
+    tiers: List[str] = []
+    for match in _TIER_RE.finditer(text):
+        tier_number = match.group(1)
+        if tier_number:
+            tiers.append(f"tier_{tier_number}")
+        else:
+            tiers.append("metro")
+    if tiers:
+        out["market_tiers"] = sorted(set(tiers))
+
+    roles: List[str] = []
+    lowered = text.lower()
+    for hint, bands_for_hint in _ROLE_HINTS.items():
+        if hint in lowered:
+            for band in bands_for_hint:
+                if band not in roles:
+                    roles.append(band)
+    if roles:
+        out["seniorities"] = roles
+    if _DECISION_MAKER_RE.search(text):
+        out["decision_makers_only"] = True
+
+    return out
+
 
 #: Leading phrases that describe the *intent*, not the industry. They used to
 #: end up in the niche ("Best Leads: Dental Clinics") and in the keyword list,
@@ -134,8 +292,18 @@ def parse_icp_text(text: str) -> Dict[str, Any]:
 
     keywords = [t for t in _clean_tokens(niche) if len(t) > 2 and t not in ("and", "with")]
 
+    structured = _parse_structured_criteria(raw)
+
     # Report the constraints we cannot honour instead of dropping them.
-    unsupported = sorted({m.group(0).strip().lower() for m in UNSUPPORTED_TERMS.finditer(raw)})
+    #
+    # The terms that are now supported are excluded from the warning, and
+    # the ones the parser could not fill in are reported so the operator
+    # knows the draft is not the whole sentence.
+    unsupported = sorted({
+        m.group(0).strip().lower()
+        for m in UNSUPPORTED_TERMS.finditer(raw)
+        if not _is_supported_term(m.group(0).strip().lower(), structured)
+    })
     warnings: List[str] = []
     if unsupported:
         warnings.append(
@@ -144,7 +312,7 @@ def parse_icp_text(text: str) -> Dict[str, Any]:
             + ". Narrow the results manually until field-level filters exist."
         )
 
-    return {
+    draft = {
         "name": raw[:80] if raw else "Untitled ICP",
         "niche": niche.title() if niche else "",
         "area": area,
@@ -157,3 +325,31 @@ def parse_icp_text(text: str) -> Dict[str, Any]:
         "unsupported_terms": unsupported,
         "warnings": warnings,
     }
+    # The structured criteria the sentence actually asked for.
+    for key, value in structured.items():
+        draft[key] = value
+    return draft
+
+
+def _is_supported_term(term: str, structured: Dict[str, Any]) -> bool:
+    """Whether a detected term was turned into a structured criterion.
+
+    A term is only "supported" if the parser actually filled in the
+    matching criterion. "50 employees" fills ``min_employees``; "500
+    employees" also does, but a bare "revenue" with no figure does not -
+    and that one must still be reported as unsupported rather than
+    silently dropped.
+    """
+    lowered = term.lower()
+    if "employee" in lowered or "staff" in lowered or "people" in lowered:
+        return "min_employees" in structured or "max_employees" in structured
+    if "revenue" in lowered or "turnover" in lowered:
+        return "revenue_bands" in structured
+    if "crore" in lowered or "cr" in lowered or "lakh" in lowered:
+        return "revenue_bands" in structured
+    if any(word in lowered for word in (
+        "founder", "ceo", "cfo", "coo", "cmo", "md", "principal",
+        "director", "manager", "senior", "decision maker", "head of",
+    )):
+        return "seniorities" in structured or structured.get("decision_makers_only")
+    return False

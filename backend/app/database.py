@@ -92,6 +92,11 @@ async def ensure_schema() -> None:
     except Exception as exc:  # pragma: no cover - never block a boot
         logger.warning("people-dimension backfill skipped: %s", exc)
 
+    try:
+        await recover_orphaned_jobs()
+    except Exception as exc:  # pragma: no cover - never block a boot
+        logger.warning("job recovery skipped: %s", exc)
+
 
 async def backfill_business_identity(batch_size: int = 2000) -> int:
     """One-time backfill of the derived Business identity columns.
@@ -158,6 +163,44 @@ async def backfill_business_identity(batch_size: int = 2000) -> int:
     if fixed:
         logger.info("schema sync: backfilled %s business identity row(s)", fixed)
     return fixed
+
+
+async def recover_orphaned_jobs() -> int:
+    """Fails the jobs that a restart interrupted.
+
+    A scrape or a discovery runs in-process (FastAPI BackgroundTasks) or
+    in a Celery worker. Either way, a restart in the middle leaves the
+    job row at "running" - and it stays there forever, because nothing
+    is left running to finish it or fail it.
+
+    The operator sees a job that has been "running" for three days and
+    cannot tell whether it is stuck, finished, or lost. Marking it
+    "failed" with the reason is the honest answer, and it is what lets
+    the operator simply start it again.
+
+    Only rows with no ``finished_at`` are touched, so a job that finished
+    normally is never affected.
+    """
+    from sqlalchemy import select, update
+    from app.models.scrape_job import ScrapeJob
+
+    async with async_session_maker() as db:
+        result = await db.execute(
+            update(ScrapeJob)
+            .where(
+                ScrapeJob.status.in_(("running", "pending")),
+                ScrapeJob.finished_at.is_(None),
+            )
+            .values(
+                status="failed",
+                error="Interrupted by a server restart before it finished.",
+            )
+        )
+        await db.commit()
+        count = result.rowcount or 0
+    if count:
+        logger.warning("recovered %s job(s) interrupted by a restart", count)
+    return count
 
 
 async def backfill_people_dimensions(batch_size: int = 2000) -> int:

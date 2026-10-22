@@ -27,6 +27,17 @@ class ICPProfileBase(BaseModel):
     min_score: int = Field(45, ge=0, le=100)
     preset: str = "outreach_quality"
     preferred_sources: Optional[List[str]] = None
+    # Structured criteria - what the company looks like, not what it is
+    # called. This is the part an operator sets from a sales conversation.
+    min_employees: Optional[int] = Field(None, ge=0)
+    max_employees: Optional[int] = Field(None, ge=0)
+    revenue_bands: Optional[List[str]] = None
+    size_buckets: Optional[List[str]] = None
+    market_tiers: Optional[List[str]] = None
+    states: Optional[List[str]] = None
+    seniorities: Optional[List[str]] = None
+    decision_makers_only: bool = False
+    require_email: bool = False
 
 
 class ICPProfileCreate(ICPProfileBase):
@@ -43,6 +54,15 @@ class ICPProfileUpdate(BaseModel):
     min_score: Optional[int] = Field(None, ge=0, le=100)
     preset: Optional[str] = None
     preferred_sources: Optional[List[str]] = None
+    min_employees: Optional[int] = Field(None, ge=0)
+    max_employees: Optional[int] = Field(None, ge=0)
+    revenue_bands: Optional[List[str]] = None
+    size_buckets: Optional[List[str]] = None
+    market_tiers: Optional[List[str]] = None
+    states: Optional[List[str]] = None
+    seniorities: Optional[List[str]] = None
+    decision_makers_only: Optional[bool] = None
+    require_email: Optional[bool] = None
 
 
 class ICPProfileOut(ICPProfileBase):
@@ -79,6 +99,15 @@ def _profile_to_dict(profile: ICPProfile) -> Dict[str, Any]:
         "min_score": profile.min_score,
         "preset": profile.preset,
         "preferred_sources": profile.preferred_sources or [],
+        "min_employees": profile.min_employees,
+        "max_employees": profile.max_employees,
+        "revenue_bands": profile.revenue_bands or [],
+        "size_buckets": profile.size_buckets or [],
+        "market_tiers": profile.market_tiers or [],
+        "states": profile.states or [],
+        "seniorities": profile.seniorities or [],
+        "decision_makers_only": bool(profile.decision_makers_only),
+        "require_email": bool(profile.require_email),
         "source_stats": profile.source_stats or {},
         "created_at": profile.created_at.isoformat() if profile.created_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
@@ -101,6 +130,15 @@ async def create_icp_profile(payload: ICPProfileCreate, db: AsyncSession = Depen
         min_score=payload.min_score,
         preset=payload.preset,
         preferred_sources=payload.preferred_sources,
+        min_employees=payload.min_employees,
+        max_employees=payload.max_employees,
+        revenue_bands=payload.revenue_bands,
+        size_buckets=payload.size_buckets,
+        market_tiers=payload.market_tiers,
+        states=payload.states,
+        seniorities=payload.seniorities,
+        decision_makers_only=payload.decision_makers_only,
+        require_email=payload.require_email,
     )
     db.add(profile)
     await db.commit()

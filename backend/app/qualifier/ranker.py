@@ -30,6 +30,52 @@ def _matches_icp(business: Business, icp_profile: Any) -> bool:
     return True
 
 
+def _matches_structured_criteria(business: Business, icp_profile: Any) -> bool:
+    """The ICP's company-shape criteria: size, turnover, tier, state.
+
+    Keywords say what a business is *called*; these say what it *looks
+    like*, which is the part an operator sets from a sales conversation
+    ("11-50 staff, over 10Cr turnover, tier-2 cities"). Without them the
+    ICP could only be expressed as a word list, which is the one thing a
+    salesperson cannot do.
+    """
+    min_emp = getattr(icp_profile, "min_employees", None)
+    if min_emp is not None:
+        count = getattr(business, "employee_count", None)
+        if count is None or count < min_emp:
+            return False
+
+    max_emp = getattr(icp_profile, "max_employees", None)
+    if max_emp is not None:
+        count = getattr(business, "employee_count", None)
+        if count is None or count > max_emp:
+            return False
+
+    bands = getattr(icp_profile, "revenue_bands", None) or []
+    if bands:
+        if (getattr(business, "revenue_band", None) or "") not in bands:
+            return False
+
+    buckets = getattr(icp_profile, "size_buckets", None) or []
+    if buckets:
+        if (getattr(business, "size_bucket", None) or "") not in buckets:
+            return False
+
+    tiers = getattr(icp_profile, "market_tiers", None) or []
+    if tiers:
+        tier = (getattr(business, "market_tier", None) or "").lower()
+        if tier not in [str(t).lower() for t in tiers]:
+            return False
+
+    states = getattr(icp_profile, "states", None) or []
+    if states:
+        state = (getattr(business, "state", None) or "").lower()
+        if state not in [str(s).lower() for s in states]:
+            return False
+
+    return True
+
+
 def _lead_payload(business: Business, contacts: List[Contact], scoring: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "business_id": business.id,
@@ -94,6 +140,8 @@ def rank_businesses(
     ranked: List[Dict[str, Any]] = []
     for business in businesses:
         if not _matches_icp(business, icp_profile):
+            continue
+        if not _matches_structured_criteria(business, icp_profile):
             continue
         contacts = contacts_by_business.get(business.id, [])
         scoring = score_lead(business, contacts, icp_profile)

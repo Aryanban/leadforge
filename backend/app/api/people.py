@@ -292,6 +292,18 @@ async def query_people(
         icp_profile = await db.get(ICPProfile, icp_profile_id)
         if icp_profile is None:
             raise ValueError(f"No ICP profile with id {icp_profile_id}")
+
+        # Every business-level condition goes into ONE subquery over
+        # `businesses`, and the contacts are matched against it.
+        #
+        # Putting a `Business` column directly into the contacts statement
+        # makes SQLAlchemy add `businesses` to the FROM with no join
+        # condition - a cartesian product. The condition then compares
+        # every contact against every business, so the filter does not
+        # filter: "11-50 employees" returned both the 120-staff business
+        # and the 8-staff one.
+        business_conditions = []
+
         keywords = [str(k).strip().lower() for k in (icp_profile.keywords or []) if k]
         excludes = [
             str(k).strip().lower() for k in (icp_profile.exclude_keywords or []) if k
@@ -305,25 +317,73 @@ async def query_people(
                 )
                 for k in keywords
             ]
-            icp_clause = or_(*like_clauses)
-            stmt = stmt.where(Contact.business_id.in_(
-                select(Business.id).where(icp_clause)
-            ))
-            count_stmt = count_stmt.where(Contact.business_id.in_(
-                select(Business.id).where(icp_clause)
-            ))
+            business_conditions.append(or_(*like_clauses))
         for ex in excludes:
-            ex_clause = or_(
-                Business.name.ilike(f"%{ex}%"),
-                Business.industry.ilike(f"%{ex}%"),
-                Business.address.ilike(f"%{ex}%"),
+            business_conditions.append(
+                ~or_(
+                    Business.name.ilike(f"%{ex}%"),
+                    Business.industry.ilike(f"%{ex}%"),
+                    Business.address.ilike(f"%{ex}%"),
+                )
             )
-            stmt = stmt.where(Contact.business_id.notin_(
-                select(Business.id).where(ex_clause)
-            ))
-            count_stmt = count_stmt.where(Contact.business_id.notin_(
-                select(Business.id).where(ex_clause)
-            ))
+
+        # The structured criteria: what the company looks like, not what it
+        # is called. This is the part an operator sets from a sales
+        # conversation, so it has to be settable and enforceable.
+        if icp_profile.min_employees is not None:
+            business_conditions.append(
+                Business.employee_count >= icp_profile.min_employees
+            )
+        if icp_profile.max_employees is not None:
+            business_conditions.append(
+                Business.employee_count <= icp_profile.max_employees
+            )
+        if icp_profile.revenue_bands:
+            business_conditions.append(
+                Business.revenue_band.in_(list(icp_profile.revenue_bands))
+            )
+        if icp_profile.size_buckets:
+            business_conditions.append(
+                Business.size_bucket.in_(list(icp_profile.size_buckets))
+            )
+        if icp_profile.market_tiers:
+            business_conditions.append(
+                func.lower(Business.market_tier).in_(
+                    [str(t).lower() for t in icp_profile.market_tiers]
+                )
+            )
+        if icp_profile.states:
+            business_conditions.append(
+                func.lower(Business.state).in_(
+                    [str(t).lower() for t in icp_profile.states]
+                )
+            )
+
+        if business_conditions:
+            matching = select(Business.id).where(*business_conditions)
+            stmt = stmt.where(Contact.business_id.in_(matching))
+            count_stmt = count_stmt.where(Contact.business_id.in_(matching))
+
+        # The contact-level criteria are on the contact itself, so they go
+        # straight onto the statement.
+        contact_conditions = []
+        if icp_profile.seniorities:
+            contact_conditions.append(Contact.seniority.in_(list(icp_profile.seniorities)))
+        if icp_profile.decision_makers_only:
+            contact_conditions.append(Contact.seniority.in_(list(DECISION_MAKER_BANDS)))
+        if icp_profile.require_email:
+            contact_conditions.append(Contact.email.isnot(None))
+            contact_conditions.append(Contact.email != "")
+        for condition in contact_conditions:
+            stmt = stmt.where(condition)
+            count_stmt = count_stmt.where(condition)
+
+    # Whether `businesses` has already been joined onto these statements.
+    #
+    # Joining it twice makes every `businesses.*` column ambiguous, so the
+    # error only appears when a search is combined with a company sort -
+    # a combination nobody tests until a user does it.
+    business_joined = False
 
     if search:
         term = f"%{search.strip()}%"
@@ -339,6 +399,7 @@ async def query_people(
         count_stmt = count_stmt.join(
             Business, Contact.business_id == Business.id
         ).where(name_expr)
+        business_joined = True
 
     total = (await db.execute(count_stmt)).scalar() or 0
 
@@ -353,7 +414,7 @@ async def query_people(
         "score": Business.score,
     }
     sort_col = sort_map.get(sort, Contact.created_at)
-    if sort == "company" or sort == "employees" or sort == "score":
+    if not business_joined and sort in ("company", "employees", "score"):
         stmt = stmt.join(Business, Contact.business_id == Business.id)
     stmt = stmt.order_by(sort_col.desc() if desc else sort_col.asc())
     stmt = stmt.offset(offset).limit(limit)
