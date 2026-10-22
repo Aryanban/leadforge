@@ -45,9 +45,88 @@ MODERATE_RISK_SPAM_WORDS = {
     "success", "traffic", "unbelievable", "unmatched"
 }
 
+#: The signatures that end a cold email from an Indian mailbox and, on
+#: their own, account for a large share of the "professional" cold email
+#: that Indian recipients see. They are not spam triggers - they are
+#: *unpersonalised* tells, and they reliably lower reply rates because the
+#: recipient can tell the mail was not written for them.
+#:
+#: Flagged separately from the risk words, and with a smaller penalty: a
+#: message with "Dear Sir/Madam" is not a spam message, it is a message
+#: nobody wrote by hand.
+INDIAN_UNPERSONALISED_TELLS = {
+    "dear sir", "dear madam", "dear sir/madam", "dear sir or madam",
+    "sir/madam", "esteemed sir", "esteemed madam", "respected sir",
+    "to whom it may concern", "m/s", "prop.", "prop",
+}
+
+#: The Indian-English office phrases. Unprofessional, not spammy - but a
+#: prospect reading "kindly do the needful" knows the mail came from a
+#: list.
+INDIAN_OFFICE_TELLS = {
+    "revert back", "kindly revert", "kindly do the needful",
+    "do the needful", "please do the needful", "your kind cooperation",
+    "looking forward for your response", "looking forward to your response",
+    "awaiting your reply", "awaiting your response", "requesting you to kindly",
+    "favour your response", "your early reply", "requesting your early reply",
+    "viz.", "viz", "p.s.", "pls.", "plz", "plz.", "kindly", "pls",
+    "with warm regards", "warm regards", "best regards", "thanks & regards",
+    "thanking you", "thanking you in advance", "yours sincerely",
+    "do reply", "pls revert", "requested to revert", "request you to revert",
+    "as per our discussion", "as per our telephonic discussion",
+    "as discussed over phone", "as per below", "your cooperation",
+    "your valuable response", "your early response", "we request you to kindly",
+    "business proposal", "i am writing to inform you",
+    "your presence is requested",
+}
+
+#: Indian cold-email offers and the number-harvesting close. These *are*
+#: spam triggers, and they are the ones that actually get an Indian
+#: mailbox's spam folder filled.
+INDIA_HIGH_RISK_PHRASES = {
+    "save our number", "save the number", "save my number",
+    "our executive will contact you", "our sales executive will contact",
+    "our team will call you", "we will call you back", "we will call you",
+    "talk to our sales executive", "connect with our sales",
+    "100% genuine", "100% guaranteed", "guaranteed income",
+    "guaranteed returns", "guaranteed job", "no guarantee",
+    "income opportunity", "part-time income", "part time income",
+    "work from home and earn", "work from home income",
+    "data entry job", "online data entry", "typing job",
+    "earn without investment", "earn without any investment",
+    "register and earn", "investment opportunity",
+    "limited period offer", "offer valid for limited period",
+    "call us 24x7", "available 24x7", "24/7 support",
+    "bulk sms", "bulk email service", "bulk marketing",
+    "telegram for more", "whatsapp for more details", "whatsapp for more info",
+    "free gift", "free products", "free sample", "free demo",
+    "claim your free", "exclusive offer for you", "special offer for you",
+    "limited stock", "hurry", "don't miss", "do not miss",
+    "last chance", "final chance", "ending today", "ends today",
+    "exclusive dealership", "become a partner", "become a dealer",
+    "apply now", "register now", "enroll now", "join now",
+    "limited seats", "seats filling fast", "filling fast",
+}
+
+#: The mobile signature. On its own it is the single strongest deliverability
+#: signal in a cold email - Gmail and Outlook both treat "Sent from my
+#: iPhone" as a bulk-mail marker - and every Indian mailbox has it on by
+#: default, so the sender has to turn it off deliberately.
+MOBILE_SIGNATURES = {
+    "sent from my iphone", "sent from my ipad", "sent from my android",
+    "sent from my mobile", "sent from my phone", "sent from my ipad",
+    "get outlook for android", "sent from my samsung", "sent from my moto",
+    "sent from my oneplus", "sent from my redmi",
+}
+
 PUNCTUATION_RUNS_REGEX = re.compile(r'[!?]{2,}')
 ALL_CAPS_WORD_REGEX = re.compile(r'\b[A-Z]{3,}\b')
 URL_REGEX = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+')
+#: An Indian email addresses the recipient as "Sir/Madam", "SIR", "MADAM".
+INDIAN_SALUTATION_REGEX = re.compile(
+    r'\bdear\s+(?:sir|madam|sir\s*/\s*madam|sir\s+or\s+madam|valued\s+(?:sir|customer|client))',
+    re.IGNORECASE,
+)
 
 
 def check_cold_email_spam(subject: str, body: str) -> Dict[str, Any]:
@@ -78,6 +157,33 @@ def check_cold_email_spam(subject: str, body: str) -> Dict[str, Any]:
         if re.search(pattern, combined_text) and word not in high_risk_found:
             moderate_risk_found.append(word)
 
+    # The India-specific tells. Checked before the risk words so that a
+    # phrase like "dear sir/madam" is reported once, in the category it
+    # actually belongs to.
+    india_high_found: List[str] = []
+    for phrase in INDIA_HIGH_RISK_PHRASES:
+        pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
+        if re.search(pattern, combined_text):
+            india_high_found.append(phrase)
+
+    india_tells: List[str] = []
+    for phrase in set(INDIAN_UNPERSONALISED_TELLS) | set(INDIAN_OFFICE_TELLS):
+        pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
+        if re.search(pattern, combined_text):
+            india_tells.append(phrase)
+
+    mobile_signature: Optional[str] = None
+    for phrase in MOBILE_SIGNATURES:
+        if re.search(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', combined_text):
+            mobile_signature = phrase
+            break
+
+    # "Dear Sir/Madam" written the way it is actually written.
+    indian_salutation = bool(
+        INDIAN_SALUTATION_REGEX.search(subject or "")
+        or INDIAN_SALUTATION_REGEX.search(body or "")
+    )
+
     warnings: List[str] = []
     recommendations: List[str] = []
 
@@ -90,6 +196,57 @@ def check_cold_email_spam(subject: str, body: str) -> Dict[str, Any]:
         penalty += word_penalty
         warnings.append(f"Contains {len(high_risk_found)} high-risk spam trigger phrase(s): {', '.join(high_risk_found[:4])}")
         recommendations.append("Replace aggressive sales language with conversational, consultative wording.")
+
+    # 1b. The Indian spam phrases. Weighted the same as the Western list:
+    # "guaranteed returns" and "save our number" are exactly as spammy as
+    # "double your income" and "act now".
+    if india_high_found:
+        india_penalty = min(len(india_high_found) * 15, 45)
+        penalty += india_penalty
+        warnings.append(
+            f"Contains {len(india_high_found)} Indian spam trigger phrase(s): "
+            f"{', '.join(india_high_found[:4])}"
+        )
+        recommendations.append(
+            "Remove the number-harvesting close and the guaranteed-offer language; "
+            "both are what put an Indian mailbox straight into the spam folder."
+        )
+
+    # 1c. The mobile signature. On its own this is worth more than most
+    # of the word list combined.
+    if mobile_signature:
+        penalty += 20
+        warnings.append(
+            f"Body contains the mobile signature \"{mobile_signature}\"."
+        )
+        recommendations.append(
+            "Turn off 'Send from my phone' in your mail app. Gmail and Outlook "
+            "both treat that line as a bulk-mail marker."
+        )
+
+    # 1d. The unpersonalised tells. Smaller penalty - these are not spam,
+    # but they tell the recipient the mail came from a list.
+    if india_tells:
+        tells_penalty = min(len(india_tells) * 3, 12)
+        penalty += tells_penalty
+        warnings.append(
+            f"Uses unpersonalised phrasing ({len(india_tells)}): "
+            f"{', '.join(sorted(india_tells)[:5])}"
+        )
+        recommendations.append(
+            "Address the person by name and write to one business. \"Dear "
+            "Sir/Madam\" and \"kindly revert\" are how a recipient spots a list."
+        )
+
+    if indian_salutation:
+        penalty += 6
+        warnings.append(
+            "The subject or opening is addressed to \"Dear Sir/Madam\"."
+        )
+        recommendations.append(
+            "Open with the person's name. The name is already in the contact - "
+            "using it is the whole difference."
+        )
 
     # 2. Moderate-risk words: -3 pts each (up to 15 pts)
     if len(moderate_risk_found) >= 3:
@@ -139,6 +296,46 @@ def check_cold_email_spam(subject: str, body: str) -> Dict[str, Any]:
         # Having 0 links is actually great for cold outreach step 1!
         pass
 
+    # --- Density signals -----------------------------------------------------
+    #
+    # A *ratio* catches what a per-word check cannot: three ALL-CAPS words
+    # in a thirty-word body is shouting, and ten exclamation marks in a
+    # hundred words is not a friendly tone. Both are bulk-mail markers.
+    body_words = re.findall(r"[A-Za-z']+", body or "")
+    word_count = len(body_words)
+    all_caps_words = [w for w in body_words if len(w) >= 3 and w.isupper()]
+
+    caps_density = (len(all_caps_words) / word_count) if word_count else 0.0
+    if caps_density > 0.15 and len(all_caps_words) >= 3:
+        penalty += 12
+        warnings.append(
+            f"{round(caps_density * 100)}% of the body is in capitals "
+            f"({len(all_caps_words)} words). Bulk mail shouts."
+        )
+        recommendations.append("Use sentence case. Capital blocks read as marketing.")
+
+    exclamations = (body or "").count("!")
+    exclamation_density = (exclamations / word_count) if word_count else 0.0
+    if exclamation_density > 0.02 and exclamations >= 3:
+        penalty += 8
+        warnings.append(
+            f"{exclamations} exclamation marks in {word_count} words."
+        )
+        recommendations.append(
+            "Drop the exclamation marks - in cold email they read as pressure."
+        )
+
+    link_density = (len(links) / word_count) if word_count else 0.0
+    if link_density > 0.03 and len(links) >= 2:
+        penalty += 10
+        warnings.append(
+            f"Link density is {round(link_density * 100, 1)} per word "
+            f"({len(links)} links in {word_count} words)."
+        )
+        recommendations.append(
+            "One link is the ceiling for a first email; more reads as a landing page."
+        )
+
     # Personalization bonus / penalty
     has_personalization = any(tag in body or tag in subject for tag in [
         "{{first_name}}", "{{business_name}}", "{{name}}", "{{city}}", "{{category}}", "{{ai_icebreaker}}"
@@ -168,9 +365,16 @@ def check_cold_email_spam(subject: str, body: str) -> Dict[str, Any]:
         "is_safe": final_score >= 70,
         "high_risk_words": high_risk_found,
         "moderate_risk_words": moderate_risk_found,
+        "india_risk_phrases": india_high_found,
+        "india_tells": sorted(india_tells),
+        "mobile_signature": mobile_signature,
+        "indian_salutation": indian_salutation,
         "link_count": len(links),
         "subject_word_count": subject_len,
         "has_personalization": has_personalization,
+        "caps_density": round(caps_density, 4),
+        "exclamation_density": round(exclamation_density, 4),
+        "link_density": round(link_density, 4),
         "warnings": warnings,
         "recommendations": recommendations,
     }

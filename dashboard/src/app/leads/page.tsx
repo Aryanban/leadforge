@@ -2117,6 +2117,48 @@ function LeadsPageInner() {
                   </div>
                 )}
 
+                {/* India-specific findings. A Western word list reads an
+                    Indian cold email as "Good" - these are the tells that
+                    an Indian recipient recognises instantly. */}
+                {(spamResult.india_risk_phrases?.length > 0 ||
+                  spamResult.india_tells?.length > 0 ||
+                  spamResult.mobile_signature ||
+                  spamResult.indian_salutation) ? (
+                  <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
+                    <div className="text-[11px] font-bold text-slate-700">
+                      India-specific findings
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {spamResult.india_risk_phrases?.map((w: string, i: number) => (
+                        <span
+                          key={`r${i}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-semibold"
+                        >
+                          ⚠️ {w} (spam)
+                        </span>
+                      ))}
+                      {spamResult.india_tells?.map((w: string, i: number) => (
+                        <span
+                          key={`t${i}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold"
+                        >
+                          {w}
+                        </span>
+                      ))}
+                      {spamResult.mobile_signature && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-semibold">
+                          ⚠️ {spamResult.mobile_signature}
+                        </span>
+                      )}
+                      {spamResult.indian_salutation && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold">
+                          Dear Sir/Madam
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
                 {/* Warnings / Recommendations */}
                 {(spamResult.recommendations?.length > 0 || spamResult.warnings?.length > 0) && (
                   <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
