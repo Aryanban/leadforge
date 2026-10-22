@@ -392,3 +392,104 @@ async def test_mcp_people_tool_returns_a_table():
     assert "| Contact ID |" in out
     # The tool must tell the agent how to use the rows.
     assert "add_campaign_targets" in out
+
+
+# --------------------------------------------------------------------------
+# ICP-relative scoring
+# --------------------------------------------------------------------------
+
+
+async def _seed_people_world():
+    """A tiny world: a Delhi agency, a Mumbai cafe, and a saved ICP."""
+    from app.database import async_session_maker
+    from app.models.business import Business
+    from app.models.contact import Contact
+    from app.models.icp_profile import ICPProfile
+
+    async with async_session_maker() as db:
+        icp = ICPProfile(
+            name="Real Estate Agents",
+            niche="real estate agents",
+            area="Delhi",
+            keywords=["real estate"],
+            exclude_keywords=[],
+            min_score=0,
+            preset="outreach_quality",
+        )
+        db.add(icp)
+        await db.flush()
+
+        agency = Business(
+            name="Delhi Real Estate Partners", industry="Real estate",
+            address="Sector 8, Rohini, New Delhi", city="Delhi", state="Delhi",
+            website="https://example.in", phone="+91 98111 22233",
+            icp_profile_id=icp.id, score=50,
+        )
+        cafe = Business(
+            name="Mumbai Cafe Corner", industry="Cafe",
+            address="Bandra West, Mumbai", city="Mumbai", state="Maharashtra",
+            website="https://cafe.example.in", phone="+91 98222 33333",
+            score=50,
+        )
+        db.add_all([agency, cafe])
+        await db.flush()
+
+        db.add_all([
+            Contact(
+                business_id=agency.id, first_name="Rakesh", last_name="Gupta",
+                title="Proprietor", email="rakesh@example.in",
+                phone="+91 98111 22233", verification_status="valid",
+                is_verified=True, person_identified=True,
+                seniority="owner", is_decision_maker=True,
+            ),
+            Contact(
+                business_id=cafe.id, first_name="Asha", last_name="Rao",
+                title="Owner", email="asha@cafe.example.in",
+                phone="+91 98222 33333", verification_status="valid",
+                is_verified=True, person_identified=True,
+                seniority="owner", is_decision_maker=True,
+            ),
+        ])
+        await db.commit()
+        return icp.id
+
+
+@pytest.mark.asyncio
+async def test_the_score_is_relative_to_the_icp_not_a_global_number():
+    """A lead that is a good record can still be a bad fit.
+
+    The score used to be computed with no profile attached, so the fit
+    signals never applied and every lead got the same "how complete is
+    this record" number.
+    """
+    from app.api.people import query_people
+    from app.database import async_session_maker
+
+    icp_id = await _seed_people_world()
+
+    async with async_session_maker() as db:
+        filtered = await query_people(db, limit=10, icp_profile_id=icp_id)
+        assert filtered["total"] == 1, "the ICP keyword should narrow the set"
+        row = filtered["people"][0]
+        assert row["business_name"] == "Delhi Real Estate Partners"
+        # The relative score is present and is not simply the cached column.
+        assert row["icp_score"] is not None
+        assert row["icp_score"] != row["lead_score"] or row["icp_score"] == 50
+
+
+@pytest.mark.asyncio
+async def test_the_icp_filter_excludes_what_the_profile_excludes():
+    from app.api.people import query_people
+    from app.database import async_session_maker
+    from app.models.icp_profile import ICPProfile
+
+    icp_id = await _seed_people_world()
+
+    async with async_session_maker() as db:
+        profile = await db.get(ICPProfile, icp_id)
+        profile.exclude_keywords = ["cafe"]
+        await db.commit()
+
+        filtered = await query_people(db, limit=10, icp_profile_id=icp_id)
+        assert filtered["total"] == 1
+        assert filtered["people"][0]["business_name"] == "Delhi Real Estate Partners"

@@ -88,6 +88,32 @@ async def _fts_search_condition(db: AsyncSession, term: str):
     )
 
 
+async def _load_icp_profiles(
+    db: AsyncSession,
+    business_ids: List[int],
+) -> Dict[int, Any]:
+    """Loads the ICP profiles a page of leads was saved against.
+
+    One query for the whole page. A per-lead lookup would be N queries on
+    the product's front door.
+    """
+    if not business_ids:
+        return {}
+    from app.models.icp_profile import ICPProfile
+
+    ids = set()
+    stmt = select(Business.icp_profile_id).where(Business.id.in_(business_ids))
+    for (icp_id,) in (await db.execute(stmt)).all():
+        if icp_id:
+            ids.add(icp_id)
+    if not ids:
+        return {}
+    profiles = (await db.execute(
+        select(ICPProfile).where(ICPProfile.id.in_(ids))
+    )).scalars().all()
+    return {p.id: p for p in profiles}
+
+
 @router.get("")
 @router.get("/")
 async def get_leads(
@@ -222,6 +248,16 @@ async def get_leads(
                 "unsubscribed": c.unsubscribed
             })
 
+    # The ICP profiles these leads were saved against, in ONE query.
+    #
+    # The score is relative to the search: a lead's fit, its category match
+    # and whether a weak web presence is a penalty or an opportunity all
+    # depend on the profile. Scoring every lead as if it had no profile
+    # made the number a global "how complete is this record" rather than
+    # "how good is this lead for *my* ICP" - which is the number a
+    # salesperson actually sorts by.
+    icp_profiles = await _load_icp_profiles(db, b_ids)
+
     leads_data = []
     #: Business ids whose persisted score was stale and has just been
     #: recomputed.
@@ -260,7 +296,9 @@ async def get_leads(
         # stale cached value won, and scores from different ICPs were not
         # comparable. Computing it live makes the score mean the same thing
         # everywhere and makes ICP tuning visible immediately.
-        score_info = calculate_lead_quality_score(b, b_contacts)
+        score_info = calculate_lead_quality_score(
+            b, b_contacts, icp_profiles.get(b.icp_profile_id)
+        )
         lead_score = score_info["score"]
         lead_tier = score_info["tier"]
         lead_badges = score_info["badges"]

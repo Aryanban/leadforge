@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  ICPProfile,
   PeopleFacets,
   PeopleQuery,
   PeopleStats,
@@ -100,6 +101,8 @@ export default function PeoplePage() {
   const [personOnly, setPersonOnly] = useState(true);
   const [sort, setSort] = useState("created");
   const [desc, setDesc] = useState(true);
+  const [icpId, setIcpId] = useState("");
+  const [icps, setIcps] = useState<ICPProfile[]>([]);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -127,6 +130,7 @@ export default function PeoplePage() {
     if (sizeBucket) q.size_bucket = sizeBucket;
     if (revenueBand) q.revenue_band = revenueBand;
     if (technology) q.technology = technology;
+    if (icpId) q.icp_profile_id = Number(icpId);
     if (hasEmail === "yes") q.has_email = true;
     if (hasEmail === "no") q.has_email = false;
     if (decisionOnly) q.decision_makers_only = true;
@@ -134,7 +138,7 @@ export default function PeoplePage() {
     return q;
   }, [
     page, sort, desc, personOnly, debouncedSearch, seniority, city,
-    marketTier, sizeBucket, revenueBand, technology, hasEmail,
+    marketTier, sizeBucket, revenueBand, technology, icpId, hasEmail,
     decisionOnly, verifiedOnly,
   ]);
 
@@ -181,6 +185,22 @@ export default function PeoplePage() {
     };
   }, [personOnly]);
 
+  // The saved ICPs, for the "judged against my ICP" filter.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.listIcps();
+        if (!cancelled) setIcps(list);
+      } catch {
+        /* The filter is optional; its absence must not break the page. */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const activeFilters = useMemo<ActiveFilter[]>(() => {
     const out: ActiveFilter[] = [];
     if (debouncedSearch.trim())
@@ -204,6 +224,10 @@ export default function PeoplePage() {
       out.push({ key: "revenue_band", label: "Turnover", value: revenueBand });
     if (technology)
       out.push({ key: "technology", label: "Tech", value: technology });
+    if (icpId) {
+      const icp = icps.find((i) => String(i.id) === icpId);
+      out.push({ key: "icp_profile_id", label: "ICP", value: icp?.name || `#${icpId}` });
+    }
     if (hasEmail)
       out.push({
         key: "has_email",
@@ -227,7 +251,7 @@ export default function PeoplePage() {
     return out;
   }, [
     debouncedSearch, seniority, city, marketTier, sizeBucket, revenueBand,
-    technology, hasEmail, decisionOnly, verifiedOnly, personOnly,
+    technology, icpId, icps, hasEmail, decisionOnly, verifiedOnly, personOnly,
   ]);
 
   const clearFilter = (key: keyof PeopleQuery) => {
@@ -240,6 +264,7 @@ export default function PeoplePage() {
       case "size_bucket": setSizeBucket(""); break;
       case "revenue_band": setRevenueBand(""); break;
       case "technology": setTechnology(""); break;
+      case "icp_profile_id": setIcpId(""); break;
       case "has_email": setHasEmail(""); break;
       case "decision_makers_only": setDecisionOnly(false); break;
       case "verified_only": setVerifiedOnly(false); break;
@@ -251,6 +276,7 @@ export default function PeoplePage() {
     setSearch(""); setDebouncedSearch("");
     setSeniority(""); setCity(""); setMarketTier("");
     setSizeBucket(""); setRevenueBand(""); setTechnology("");
+    setIcpId("");
     setHasEmail(""); setDecisionOnly(false); setVerifiedOnly(false);
     setPersonOnly(true);
     setPage(1);
@@ -416,6 +442,13 @@ export default function PeoplePage() {
               { value: "yes", label: "Has email" },
               { value: "no", label: "No email" },
             ]}
+          />
+          <FilterSelect
+            label="ICP"
+            value={icpId}
+            onChange={(v) => { setIcpId(v); setPage(1); }}
+            options={icps.map((i) => ({ value: String(i.id), label: i.name }))}
+            emptyLabel="No saved ICP yet"
           />
           <FilterSelect
             label="Sort"
@@ -833,7 +866,19 @@ function PersonRowDesktop({ person }: { person: PersonRow }) {
         <ReachCell person={person} />
       </td>
       <td className="px-4 py-3 text-right">
-        {person.lead_score !== null ? (
+        {person.icp_score !== null && person.icp_score !== undefined ? (
+          <span
+            className="text-sm font-semibold tabular-nums text-slate-900"
+            title="Scored against the ICP this row is judged by"
+          >
+            {Math.round(person.icp_score)}
+            {person.lead_score !== null && person.lead_score !== undefined && (
+              <span className="ml-1 text-[10px] font-normal text-slate-500">
+                (base {Math.round(person.lead_score)})
+              </span>
+            )}
+          </span>
+        ) : person.lead_score !== null && person.lead_score !== undefined ? (
           <span className="text-sm font-semibold tabular-nums text-slate-700">
             {Math.round(person.lead_score)}
           </span>

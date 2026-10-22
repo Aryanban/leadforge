@@ -143,6 +143,10 @@ async def list_people(
                     "include business-level outreach targets (a phone and a "
                     "WhatsApp number, but no person behind them yet).",
     ),
+    icp_profile_id: Optional[int] = Query(
+        None,
+        description="Only people at the companies this ICP profile is about.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Lists people, one row per human, with company attributes joined in."""
@@ -168,6 +172,7 @@ async def list_people(
         desc=desc,
         include_demo=include_demo,
         person_only=person_only,
+        icp_profile_id=icp_profile_id,
     )
 
 
@@ -193,6 +198,7 @@ async def query_people(
     desc: bool = True,
     include_demo: bool = True,
     person_only: bool = True,
+    icp_profile_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The People query, as a plain function.
 
@@ -274,6 +280,51 @@ async def query_people(
         stmt = stmt.where(Contact.business_id.in_(subquery))
         count_stmt = count_stmt.where(Contact.business_id.in_(subquery))
 
+    # An ICP filter: the businesses this profile is actually about.
+    #
+    # The ICP's keyword rules are the operator's own statement of who they
+    # sell to, so "show me the people at the companies I sell to" is a
+    # question the People table has to be able to answer.
+    icp_profile = None
+    if icp_profile_id:
+        from app.models.icp_profile import ICPProfile
+
+        icp_profile = await db.get(ICPProfile, icp_profile_id)
+        if icp_profile is None:
+            raise ValueError(f"No ICP profile with id {icp_profile_id}")
+        keywords = [str(k).strip().lower() for k in (icp_profile.keywords or []) if k]
+        excludes = [
+            str(k).strip().lower() for k in (icp_profile.exclude_keywords or []) if k
+        ]
+        if keywords:
+            like_clauses = [
+                or_(
+                    Business.name.ilike(f"%{k}%"),
+                    Business.industry.ilike(f"%{k}%"),
+                    Business.address.ilike(f"%{k}%"),
+                )
+                for k in keywords
+            ]
+            icp_clause = or_(*like_clauses)
+            stmt = stmt.where(Contact.business_id.in_(
+                select(Business.id).where(icp_clause)
+            ))
+            count_stmt = count_stmt.where(Contact.business_id.in_(
+                select(Business.id).where(icp_clause)
+            ))
+        for ex in excludes:
+            ex_clause = or_(
+                Business.name.ilike(f"%{ex}%"),
+                Business.industry.ilike(f"%{ex}%"),
+                Business.address.ilike(f"%{ex}%"),
+            )
+            stmt = stmt.where(Contact.business_id.notin_(
+                select(Business.id).where(ex_clause)
+            ))
+            count_stmt = count_stmt.where(Contact.business_id.notin_(
+                select(Business.id).where(ex_clause)
+            ))
+
     if search:
         term = f"%{search.strip()}%"
         name_expr = or_(
@@ -317,7 +368,28 @@ async def query_people(
         )).scalars().all():
             businesses[b.id] = b
 
-    people = [_person_row(c, businesses.get(c.business_id)) for c in rows]
+    # The ICP profiles these companies were saved against, in one query.
+    # The score is relative to the search: a lead's fit, its category
+    # match and whether a weak web presence is a penalty or an
+    # opportunity all depend on the profile.
+    icp_profiles = await _load_icp_profiles(db, list(b_ids))
+
+    people = []
+    for c in rows:
+        business = businesses.get(c.business_id)
+        row = _person_row(c, business)
+        if business is not None:
+            # The profile the operator is filtering by wins over the one
+            # the business happens to be attached to. "Show me the people at
+            # my ICP, scored against my ICP" is the question; a business
+            # matched by keyword but never saved under that profile still
+            # has to be scored against it.
+            effective = icp_profile or icp_profiles.get(business.icp_profile_id)
+            row["icp_score"] = _icp_relative_score(business, effective)
+            row["icp_profile_id"] = (
+                icp_profile.id if icp_profile else business.icp_profile_id
+            )
+        people.append(row)
 
     return {
         "total": total,
@@ -326,6 +398,46 @@ async def query_people(
         "pages": (total + limit - 1) // limit if limit else 0,
         "people": people,
     }
+
+
+async def _load_icp_profiles(
+    db: AsyncSession,
+    business_ids: List[int],
+) -> Dict[int, Any]:
+    """Loads the ICP profiles a page of companies was saved against."""
+    if not business_ids:
+        return {}
+    from app.models.icp_profile import ICPProfile
+
+    ids = set()
+    stmt = select(Business.icp_profile_id).where(Business.id.in_(business_ids))
+    for (icp_id,) in (await db.execute(stmt)).all():
+        if icp_id:
+            ids.add(icp_id)
+    if not ids:
+        return {}
+    profiles = (await db.execute(
+        select(ICPProfile).where(ICPProfile.id.in_(ids))
+    )).scalars().all()
+    return {p.id: p for p in profiles}
+
+
+def _icp_relative_score(business: Any, icp_profile: Any) -> Optional[int]:
+    """The lead score computed against the business's own ICP.
+
+    ``None`` when the business has no ICP attached - there is nothing
+    relative to score against, and reporting the global score under an
+    "ICP score" label would be the same lie in a new place.
+    """
+    if icp_profile is None:
+        return None
+    from app.enricher.email_finder import calculate_lead_quality_score
+
+    try:
+        result = calculate_lead_quality_score(business, [], icp_profile)
+    except Exception:
+        return None
+    return result.get("score")
 
 
 @router.get("/facets")

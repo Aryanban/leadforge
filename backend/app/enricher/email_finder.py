@@ -447,17 +447,24 @@ def generate_email_permutations(name: str, domain: str) -> List[str]:
     return unique_perms
 
 
-def calculate_lead_quality_score(business: Any, contacts: List[Any]) -> Dict[str, Any]:
+def calculate_lead_quality_score(
+    business: Any,
+    contacts: List[Any],
+    icp_profile: Any = None,
+) -> Dict[str, Any]:
     """
-    Legacy entry point for the 0-100 lead quality score.
+    Entry point for the 0-100 lead quality score.
 
-    Preserved as a thin wrapper over the weighted qualifier model so existing
-    callers keep producing identical scores and badges; it is equivalent to
-    scoring without an attached ICP profile.
+    Without an ICP profile this reproduces the legacy
+    calculate_lead_quality_score output exactly. With one, the fit and
+    intent signals are layered in and the profile's preset decides whether
+    a weak web presence is a penalty or an opportunity - which is what
+    makes the score *relative to the search* rather than a global
+    "completeness" number that says the same thing about every lead.
     """
     from app.qualifier.scorer import score_lead
 
-    result = score_lead(business, contacts)
+    result = score_lead(business, contacts, icp_profile)
 
     extra = getattr(business, "extra_data", None)
     if isinstance(extra, dict) and extra.get("is_claimed", True) is False:

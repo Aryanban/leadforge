@@ -335,6 +335,13 @@ export interface PersonRow {
   revenue_band: string | null;
   technologies: string[];
   lead_score: number | null;
+  /**
+   * The score computed against the ICP this row is being judged by. It
+   * differs from `lead_score` because the fit signals depend on the
+   * profile: a lead that is a good record can still be a bad fit.
+   */
+  icp_score?: number | null;
+  icp_profile_id?: number | null;
   created_at: string | null;
 }
 
@@ -391,6 +398,7 @@ export interface PeopleQuery {
   desc?: boolean;
   include_demo?: boolean;
   person_only?: boolean;
+  icp_profile_id?: number;
 }
 
 export interface ScrapeJob {
