@@ -534,6 +534,20 @@ export interface ICPDraft {
   preset: "outreach_quality" | "agency_opportunity";
   signal_weights: Record<string, number> | null;
   preferred_sources: string[] | null;
+  /**
+   * The structured criteria. Keywords say what a business is *called*;
+   * these say what it *looks like* - the part an operator sets from a
+   * sales conversation.
+   */
+  min_employees?: number | null;
+  max_employees?: number | null;
+  revenue_bands?: string[];
+  size_buckets?: string[];
+  market_tiers?: string[];
+  states?: string[];
+  seniorities?: string[];
+  decision_makers_only?: boolean;
+  require_email?: boolean;
 }
 
 export interface ICPProfile extends ICPDraft {
@@ -541,6 +555,19 @@ export interface ICPProfile extends ICPDraft {
   source_stats: Record<string, { leads: number; avg_score: number }>;
   created_at: string | null;
   updated_at: string | null;
+}
+
+/**
+ * The parsed draft.
+ *
+ * `unsupported_terms` and `warnings` are the parser's promise: they list
+ * the constraints it could NOT honour. They have to be shown - a silently
+ * dropped filter gives the operator a list that looks like an answer and
+ * is not.
+ */
+export interface ICPParsedDraft extends ICPDraft {
+  unsupported_terms?: string[];
+  warnings?: string[];
 }
 
 export interface RankedContact {
@@ -844,7 +871,7 @@ export const api = {
 
   // ICP & Discovery
   parseIcp: (text: string) =>
-    request<ICPDraft>('/icp/parse', { method: 'POST', body: JSON.stringify({ text }) }),
+    request<ICPParsedDraft>('/icp/parse', { method: 'POST', body: JSON.stringify({ text }) }),
   createIcp: (data: ICPDraft) =>
     request<ICPProfile>('/icp', { method: 'POST', body: JSON.stringify(data) }),
   listIcps: () => request<ICPProfile[]>('/icp'),

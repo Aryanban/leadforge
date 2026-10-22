@@ -279,6 +279,50 @@ test('AI Lead Finder: parse an intent into a structured ICP draft', async ({ pag
   await pw.screenshot({ path: path.join(SHOTS, 'find-parsed.png'), fullPage: true });
 });
 
+test('AI Lead Finder: the structured criteria survive the wizard', async ({ page: pw }) => {
+  // The parser reads "11-50 employees" into a size filter. If the wizard
+  // does not carry it, the operator saves an ICP that is not the one they
+  // described - and the difference is invisible until the results are
+  // wrong.
+  await pw.goto(BASE + '/find', { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(500);
+
+  const textarea = pw.locator('textarea').first();
+  await textarea.fill('real estate agencies in Pune with 11-50 employees');
+  const parseBtn = pw.getByRole('button', { name: /draft|parse|extract|understand|magic/i }).first();
+  await parseBtn.click();
+  await pw.waitForTimeout(2500);
+
+  const minStaff = pw.getByLabel('Minimum staff');
+  expect(await minStaff.count(), 'the wizard has no minimum-staff field').toBeGreaterThan(0);
+  expect(
+    await minStaff.inputValue(),
+    'the parsed headcount did not reach the wizard'
+  ).toBe('11');
+
+  const maxStaff = pw.getByLabel('Maximum staff');
+  expect(await maxStaff.inputValue()).toBe('50');
+});
+
+test('AI Lead Finder: a filter it cannot honour is reported', async ({ page: pw }) => {
+  // A silently dropped constraint gives the operator a list that looks
+  // like an answer and is not.
+  await pw.goto(BASE + '/find', { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(500);
+
+  const textarea = pw.locator('textarea').first();
+  await textarea.fill('gstin registered businesses in Chennai');
+  const parseBtn = pw.getByRole('button', { name: /draft|parse|extract|understand|magic/i }).first();
+  await parseBtn.click();
+  await pw.waitForTimeout(2500);
+
+  const body = await pw.locator('body').innerText();
+  expect(
+    /gstin/i.test(body),
+    'the wizard did not report that it could not honour the GSTIN filter'
+  ).toBe(true);
+});
+
 test('Sequences: add a step and the step editor appears', async ({ page: pw }) => {
   await pw.goto(BASE + '/sequences', { waitUntil: 'networkidle' });
   await pw.waitForTimeout(600);

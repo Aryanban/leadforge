@@ -32,6 +32,15 @@ const EMPTY_DRAFT: ICPDraft = {
   preset: "outreach_quality",
   signal_weights: null,
   preferred_sources: null,
+  min_employees: null,
+  max_employees: null,
+  revenue_bands: [],
+  size_buckets: [],
+  market_tiers: [],
+  states: [],
+  seniorities: [],
+  decision_makers_only: false,
+  require_email: false,
 };
 
 export default function FindLeadsPage() {
@@ -46,6 +55,10 @@ export default function FindLeadsPage() {
   const [parsing, setParsing] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [ranking, setRanking] = useState(false);
+  // The parser's promise: the constraints it could NOT honour. They have to
+  // be visible - a silently dropped filter gives the operator a list that
+  // looks like an answer and is not.
+  const [parseWarnings, setParseWarnings] = useState<string[]>([]);
 
   const hasDraft = Boolean(draft.niche);
 
@@ -57,6 +70,7 @@ export default function FindLeadsPage() {
       setError(null);
       const parsed = await api.parseIcp(intentText);
       setDraft(parsed);
+      setParseWarnings(parsed.warnings || []);
     } catch (err: any) {
       setError(err.message || "Could not parse that intent");
     } finally {
@@ -216,6 +230,22 @@ export default function FindLeadsPage() {
             Try signals like &ldquo;verified emails&rdquo;, &ldquo;no website&rdquo;, &ldquo;running ads&rdquo;, or &ldquo;best leads&rdquo;
             to tune the scoring model.
           </p>
+
+          {/* What the parser could not honour. A silently dropped filter
+              gives the operator a list that looks like an answer and is
+              not, so it has to be said out loud. */}
+          {parseWarnings.length > 0 && (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1"
+            >
+              {parseWarnings.map((w, i) => (
+                <p key={i} className="text-[11px] text-amber-900 leading-relaxed">
+                  {w}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Step 2 — Refine ICP */}
@@ -295,6 +325,157 @@ export default function FindLeadsPage() {
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </label>
+
+            {/* The structured criteria. Keywords say what a business is
+                *called*; these say what it *looks like* - which is what a
+                salesperson actually says when they describe their
+                market. */}
+            <div className="col-span-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+              <p className="font-semibold text-slate-700 mb-2">
+                What the company looks like
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Minimum staff
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.min_employees ?? ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        min_employees: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                    placeholder="e.g. 11"
+                    aria-label="Minimum staff"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Maximum staff
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.max_employees ?? ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        max_employees: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                    placeholder="e.g. 50"
+                    aria-label="Maximum staff"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Market tier
+                  </span>
+                  <select
+                    value={draft.market_tiers?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        market_tiers: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Market tier"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any</option>
+                    <option value="metro">Metro</option>
+                    <option value="tier_2">Tier 2</option>
+                    <option value="tier_3">Tier 3</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Turnover band
+                  </span>
+                  <select
+                    value={draft.revenue_bands?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        revenue_bands: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Turnover band"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any</option>
+                    <option value="<1Cr">Under 1 Cr</option>
+                    <option value="1-10Cr">1-10 Cr</option>
+                    <option value="10-50Cr">10-50 Cr</option>
+                    <option value="50-100Cr">50-100 Cr</option>
+                    <option value="100-500Cr">100-500 Cr</option>
+                    <option value="500Cr+">500 Cr+</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Target role
+                  </span>
+                  <select
+                    value={draft.seniorities?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        seniorities: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Target role"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any role</option>
+                    <option value="owner">Owner / Founder</option>
+                    <option value="c_level">C-Level / MD</option>
+                    <option value="vp">VP</option>
+                    <option value="director">Director</option>
+                    <option value="head">Head of Function</option>
+                    <option value="manager">Manager</option>
+                    <option value="senior">Senior / Lead</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    State
+                  </span>
+                  <input
+                    value={draft.states?.join(", ") || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        states: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder="Maharashtra, Gujarat"
+                    aria-label="State"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.decision_makers_only)}
+                    onChange={(e) => updateDraft({ decision_makers_only: e.target.checked })}
+                    className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+                  />
+                  Decision makers only
+                </label>
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.require_email)}
+                    onChange={(e) => updateDraft({ require_email: e.target.checked })}
+                    className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+                  />
+                  Must have a reachable email
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       </div>
