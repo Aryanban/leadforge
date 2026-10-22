@@ -2,9 +2,14 @@ from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
+import logging
+
+from app.config import settings
 from app.database import get_db
 from app.models.business import Business
 from app.enricher.email_finder import enrich_business_by_id, enrich_all_pending_businesses
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -23,8 +28,25 @@ async def trigger_bulk_enrichment(
     limit: int = 50,
     db: AsyncSession = Depends(get_db)
 ):
-    background_tasks.add_task(enrich_all_pending_businesses, limit)
+    # With Celery enabled the batch goes to a worker, so a restart mid-run
+    # does not lose it. Without it the batch runs as a FastAPI background
+    # task, which dies with the process.
+    dispatched = "background_task"
+    if getattr(settings, "USE_CELERY", False):
+        try:
+            from app.workers.tasks import enrich_all_pending_task
+
+            enrich_all_pending_task.delay(limit)
+            dispatched = "celery"
+        except Exception as exc:
+            logger.warning(
+                "Celery dispatch failed (%s); enriching in-process", exc
+            )
+
+    if dispatched == "background_task":
+        background_tasks.add_task(enrich_all_pending_businesses, limit)
     return {
         "status": "queued",
+        "dispatched": dispatched,
         "message": f"Multi-source web enrichment initiated for up to {limit} businesses"
     }

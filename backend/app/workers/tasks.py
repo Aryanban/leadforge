@@ -104,25 +104,69 @@ def reset_daily_send_counters_task() -> Dict[str, Any]:
 
 
 @celery_app.task
-def run_scrape_task(query: str, max_results: int = 20):
-    """Scrapes Google Maps for a query and persists the leads."""
+def run_scrape_task(query: str, max_results: int = 20, job_id: int = None):
+    """Scrapes Google Maps for a query and persists the leads.
+
+    ``job_id`` is the row the API already created. The task used to create
+    its *own* job row, so a Celery deployment showed two jobs for one
+    scrape and the one the operator was watching was never updated.
+    """
+    from app.scraper.maps_scraper import scrape_leads_and_save
+    from app.models.scrape_job import ScrapeJob
+    from app.database import async_session_maker
+
+    async def _scrape():
+        if job_id is None:
+            async with async_session_maker() as db:
+                job = ScrapeJob(query=query, status="running")
+                db.add(job)
+                await db.commit()
+                await db.refresh(job)
+                resolved_job_id = job.id
+        else:
+            resolved_job_id = job_id
+        saved, new_ids = await scrape_leads_and_save(
+            query=query, max_results=max_results, job_id=resolved_job_id
+        )
+        return {"saved": saved, "business_ids": new_ids, "job_id": resolved_job_id}
+
+    return _run(_scrape())
+
+
+@celery_app.task
+def run_scrape_job_task(job_id: int):
+    """Runs a scrape job row that the API already created.
+
+    This is the entry point the API uses when Celery is enabled: the job
+    row exists before the task is dispatched, so the operator can see the
+    job as "pending" straight away, and a worker that dies takes the job
+    with it in a way the recovery pass can report.
+    """
     from app.scraper.maps_scraper import scrape_leads_and_save
     from app.models.scrape_job import ScrapeJob
     from app.database import async_session_maker
 
     async def _scrape():
         async with async_session_maker() as db:
-            job = ScrapeJob(query=query, status="running")
-            db.add(job)
-            await db.commit()
-            await db.refresh(job)
-            job_id = job.id
+            job = await db.get(ScrapeJob, job_id)
+            if job is None:
+                return {"error": f"No scrape job {job_id}"}
+            query = job.query
+            max_results = getattr(job, "max_results", 20) or 20
         saved, new_ids = await scrape_leads_and_save(
             query=query, max_results=max_results, job_id=job_id
         )
-        return {"saved": saved, "business_ids": new_ids}
+        return {"saved": saved, "business_ids": new_ids, "job_id": job_id}
 
     return _run(_scrape())
+
+
+@celery_app.task
+def enrich_all_pending_task(limit: int = 25):
+    """Enriches the businesses that have not been enriched yet."""
+    from app.enricher.email_finder import enrich_all_pending_businesses
+
+    return _run(enrich_all_pending_businesses(limit=limit))
 
 
 @celery_app.task

@@ -4,9 +4,14 @@ from sqlalchemy import select
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
+import logging
+
+from app.config import settings
 from app.database import get_db
 from app.models.scrape_job import ScrapeJob
 from app.scraper.maps_scraper import scrape_leads_and_save
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -31,13 +36,36 @@ async def start_scraping(
     await db.commit()
     await db.refresh(job)
 
-    # 2. Queue background task via FastAPI BackgroundTasks
-    background_tasks.add_task(scrape_leads_and_save, job.id, request.query.strip(), request.max_results)
+    # 2. Dispatch the work.
+    #
+    # With Celery enabled the job goes to a worker, so it survives an API
+    # restart and can be retried. Without it the work runs as a FastAPI
+    # background task - which dies with the process, and a job left at
+    # "running" is recovered and failed on the next boot.
+    dispatched = "background_task"
+    if getattr(settings, "USE_CELERY", False):
+        try:
+            from app.workers.tasks import run_scrape_job_task
+
+            run_scrape_job_task.delay(job.id)
+            dispatched = "celery"
+        except Exception as exc:
+            # A broker that is not reachable must not lose the job: fall
+            # back to the in-process task rather than failing the request.
+            logger.warning(
+                "Celery dispatch failed (%s); running the scrape in-process", exc
+            )
+
+    if dispatched == "background_task":
+        background_tasks.add_task(
+            scrape_leads_and_save, job.id, request.query.strip(), request.max_results
+        )
 
     return {
         "job_id": job.id,
         "query": job.query,
         "status": "started",
+        "dispatched": dispatched,
         "message": f"Scrape job queued for '{job.query}'"
     }
 
