@@ -360,7 +360,12 @@ from app.campaigns.india_advisor import (
     dlt_checklist,
     in_quiet_hours,
 )
-from app.campaigns.india_copy import festival_context, hinglish_closers, culture_checklist
+from app.campaigns.india_copy import (
+    festival_context,
+    hinglish_closers,
+    regional_closers,
+    culture_checklist,
+)
 from app.campaigns.engagement import whatsapp_handoff, engagement_summary
 
 
@@ -394,10 +399,19 @@ async def india_dlt_checklist(req: DltCheckRequest):
 
 @router.get("/india/copy")
 async def india_copy_kit():
-    """Hinglish closers, festival hook, and the India copy do/don't checklist."""
+    """The India copy kit: closers, the festival hook, and the do/don't list.
+
+    The Hinglish closers plus the regional-language ones. A tier-2 Indian
+    SMB owner often reads Marathi, Telugu, Bengali, Kannada or Tamil and
+    not English - but a full-Devanagari cold email reads like a mass
+    blast, which is exactly why the Hinglish register exists. These are the
+    same closers in the regional script: a short, natural line the
+    operator can adapt.
+    """
     return {
         "festival": festival_context(),
         "hinglish_closers": hinglish_closers(),
+        "regional_closers": regional_closers(),
         "culture_checklist": culture_checklist(),
     }
 

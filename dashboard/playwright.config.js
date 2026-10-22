@@ -30,9 +30,19 @@ const config = {
   webServer: process.env.E2E_BASE_URL
     ? undefined
     : {
+        // The production server's heap is capped; the build's is not.
+        //
+        // The a11y spec injects axe-core into every route and runs a full
+        // analysis on each, which is heavy on its own. With the default
+        // heap the server and the browser together crossed the machine's
+        // memory limit partway through the suite, and the server was
+        // SIGKILLed - which the tests reported as a connection refused,
+        // not as a memory problem. Capping the *server* keeps it inside the
+        // budget so the suite finishes. The build needs more than the cap
+        // allows, so it is deliberately left uncapped.
         command: process.env.CI
-          ? 'npm run build && npm run start:prod'
-          : 'npm run dev',
+          ? 'npm run build && NODE_OPTIONS=--max-old-space-size=256 npm run start:prod'
+          : 'NODE_OPTIONS=--max-old-space-size=256 npm run dev',
         url: 'http://127.0.0.1:3000',
         reuseExistingServer: !process.env.CI,
         timeout: 180_000,

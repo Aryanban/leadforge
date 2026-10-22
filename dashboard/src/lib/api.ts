@@ -507,6 +507,13 @@ export interface IndiaAdvisorReport {
 export interface IndiaCopyKit {
   festival: IndiaAdvisorReport["festival"];
   hinglish_closers: Array<{ english: string; hinglish: string }>;
+  /**
+   * The same closers in the regional scripts of the target market. A
+   * tier-2 Indian owner often reads Marathi or Telugu and not English -
+   * but a full-Devanagari cold email reads like a mass blast, which is
+   * why the Hinglish register exists.
+   */
+  regional_closers: Array<{ language: string; english: string; text: string }>;
   culture_checklist: { do: string[]; dont: string[] };
 }
 

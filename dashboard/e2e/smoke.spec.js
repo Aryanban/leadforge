@@ -187,6 +187,57 @@ test('Sequences: the India copy kit is where the email is written', async ({ pag
   expect(after.length, 'inserting copy should change the body').toBeGreaterThan(before.length);
 });
 
+test('Sequences: the copy kit offers the regional languages', async ({ page: pw }) => {
+  // A tier-2 Indian owner often reads Marathi or Telugu and not English.
+  // The lines have to be in the right script, and the operator has to be
+  // able to tell which is which.
+  await pw.goto(BASE + '/sequences', { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(900);
+
+  let addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  if ((await addBtn.count()) === 0) {
+    const createBtn = pw.getByRole('button', { name: /new sequence|create sequence/i }).first();
+    if ((await createBtn.count()) === 0) {
+      test.skip(true, 'no way to open a sequence editor');
+      return;
+    }
+    await createBtn.click();
+    await pw.waitForTimeout(900);
+    addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  }
+  if ((await addBtn.count()) > 0) {
+    await addBtn.click();
+    await pw.waitForTimeout(800);
+  }
+
+  const kit = pw.getByRole('button', { name: /India copy kit/ }).first();
+  if ((await pw.getByRole('button', { name: /India copy kit/ }).count()) === 0) {
+    test.skip(true, 'no copy kit content for today');
+    return;
+  }
+  await kit.click();
+
+  const languageSelect = pw.getByLabel('Regional language');
+  expect(await languageSelect.count(), 'the kit has no language selector').toBeGreaterThan(0);
+
+  const options = await languageSelect.locator('option').allTextContents();
+  expect(options.length, 'the selector has no languages').toBeGreaterThan(1);
+  expect(
+    options.some((o) => /marathi|telugu|bengali|kannada|tamil|gujarati/i.test(o)),
+    `the selector does not offer the regional languages: ${options.join(', ')}`
+  ).toBe(true);
+
+  // And the lines are in the script the language names - not Latin text
+  // wearing a Marathi label.
+  const marathiOption = options.find((o) => /marathi/i.test(o));
+  if (marathiOption) {
+    await languageSelect.selectOption({ label: marathiOption });
+    await pw.waitForTimeout(300);
+    const text = await pw.locator('button', { hasText: /[ऀ-ॿ]/ }).first().innerText();
+    expect(/[ऀ-ॿ]/.test(text), 'the Marathi line is not in the Devanagari script').toBe(true);
+  }
+});
+
 test('sidebar navigation reaches every page', async ({ page: pw }) => {
   await pw.goto(BASE, { waitUntil: 'networkidle' });
   const links = pw.locator('a[href^="/"]');

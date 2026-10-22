@@ -23,6 +23,14 @@ export default function CopyKitPanel({
 }) {
   const [kit, setKit] = useState<IndiaCopyKit | null>(null);
   const [open, setOpen] = useState(false);
+  // The selected regional language.
+  //
+  // Every hook has to be called on every render, so this one is declared
+  // *before* the `if (!kit) return null` below. Declaring it after that
+  // return made the hook count depend on whether the kit had loaded, and
+  // React threw error #310 the moment it did - which crashed the whole
+  // sequence builder, not just this panel.
+  const [chosenLanguage, setChosenLanguage] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -44,9 +52,23 @@ export default function CopyKitPanel({
   const festival = kit.festival;
   const hasFestival = Boolean(festival?.festival);
   const closers = kit.hinglish_closers || [];
+  const regional = kit.regional_closers || [];
   const checklist = kit.culture_checklist;
-  // Nothing to offer: no festival window and no closers.
-  if (!hasFestival && closers.length === 0) return null;
+
+  // One language selector for the regional lines, so the panel does not
+  // become a wall of seven scripts.
+  //
+  // The selected language is *derived* rather than stored on first render,
+  // because the kit arrives after the first render - a state value seeded
+  // then would be empty forever.
+  const languages = Array.from(new Set(regional.map((r) => r.language)));
+  const language = languages.includes(chosenLanguage)
+    ? chosenLanguage
+    : (languages[0] || "");
+  const regionalForLanguage = regional.filter((r) => r.language === language);
+
+  // Nothing to offer: no festival window, no closers, no regional lines.
+  if (!hasFestival && closers.length === 0 && regional.length === 0) return null;
 
   return (
     <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50/50">
@@ -117,6 +139,49 @@ export default function CopyKitPanel({
                       className="w-full rounded-lg border border-amber-200 bg-white px-2 py-1.5 text-left text-[11px] text-amber-900 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1"
                     >
                       {c.hinglish}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {regional.length > 0 && (
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold text-amber-900">
+                  Regional languages
+                </p>
+                <label className="flex items-center gap-1.5">
+                  <span className="sr-only">Language</span>
+                  <select
+                    value={language}
+                    onChange={(e) => setChosenLanguage(e.target.value)}
+                    aria-label="Regional language"
+                    className="h-7 rounded-lg border border-amber-200 bg-white pl-2 pr-6 text-[11px] font-medium text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-500/30"
+                  >
+                    {languages.map((l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <p className="mt-0.5 text-[10px] text-amber-700">
+                A tier-2 owner may read this and not English. Keep it to one
+                short line.
+              </p>
+              <ul className="mt-1.5 space-y-1.5">
+                {regionalForLanguage.map((r) => (
+                  <li key={`${r.language}-${r.text}`}>
+                    <button
+                      type="button"
+                      onClick={() => onInsert(r.text)}
+                      title={r.english}
+                      className="w-full rounded-lg border border-amber-200 bg-white px-2 py-1.5 text-left text-[11px] text-amber-900 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1"
+                    >
+                      {r.text}
                     </button>
                   </li>
                 ))}
