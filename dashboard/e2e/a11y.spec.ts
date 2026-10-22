@@ -35,6 +35,7 @@ const AXE_SOURCE = fs.readFileSync(
 const ROUTES = [
   "/",
   "/leads",
+  "/people",
   "/find",
   "/sequences",
   "/inbox",

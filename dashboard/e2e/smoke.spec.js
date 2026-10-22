@@ -46,6 +46,7 @@ const PAGES = [
   { name: 'find', path: '/find' },
   { name: 'scrape', path: '/scrape' },
   { name: 'leads', path: '/leads' },
+  { name: 'people', path: '/people' },
   { name: 'sequences', path: '/sequences' },
   { name: 'campaigns', path: '/campaigns' },
   { name: 'settings', path: '/settings' },
@@ -67,6 +68,7 @@ test('API health and core endpoints respond', async ({ request }) => {
     '/leads', '/campaigns', '/analytics/stats',
     '/mailboxes', '/scraper/jobs', '/icp',
     '/icp/sources/list', '/campaigns/india/advisor',
+    '/contacts', '/contacts/stats', '/contacts/facets',
   ];
   // Health lives outside /api, so it is asked of the backend directly.
   const health = await request.get(DIRECT_API + '/health');

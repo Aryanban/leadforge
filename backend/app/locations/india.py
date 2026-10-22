@@ -191,11 +191,27 @@ for _key, _state in CITY_STATES.items():
 
 #: A pincode is the last thing in an Indian address and never part of the city.
 _PINCODE_RE = re.compile(r"\b\d{6}\b")
+#: Google Maps uses a middot as a separator ("\u00b7 Shop No.271"). It is
+#: punctuation, not part of a place name.
+_SEP_GLYPHS_RE = re.compile(r"[\u00b7\u2022\u00b0\u2027\u00a0\u202f]|&nbsp;")
 #: "Sector 18", "Plot 44", "Block B" and friends are not cities.
 _STREET_NOISE_RE = re.compile(
     r"^(?:sector|sect\.?|plot|block|bldg|building|shop|shops|flat|flats|"
     r"apartment|apt|no\.?|number|house|h\.?no|street|road|rd|near|opp|"
-    r"opposite|behind|dist|district|taluka|tehsil|block|floor|g\.?floor)\b",
+    r"opposite|behind|dist|district|taluka|tehsil|floor|g\.?floor|pocket|"
+    r"pkt|main|market|cross|highway|hwy|marg|complex|tower|nagar|colony|"
+    r"vihar|enclave|park|chawl|society|nagar|panchayat|post|office|"
+    r"centre|center|gate|no)\b",
+    re.IGNORECASE,
+)
+
+#: A street or landmark suffix - a "place" that ends in one of these is a
+#: street, not a city.
+_STREET_SUFFIX_RE = re.compile(
+    r"(?:road|rd\.?|street|marg|highway|hwy|cross|complex|tower|nagar|"
+    r"colony|enclave|park|chawl|society|pocket|pkt|sector|sect|"
+    r"apartments?|flats?|buildings?|plaza|center|centre|line|path|"
+    r"gali|lanes?|naka|bazaar|bazarr)\b",
     re.IGNORECASE,
 )
 
@@ -230,10 +246,34 @@ def market_tier(city: Optional[str]) -> Optional[str]:
 def _clean_parts(address: Optional[str]) -> List[str]:
     if not address:
         return []
-    text = str(address)
+    text = _SEP_GLYPHS_RE.sub(" ", str(address))
     text = _PINCODE_RE.sub(" ", text)
     parts = [p.strip(" ,.-") for p in re.split(r"[,/|]+|\s{2,}", text)]
     return [p for p in parts if p and len(p) > 1 and not _STREET_NOISE_RE.match(p)]
+
+
+def _looks_like_a_place(part: str) -> bool:
+    """Whether a fragment reads like a town rather than a street.
+
+    Used only for the fallback, when no known city is present. A street
+    name ("Jain Mandir Rd", "Bhagwan Mahavir Marg") is not a city, and
+    filing it as one puts the lead in a place that does not exist.
+    """
+    if not part or len(part) < 3 or len(part) > 40:
+        return False
+    if any(ch.isdigit() for ch in part):
+        return False
+    if _STREET_SUFFIX_RE.search(part):
+        return False
+    if part.lower().split()[0] in {
+        "ground", "first", "second", "third", "fourth", "upper", "lower",
+        "basement", "top", "front", "rear", "back", "new", "old", "main",
+    }:
+        return False
+    words = part.split()
+    if not (1 <= len(words) <= 3):
+        return False
+    return all(w[:1].isupper() for w in words)
 
 
 def _match_city(part: str) -> Optional[str]:
@@ -312,15 +352,32 @@ def extract_city_state(address: Optional[str]) -> Tuple[Optional[str], Optional[
 
     if city:
         return (city, state or CITY_STATES.get(city.lower()))
+
+    # A city can also be buried inside a long fragment: "Real Estate Agents
+    # in Rohini Sector 24 Delhi". Only a standalone word counts, and only
+    # the last one in the address.
+    for part in reversed(parts):
+        words = re.split(r"\W+", part.lower())
+        for idx in range(len(words) - 1, -1, -1):
+            word = words[idx]
+            if word in CITY_STATES:
+                city = _CITY_CANONICAL.get(word, word.title())
+                break
+        if city:
+            break
+
+    if city:
+        return (city, state or CITY_STATES.get(city.lower()))
     if state:
         return (None, state)
 
     # No known city and no known state. Fall back to the last fragment that
-    # is not a house number - for a non-Indian address that is the town.
+    # reads like a place - for a non-Indian address that is the town. A
+    # street name is not a place, so it is left out rather than guessed.
     for part in reversed(parts):
         if re.fullmatch(r"[\d\-/\s]+", part):
             continue
-        if len(part) < 3:
+        if not _looks_like_a_place(part):
             continue
         return (part.title(), None)
     return (None, None)

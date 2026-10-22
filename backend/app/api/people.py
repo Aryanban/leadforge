@@ -283,27 +283,39 @@ async def people_facets(
     A filter dropdown with no numbers on it is a guess. These counts are
     what let an operator see "there are 14 owners in Pune" before clicking.
     """
-    base = select(Contact.id).join(
-        Business, Contact.business_id == Business.id
-    ).where(Contact.business_id.isnot(None), Contact.person_identified.is_(True))
+    base_filters = [Contact.business_id.isnot(None), Contact.person_identified.is_(True)]
     if not include_demo:
-        base = base.where(or_(Business.is_demo == False, Business.is_demo.is_(None)))
-    base_sub = base.subquery()
+        base_filters.append(
+            or_(Business.is_demo == False, Business.is_demo.is_(None))
+        )
 
     async def _counts(column, limit_n=20):
+        """Counts of a business column over the identified-people set.
+
+        The join has to be explicit. Selecting a ``Business`` column while
+        counting over a subquery of ``Contact`` made SQLite add
+        ``businesses`` to the FROM as a *cross join*, so every city
+        reported the total number of people - which is how a dropdown ends
+        up promising "13 in Bus Stand Road" for a city that has none.
+        """
         rows = (await db.execute(
-            select(column, func.count()).select_from(base_sub).group_by(column)
+            select(column, func.count(Contact.id))
+            .join(Business, Contact.business_id == Business.id)
+            .where(*base_filters)
+            .group_by(column)
+            .order_by(func.count(Contact.id).desc())
+            .limit(limit_n)
         )).all()
         return [
             {"value": value, "count": count}
             for value, count in rows
             if value not in (None, "")
-        ][:limit_n]
+        ]
 
     seniority_counts = (await db.execute(
         select(Contact.seniority, func.count())
         .join(Business, Contact.business_id == Business.id)
-        .where(Contact.business_id.isnot(None), Contact.person_identified.is_(True))
+        .where(*base_filters)
         .group_by(Contact.seniority)
     )).all()
 

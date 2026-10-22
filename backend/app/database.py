@@ -173,7 +173,8 @@ async def backfill_people_dimensions(batch_size: int = 2000) -> int:
     The scan only touches rows whose derived values are missing, so it
     costs nothing on an up-to-date database.
     """
-    from sqlalchemy import select
+    from sqlalchemy import null, select
+    from sqlalchemy.orm import selectinload
     from app.models.business import Business
     from app.models.contact import Contact, FABRICATED_TITLE
     from app.locations.india import extract_city_state, market_tier
@@ -181,63 +182,63 @@ async def backfill_people_dimensions(batch_size: int = 2000) -> int:
 
     fixed = 0
     async with async_session_maker() as db:
-        # Every business with an address is re-derived, but only rows whose
-        # derived values actually change are written. The scan is cheap; the
-        # writes are what matter, and they stop once the data is correct.
+        # Raw SQL, deliberately.
+        #
+        # Two separate traps make the ORM unusable here:
+        #
+        # 1. A Core UPDATE against a mapper-enabled table invokes the
+        #    ``before_update`` event, whose handler marks the ORM object
+        #    dirty. The commit then flushes that object and rewrites *all*
+        #    of its columns - including the ones the UPDATE had just
+        #    corrected. The correction was silently undone every time.
+        # 2. An ORM column SELECT after the commit re-populates the
+        #    identity-mapped object with the row's stored value, which
+        #    marks it dirty again; the next flush writes the stale value
+        #    back. Even a read-only verification query could undo the
+        #    write it was verifying.
+        #
+        # Both traps were silent: the backfill reported success every time
+        # and changed nothing.
         last_id = 0
         while True:
-            rows = (await db.execute(
-                select(
-                    Business.id, Business.address, Business.city, Business.state,
-                    Business.market_tier,
-                )
-                .where(Business.address.isnot(None), Business.id > last_id)
-                .order_by(Business.id)
-                .limit(batch_size)
-            )).all()
+            rows = (await db.execute(text(
+                "SELECT id, address, city, state, market_tier FROM businesses "
+                "WHERE address IS NOT NULL AND id > :last ORDER BY id LIMIT :lim"
+            ), {"last": last_id, "lim": batch_size})).all()
             if not rows:
                 break
             for bid, address, city, state, tier in rows:
                 last_id = bid
                 parsed_city, parsed_state = extract_city_state(address)
-                new_city = parsed_city
-                new_state = parsed_state
-                new_tier = market_tier(new_city)
-                if (city, state, tier) == (new_city, new_state, new_tier):
+                new_tier = market_tier(parsed_city)
+                if (city, state, tier) == (parsed_city, parsed_state, new_tier):
                     continue
-                await db.execute(
-                    Business.__table__.update()
-                    .where(Business.id == bid)
-                    .values(city=new_city, state=new_state, market_tier=new_tier)
-                )
+                await db.execute(text(
+                    "UPDATE businesses SET city=:city, state=:state, "
+                    "market_tier=:tier WHERE id=:id"
+                ), {
+                    "city": parsed_city,
+                    "state": parsed_state,
+                    "tier": new_tier,
+                    "id": bid,
+                })
                 fixed += 1
             await db.commit()
 
         last_id = 0
         while True:
-            rows = (await db.execute(
-                select(
-                    Contact.id, Contact.title, Contact.seniority,
-                    Contact.is_decision_maker, Contact.first_name,
-                    Contact.person_identified, Business.name,
-                )
-                .join(Business, Contact.business_id == Business.id)
-                .where(
-                    Contact.id > last_id,
-                    (
-                        Contact.title.isnot(None)
-                        | (
-                            Contact.first_name.isnot(None)
-                            & (Contact.first_name != "")
-                        )
-                    ),
-                )
-                .order_by(Contact.id)
-                .limit(batch_size)
-            )).all()
-            if not rows:
+            contacts = (await db.execute(text(
+                "SELECT c.id, c.title, c.seniority, c.is_decision_maker, "
+                "c.first_name, c.person_identified, b.name "
+                "FROM contacts c JOIN businesses b ON c.business_id = b.id "
+                "WHERE c.id > :last AND ("
+                "  c.title IS NOT NULL OR "
+                "  (c.first_name IS NOT NULL AND c.first_name != '')"
+                ") ORDER BY c.id LIMIT :lim"
+            ), {"last": last_id, "lim": batch_size})).all()
+            if not contacts:
                 break
-            for cid, title, seniority, is_dm, first_name, person_id, biz_name in rows:
+            for cid, title, seniority, is_dm, first_name, person_id, biz_name in contacts:
                 last_id = cid
                 title = (title or "").strip()
                 if title and title.lower() == FABRICATED_TITLE.lower():
@@ -248,46 +249,45 @@ async def backfill_people_dimensions(batch_size: int = 2000) -> int:
                     # name's first word - so it goes too.
                     new_first = first_name
                     if biz_name and first_name and biz_name.split():
-                        if first_name.strip().lower() == biz_name.split()[0].strip().lower():
+                        if (
+                            first_name.strip().lower()
+                            == biz_name.split()[0].strip().lower()
+                        ):
                             new_first = None
-                    await db.execute(
-                        Contact.__table__.update()
-                        .where(Contact.id == cid)
-                        .values(
-                            title=None,
-                            first_name=new_first,
-                            seniority=None,
-                            is_decision_maker=False,
-                            person_identified=False,
-                        )
-                    )
+                    await db.execute(text(
+                        "UPDATE contacts SET title=NULL, first_name=:first, "
+                        "seniority=NULL, is_decision_maker=0, "
+                        "person_identified=0 WHERE id=:id"
+                    ), {"first": new_first, "id": cid})
                     fixed += 1
                     continue
 
                 band = classify_seniority(title) if title else None
-                dm = is_decision_maker(band) if band else False
+                dm = 1 if is_decision_maker(band) else 0
                 # A human is identified by a title, or by a name that is not
                 # just the business name's first word.
                 named_person = bool(
                     first_name and biz_name and biz_name.split()
-                    and first_name.strip().lower() != biz_name.split()[0].strip().lower()
+                    and first_name.strip().lower()
+                    != biz_name.split()[0].strip().lower()
                 )
-                is_person = bool(person_id) or named_person or bool(title)
+                is_person = 1 if (person_id or named_person or title) else 0
                 if (
                     seniority == band
-                    and bool(is_dm) == dm
-                    and bool(person_id) == is_person
+                    and bool(is_dm) == bool(dm)
+                    and bool(person_id) == bool(is_person)
                 ):
                     continue
-                await db.execute(
-                    Contact.__table__.update()
-                    .where(Contact.id == cid)
-                    .values(
-                        seniority=band,
-                        is_decision_maker=dm,
-                        person_identified=is_person,
-                    )
-                )
+                await db.execute(text(
+                    "UPDATE contacts SET seniority=:seniority, "
+                    "is_decision_maker=:dm, person_identified=:person "
+                    "WHERE id=:id"
+                ), {
+                    "seniority": band,
+                    "dm": dm,
+                    "person": is_person,
+                    "id": cid,
+                })
                 fixed += 1
             await db.commit()
 

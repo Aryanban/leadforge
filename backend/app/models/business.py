@@ -137,15 +137,13 @@ def _populate_location(target):
     from app.locations.india import extract_city_state, market_tier
 
     city, state = extract_city_state(target.address)
-    # These are derived, never operator-set, so they are always overwritten:
-    # a corrected parser must reach rows that were written before the fix.
-    if city:
-        target.city = city
-    if state:
-        target.state = state
-    tier = market_tier(target.city)
-    if tier:
-        target.market_tier = tier
+    # These are derived, never operator-set, so they are always assigned -
+    # including to None. A conditional assignment cannot *clear* a value
+    # that a better parser has since disproved, and a stale city is worse
+    # than no city: it puts the lead in a place that does not exist.
+    target.city = city
+    target.state = state
+    target.market_tier = market_tier(city)
 
 
 event.listen(Business, "before_insert", _populate_identity)

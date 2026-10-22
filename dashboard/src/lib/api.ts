@@ -291,6 +291,107 @@ export interface LeadItem {
   created_at: string | null;
 }
 
+// --- People (the Apollo "People" view: one row per human) --------------------
+
+export interface PersonRow {
+  id: number;
+  name: string;
+  first_name: string | null;
+  last_name: string | null;
+  title: string | null;
+  seniority: string;
+  seniority_label: string;
+  is_decision_maker: boolean;
+  /**
+   * Whether a real human was identified. A row where this is false is the
+   * *business* as an outreach target - a phone and a WhatsApp number, but
+   * no person behind it yet.
+   */
+  is_person: boolean;
+  contact_kind: "person" | "business";
+  email: string | null;
+  phone: string | null;
+  whatsapp_link: string | null;
+  linkedin_url: string | null;
+  preferred_channel: string | null;
+  is_verified: boolean;
+  verification_status: string | null;
+  is_role_account: boolean;
+  unsubscribed: boolean;
+  source: string | null;
+  business_id: number | null;
+  business_name: string | null;
+  business_website: string | null;
+  business_phone: string | null;
+  business_rating: number | null;
+  industry: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  market_tier: string | null;
+  employee_count: number | null;
+  size_bucket: string | null;
+  revenue: number | null;
+  revenue_band: string | null;
+  technologies: string[];
+  lead_score: number | null;
+  created_at: string | null;
+}
+
+export interface PeopleResponse {
+  total: number;
+  page: number;
+  limit: number;
+  pages: number;
+  people: PersonRow[];
+}
+
+export interface PeopleStats {
+  total_people: number;
+  /** Businesses with a phone but no identified person behind them yet. */
+  business_targets: number;
+  total_contacts: number;
+  named_people: number;
+  with_email: number;
+  verified: number;
+  decision_makers: number;
+  /** Share of contacts where a real human was identified. */
+  coverage: number;
+}
+
+export interface PeopleFacets {
+  seniority: Array<{ value: string; label: string; count: number }>;
+  city: Array<{ value: string; count: number }>;
+  state: Array<{ value: string; count: number }>;
+  market_tier: Array<{ value: string; count: number }>;
+  industry: Array<{ value: string; count: number }>;
+  size_bucket: Array<{ value: string; count: number }>;
+  revenue_band: Array<{ value: string; count: number }>;
+}
+
+export interface PeopleQuery {
+  page?: number;
+  limit?: number;
+  search?: string;
+  seniority?: string;
+  decision_makers_only?: boolean;
+  city?: string;
+  state?: string;
+  market_tier?: string;
+  industry?: string;
+  has_email?: boolean;
+  verified_only?: boolean;
+  size_bucket?: string;
+  min_employees?: number;
+  max_employees?: number;
+  revenue_band?: string;
+  technology?: string;
+  sort?: string;
+  desc?: boolean;
+  include_demo?: boolean;
+  person_only?: boolean;
+}
+
 export interface ScrapeJob {
   id: number;
   query: string;
@@ -638,6 +739,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ subject, body }),
     }),
+
+  // People (one row per human)
+  getPeople: (params: PeopleQuery = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === "") return;
+      q.set(k, String(v));
+    });
+    return request<PeopleResponse>(`/contacts?${q.toString()}`);
+  },
+  getPeopleStats: () => request<PeopleStats>("/contacts/stats"),
+  getPeopleFacets: () => request<PeopleFacets>("/contacts/facets"),
 
   // Scraper
   startScrape: (query: string, max_results: number = 20) =>

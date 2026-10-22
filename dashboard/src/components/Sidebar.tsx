@@ -18,6 +18,7 @@ import {
   Building2,
   Activity,
   Plug,
+  UserRound,
   X,
 } from "lucide-react";
 import {
@@ -52,6 +53,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/find", label: "AI Lead Finder", icon: Target },
       { href: "/scrape", label: "Scrape Leads", icon: Search },
       { href: "/leads", label: "Lead Database", icon: Users },
+      { href: "/people", label: "People", icon: UserRound },
       { href: "/companies", label: "Companies", icon: Building2 },
     ],
   },
