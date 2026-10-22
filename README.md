@@ -55,6 +55,7 @@ Modern B2B revenue and agency teams spend thousands of dollars annually on SaaS 
 | **Algorithmic 1-to-1 AI Icebreakers** | **Yes (Sentiment & pain points)** | Paid Add-on | No | No | Included |
 | **People Table (one row per human)** | **Yes (role, city, size, turnover, stack — all filterable)** | Yes | No | No | No |
 | **India-Aware Role Taxonomy** | **Yes (Proprietor, Promoter, MD, Principal)** | No | No | No | No |
+| **Activity Log (what it did, and why)** | **Yes (every send, bounce, deferral)** | No | No | No | No |
 | **Multi-Step Sequences & Bounce Guard** | **Yes (autonomous step delays, hard/soft bounce auto-suppress)**| Included | Add-on | No | Included |
 | **AI Agent Native (MCP Server)** | **Yes (19 tools, Claude, Cursor, AGY)** | No | No | No | No |
 | **Open-Source CRM Integration** | **Twenty CRM & Webhooks** | HubSpot / SF only | Zapier only | Webhooks only | Zapier only |
@@ -148,6 +149,7 @@ flowchart TD
 * **People are read off the company's own website** — from JSON-LD (`Person` / `Organization.employee` with a `jobTitle`), from "Name — Title", from "Title: Name", and from "Name is a Role". Testimonials and reviews are stripped first, so a customer writing *"I bought my office from Mr. Omkar"* does not become a lead.
 * **A person with no email is still a person.** A site that names its proprietor has told you who the decision maker is, even when the mailbox is role-only or the domain is catch-all. Dropping them for want of a verified address is what left the table with 13 rows out of 149 businesses.
 * **Business targets are labelled as such.** Discovery finds companies; the people behind them may not be known yet. A row without a person is shown as a business target, never as a founder.
+* **An activity log.** Every send, hard bounce, suppression, deferred send and A/B verdict is recorded with a *sentence* explaining it, so "why did this lead get no email?" is answerable without reading the source. The recorder never raises: an audit failure must not break the action being audited.
 
 ### 4. Algorithmic 1-on-1 AI Outreach Icebreakers
 * **Review Sentiment Analysis**: Evaluates customer reviews, Google star ratings, municipal locations, and business categories.

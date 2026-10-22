@@ -60,6 +60,10 @@ exists to answer — *"show me every owner in Pune"* — could not even be expre
 | P14 | Interrupted jobs | stuck at "running" forever | failed with the reason, so the operator can start them again |
 | P15 | India features | built, called from nowhere | festival line localised, WhatsApp routing live, A/B winner declared by the sender |
 | P16 | Copy kit | served by the API, reachable only by hand | in the step editor, where the email is written |
+| P17 | Activity log | decisions were invisible | every send, bounce, suppression and deferral recorded, with the reason |
+| P18 | Regional copy | Hinglish only | the same closers in Marathi, Telugu, Bengali, Kannada, Tamil and Gujarati |
+| P19 | Job queue | `BackgroundTasks` — died with the process | Celery when enabled, in-process fallback, orphaned jobs failed with their reason |
+| P20 | Send window | sent at 03:00 IST | deferred to 09:00–20:00 IST, per lead, never dropped |
 
 ### Measured performance (500,000-lead SQLite database)
 
