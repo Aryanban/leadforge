@@ -137,6 +137,33 @@ def _domain_from_email(email: str) -> str:
     return (email or "").rsplit("@", 1)[-1].lower() or "localhost"
 
 
+def _is_india_lead(business: Any, contact: Any = None) -> bool:
+    """Whether a lead is in India, for the send-window decision.
+
+    Two independent signals, either of which is enough: an Indian phone
+    number, or a state we recognise. Neither is certain on its own - a
+    business can have a foreign number, or a missing one - so both are
+    checked and the answer is only "yes" when one of them says so.
+    """
+    from app.locations.india import STATE_CODES
+
+    for obj in (contact, business):
+        phone = getattr(obj, "phone", None) if obj is not None else None
+        if phone:
+            digits = re.sub(r"\D", "", str(phone))
+            if digits.startswith("91") and len(digits) >= 11:
+                return True
+            if digits.startswith("0") and len(digits) in (11, 12):
+                return True
+
+    state = getattr(business, "state", None) if business is not None else None
+    if state:
+        for known in STATE_CODES:
+            if known.lower() == str(state).strip().lower():
+                return True
+    return False
+
+
 def jitter_seconds() -> float:
     """Randomized inter-send delay in seconds, clamped to the configured band.
 
@@ -586,9 +613,32 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             await db.commit()
             return {"message": "All eligible contacts are up to date with sequence schedule", "sent": 0}
 
+        # India send window. An email that lands at 03:00 IST is marked as
+        # spam by a human, not a filter - the recipient is asleep. The send
+        # is *deferred*, never dropped: the contact is not marked as sent,
+        # so the scheduler picks it up on its next tick, which is inside
+        # the window.
+        #
+        # The check is per lead, not per campaign. A campaign can mix an
+        # Indian lead with an American one, and holding the American one
+        # until 09:00 IST would be its 21:30 the previous evening.
+        from app.campaigns.india_advisor import (
+            in_email_send_window,
+            next_send_window_opens,
+        )
+
+        window_open = in_email_send_window()
+        deferred_count = 0
+        deferred_until = next_send_window_opens() if not window_open else None
+
         mailbox_idx = 0
 
         for idx, (contact, business, step) in enumerate(queue_to_send):
+            # Is this lead in India? An Indian number, or a state we know.
+            if not window_open and _is_india_lead(business, contact):
+                deferred_count += 1
+                continue
+
             mailbox = mailboxes[mailbox_idx % len(mailboxes)]
             mailbox_idx += 1
 
@@ -783,13 +833,26 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         # verdict - which is exactly when you want the answer.
         ab_winner = await _finalise_ab_winner(db, campaign_id)
 
-        return {
+        result = {
             "campaign_id": campaign_id,
             "sent_count": sent_count,
             "failed_count": failed_count,
             "bounced_count": bounced_count,
             "ab_winner": ab_winner,
         }
+        if deferred_count:
+            # The sends were *deferred*, not failed: the contacts are not
+            # marked as sent, so the scheduler will pick them up inside the
+            # window. Saying "deferred" rather than "failed" is the
+            # difference between "we will send this" and "we lost this".
+            result["deferred_count"] = deferred_count
+            result["deferred_until"] = deferred_until
+            result["message"] = (
+                f"{deferred_count} send(s) deferred: it is outside the India "
+                f"send window. The next window opens at {deferred_until}, and "
+                "the scheduler will send them then."
+            )
+        return result
 
 
 async def _finalise_ab_winner(db: AsyncSession, campaign_id: int) -> Optional[str]:

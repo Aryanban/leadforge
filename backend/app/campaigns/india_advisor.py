@@ -174,6 +174,41 @@ def in_quiet_hours(now: Optional[datetime] = None) -> bool:
     return hour >= QUIET_START_HOUR or hour < QUIET_END_HOUR
 
 
+#: The hours an Indian business actually answers email. TRAI's quiet hours
+#: are about promotional voice and SMS; the reason not to send *email* at
+#: 03:00 IST is simpler: the recipient is asleep, and an email that lands
+#: at 03:00 is marked as spam by a human rather than a filter.
+#:
+#: A send outside this window is *deferred*, never dropped - the scheduler
+#: picks it up on its next tick, which is inside the window.
+EMAIL_SEND_START_HOUR = 9
+EMAIL_SEND_END_HOUR = 20
+
+
+def in_email_send_window(now: Optional[datetime] = None) -> bool:
+    """Whether it is a reasonable hour to send an email in India."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        ist = now.astimezone(ZoneInfo(IST))
+    except Exception:
+        ist = now
+    return EMAIL_SEND_START_HOUR <= ist.hour < EMAIL_SEND_END_HOUR
+
+
+def next_send_window_opens(now: Optional[datetime] = None) -> Optional[str]:
+    """A human-readable time for when the next send window opens."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        ist = now.astimezone(ZoneInfo(IST))
+    except Exception:
+        ist = now
+    if ist.hour < EMAIL_SEND_START_HOUR:
+        return f"{EMAIL_SEND_START_HOUR:02d}:00 IST"
+    if ist.hour >= EMAIL_SEND_END_HOUR:
+        return f"{EMAIL_SEND_START_HOUR:02d}:00 IST tomorrow"
+    return None
+
+
 def dlt_checklist(numbers: List[str]) -> Dict[str, Any]:
     """Advisory TRAI posture report for a batch of numbers. Never blocks."""
     from app.sources import in_phone
