@@ -146,6 +146,47 @@ test('the funnel endpoint agrees with the numbers it reports', async ({ request 
   }
 });
 
+test('Sequences: the India copy kit is where the email is written', async ({ page: pw }) => {
+  // The festival hook and the Hinglish closers existed and were served by
+  // the API, but were only reachable by calling it by hand. The operator
+  // writes the body in the step editor, so that is where the kit has to be.
+  await pw.goto(BASE + '/sequences', { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(900);
+
+  // The step editor lives inside an open sequence.
+  let addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  if ((await addBtn.count()) === 0) {
+    const createBtn = pw.getByRole('button', { name: /new sequence|create sequence/i }).first();
+    expect(await createBtn.count(), 'sequences: no way to open a sequence editor').toBeGreaterThan(0);
+    await createBtn.click();
+    await pw.waitForTimeout(900);
+    addBtn = pw.getByRole('button', { name: /add (a )?(follow-?up )?step|new step|\+ step|add email/i }).first();
+  }
+  if ((await addBtn.count()) > 0) {
+    await addBtn.click();
+    await pw.waitForTimeout(800);
+  }
+
+  const kit = pw.getByRole('button', { name: /India copy kit/ }).first();
+  if ((await pw.getByRole('button', { name: /India copy kit/ }).count()) === 0) {
+    test.skip(true, 'no copy kit content for today (no festival window)');
+    return;
+  }
+  await kit.click();
+  await expect(kit).toHaveAttribute('aria-expanded', 'true');
+
+  // The panel offers copy that can be inserted into the body.
+  const body = pw.locator('textarea[id^="seq-body-"]').first();
+  const before = await body.inputValue();
+  const insertable = pw.getByRole('button', { name: /Insert the line|festival_line/i }).first();
+  expect(await insertable.count(), 'the copy kit offers something to insert').toBeGreaterThan(0);
+
+  await insertable.click();
+  await pw.waitForTimeout(300);
+  const after = await body.inputValue();
+  expect(after.length, 'inserting copy should change the body').toBeGreaterThan(before.length);
+});
+
 test('sidebar navigation reaches every page', async ({ page: pw }) => {
   await pw.goto(BASE, { waitUntil: 'networkidle' });
   const links = pw.locator('a[href^="/"]');

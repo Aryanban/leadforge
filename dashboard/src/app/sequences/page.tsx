@@ -16,6 +16,7 @@ import {
 import { api, CampaignItem } from "@/lib/api";
 import { SequenceDetail } from "@/components/SequenceDetail";
 import { FestivalHook } from "@/components/IndiaKit";
+import CopyKitPanel from "@/components/CopyKitPanel";
 import { EmptyState, ErrorState, StatusLive, TableSkeleton } from "@/components/PageStates";
 
 type Step = { subject: string; subject_b: string; body_text: string; delay_days: number };
@@ -102,6 +103,12 @@ export default function SequencesPage() {
   const insertVar = (idx: number, tag: string) =>
     updateStep(idx, {
       body_text: `${steps[idx].body_text}${steps[idx].body_text ? " " : ""}${tag}`,
+    });
+
+  /** Appends a line of copy to a step's body. */
+  const insertText = (idx: number, text: string) =>
+    updateStep(idx, {
+      body_text: `${steps[idx].body_text}${steps[idx].body_text ? "\n" : ""}${text}`,
     });
 
   const doPreview = async (idx: number) => {
@@ -399,6 +406,10 @@ export default function SequencesPage() {
                         </button>
                       ))}
                     </div>
+                    {/* The festival hook and the Hinglish closers, where the
+                        operator writes the email - not only on the overview
+                        where they can be seen but not used. */}
+                    <CopyKitPanel onInsert={(text) => insertText(idx, text)} />
                   </div>
 
                   <div className="flex items-center gap-3">
