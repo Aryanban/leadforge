@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from sqlalchemy import select, update, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session_maker
@@ -24,6 +25,8 @@ from app.models.send import Send
 from app.campaigns.bounces import classify_bounce, HARD, SOFT
 from app.campaigns.suppression import is_suppressed, add_suppression, suppressed_reasons
 from app.models.suppression import PERMANENT_REASONS
+from app.campaigns.india_copy import localize_template
+from app.sources import in_phone
 from app.campaigns.warmup import (
     mailbox_age_days, ramp_limit, mailbox_health, is_mailbox_usable,
     rolling_24h_count, recent_outcomes,
@@ -607,6 +610,30 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 first_name=contact.first_name
             )
 
+            # India localisation. `localize_template` only substitutes
+            # `{{festival_line}}` (and empties it outside a festival window),
+            # so it is safe to apply automatically. It was never called, so a
+            # template using that token shipped the literal braces to the
+            # prospect.
+            body_text = localize_template(step.body_text or "", city=lead_city)
+            body_html = localize_template(step.body_html, city=lead_city) if step.body_html else None
+
+            # Channel routing. `preferred_channel` is computed at enrichment
+            # time from the line type - whatsapp / call / email - and was
+            # never read by the sender, so the headline India differentiator
+            # (Indian SMB owners answer WhatsApp, and only a mobile can be
+            # reached on it) changed nothing. A WhatsApp-reachable lead now
+            # gets a `{{whatsapp_link}}` token and a CTA that points there.
+            channel = (getattr(contact, "preferred_channel", None) or "").lower()
+            if not channel:
+                channel = in_phone.preferred_channel(
+                    contact.phone or (business.phone if business else None)
+                )
+            wa_digits = "".join(filter(str.isdigit, contact.phone or ""))
+            if not wa_digits and business is not None:
+                wa_digits = "".join(filter(str.isdigit, business.phone or ""))
+            whatsapp_link = f"https://wa.me/{wa_digits}" if wa_digits else None
+
             data = {
                 "business_name": business.name if business else "Your Business",
                 "first_name": contact.first_name or "Friend",
@@ -618,8 +645,21 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 "ai_icebreaker": icebreaker_info["ai_icebreaker"],
                 "compliment": icebreaker_info["compliment"],
                 "pain_point": icebreaker_info["pain_point"],
-                "call_to_action": icebreaker_info["call_to_action"]
+                "call_to_action": icebreaker_info["call_to_action"],
+                # India channel tokens.
+                "channel": channel,
+                "whatsapp_link": whatsapp_link or "",
             }
+            if channel == "whatsapp" and whatsapp_link:
+                # A WhatsApp-first lead should be invited to WhatsApp, not
+                # asked to reply to an inbox they do not monitor.
+                data["call_to_action"] = (
+                    f"Quick question - WhatsApp is easier? {whatsapp_link}"
+                )
+            elif channel == "call":
+                data["call_to_action"] = (
+                    f"Would a 4-minute call this week work? {data['phone']}"
+                )
 
             rendered_subject = interpolate_template(step.subject, data)
             # A/B subject test. While undecided, split evenly by contact-id
@@ -635,12 +675,12 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 use_variant = "b"
             if use_variant == "b":
                 rendered_subject = interpolate_template(step.subject_b, data)
-            rendered_body_text = interpolate_template(step.body_text, data)
+            rendered_body_text = interpolate_template(body_text, data)
             # HTML body: escape interpolated values so a business named
             # "Suresh & Sons <Deals>" cannot corrupt the markup.
             rendered_body_html = (
-                interpolate_template(step.body_html, data, escape=True)
-                if step.body_html else None
+                interpolate_template(body_html, data, escape=True)
+                if body_html else None
             )
 
             outbox_message_id = make_msgid(domain=_domain_from_email(mailbox.email))
@@ -735,10 +775,67 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             if idx < len(queue_to_send) - 1:
                 await asyncio.sleep(jitter_seconds())
 
+        # Finalise the A/B winner here, not only in the stats endpoint.
+        #
+        # The winner used to be declared as a side effect of somebody
+        # opening the sequence-detail page. If nobody looked, the test ran
+        # to the end of the campaign with both variants still live and no
+        # verdict - which is exactly when you want the answer.
+        ab_winner = await _finalise_ab_winner(db, campaign_id)
+
         return {
             "campaign_id": campaign_id,
             "sent_count": sent_count,
             "failed_count": failed_count,
-            "bounced_count": bounced_count
+            "bounced_count": bounced_count,
+            "ab_winner": ab_winner,
         }
+
+
+async def _finalise_ab_winner(db: AsyncSession, campaign_id: int) -> Optional[str]:
+    """Declares the A/B subject winner for a campaign, if one is due.
+
+    Uses the same significance test as the stats endpoint, so both agree.
+    Returns the winner ("a"/"b") or None.
+    """
+    from app.api.campaigns import AB_POSITIVE_REPLIES, decide_ab_winner
+
+    steps = (await db.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == campaign_id)
+    )).scalars().all()
+    ab_steps = [s for s in steps if getattr(s, "subject_b", None)]
+    if not ab_steps:
+        return None
+
+    sends = (await db.execute(
+        select(Send).where(Send.campaign_id == campaign_id, Send.status == "sent")
+    )).scalars().all()
+
+    by_step: Dict[int, List[Any]] = {}
+    for s in sends:
+        by_step.setdefault(s.step_id, []).append(s)
+
+    declared: Optional[str] = None
+    changed = False
+    for step in ab_steps:
+        if getattr(step, "variant_winner", None):
+            declared = declared or step.variant_winner
+            continue
+        rows = by_step.get(step.id, [])
+        a = [s for s in rows if (getattr(s, "variant_used", None) or "a") == "a"]
+        b = [s for s in rows if getattr(s, "variant_used", None) == "b"]
+        a_rep = sum(1 for s in a if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        b_rep = sum(1 for s in b if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        winner = decide_ab_winner(len(a), a_rep, len(b), b_rep)
+        if winner:
+            step.variant_winner = winner
+            declared = declared or winner
+            changed = True
+            logger.info(
+                "campaign %s step %s: A/B winner is %s (%d vs %d positive replies)",
+                campaign_id, step.id, winner, a_rep, b_rep,
+            )
+    if changed:
+        await db.commit()
+    return declared
 
