@@ -153,3 +153,27 @@ test('the people table collapses to cards on a phone viewport', async ({ page: p
   });
   expect(overflow, 'no horizontal overflow on a phone').toBeLessThanOrEqual(1);
 });
+
+test('people can be selected and added to a sequence', async ({ page: pw }) => {
+  // Selecting people and putting them in a sequence is the whole point of
+  // this surface. A table you can only read is a report.
+  await pw.goto(BASE + '/people', { waitUntil: 'networkidle' });
+  await pw.waitForTimeout(1200);
+
+  const boxes = pw.locator('tbody input[type="checkbox"]');
+  const count = await boxes.count();
+  expect(count, 'the people table has selectable rows').toBeGreaterThan(0);
+
+  await boxes.first().check();
+  await pw.waitForTimeout(400);
+
+  // The bulk bar appears with the count.
+  const bar = pw.getByText(/person(s)? selected/i).first();
+  await expect(bar).toBeVisible();
+
+  // And the sequence picker opens.
+  await pw.getByRole('button', { name: /add to sequence/i }).first().click();
+  await pw.waitForTimeout(700);
+  const dialog = pw.getByRole('dialog', { name: /add to sequence/i });
+  await expect(dialog).toBeVisible();
+});

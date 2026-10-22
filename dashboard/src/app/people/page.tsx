@@ -13,12 +13,14 @@ import {
   Phone,
   Search,
   SearchX,
+  Send,
   ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
 import {
   api,
+  CampaignItem,
   ICPProfile,
   PeopleFacets,
   PeopleQuery,
@@ -26,6 +28,7 @@ import {
   PersonRow,
 } from "@/lib/api";
 import { EmptyState, ErrorState, StatusLive, TableSkeleton } from "@/components/PageStates";
+import { toast } from "@/components/Toaster";
 
 /** People per page — the backend paginates on the same number. */
 const PAGE_SIZE = 25;
@@ -103,6 +106,15 @@ export default function PeoplePage() {
   const [desc, setDesc] = useState(true);
   const [icpId, setIcpId] = useState("");
   const [icps, setIcps] = useState<ICPProfile[]>([]);
+
+  // --- bulk selection (Apollo-style) ---
+  //
+  // Selecting people and putting them in a sequence is the whole point of
+  // this surface. A table you can only read is a report.
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [sequences, setSequences] = useState<CampaignItem[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [addingTo, setAddingTo] = useState<number | null>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -200,6 +212,63 @@ export default function PeoplePage() {
       cancelled = true;
     };
   }, []);
+
+  // The sequences a selection can be added to.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.getCampaigns();
+        if (!cancelled) setSequences(list);
+      } catch {
+        /* The picker simply has nothing to show. */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleRow = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const pageIds = rows.map((r) => r.id);
+  const allOnPageSelected =
+    pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const someOnPageSelected =
+    !allOnPageSelected && pageIds.some((id) => selected.has(id));
+
+  const toggleAllOnPage = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) pageIds.forEach((id) => next.delete(id));
+      else pageIds.forEach((id) => next.add(id));
+      return next;
+    });
+
+  const addToSequence = async (campaignId: number) => {
+    try {
+      setAddingTo(campaignId);
+      const res = await api.addCampaignTargets(campaignId, Array.from(selected));
+      toast.success(
+        `Added ${res.added} ${res.added === 1 ? "person" : "people"} to the sequence`
+      );
+      setPickerOpen(false);
+      setSelected(new Set());
+    } catch (err: any) {
+      toast.error(
+        "Could not add them to the sequence",
+        err?.message || "Try again in a moment."
+      );
+    } finally {
+      setAddingTo(null);
+    }
+  };
 
   const activeFilters = useMemo<ActiveFilter[]>(() => {
     const out: ActiveFilter[] = [];
@@ -518,6 +587,33 @@ export default function PeoplePage() {
         />
       )}
 
+      {/* Bulk action bar - appears when people are selected. */}
+      {selected.size > 0 && (
+        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-sm px-4 py-2.5 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center justify-center rounded-lg bg-blue-600 text-white text-xs font-bold h-6 min-w-6 px-2">
+              {selected.size}
+            </span>
+            <span className="text-sm font-semibold text-slate-800">
+              {selected.size === 1 ? "person" : "people"} selected
+            </span>
+            <button
+              onClick={() => setSelected(new Set())}
+              className="text-xs font-medium text-slate-500 hover:text-slate-700 underline"
+            >
+              Clear
+            </button>
+          </div>
+          <button
+            onClick={() => setPickerOpen(true)}
+            className="inline-flex items-center justify-center rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-8 px-3 transition-colors shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+          >
+            <Send className="w-3.5 h-3.5 mr-1.5" />
+            Add to Sequence
+          </button>
+        </div>
+      )}
+
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
         {loading ? (
           <div className="p-4 space-y-2">
@@ -569,18 +665,36 @@ export default function PeoplePage() {
           <>
             {/* Desktop table */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full min-w-[1100px] table-fixed text-left">
+              <table className="w-full min-w-[1160px] table-fixed text-left">
                 <colgroup>
-                  <col style={{ width: "24%" }} />
-                  <col style={{ width: "16%" }} />
-                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "40px" }} />
+                  <col style={{ width: "22%" }} />
+                  <col style={{ width: "15%" }} />
+                  <col style={{ width: "17%" }} />
+                  <col style={{ width: "13%" }} />
+                  <col style={{ width: "11%" }} />
                   <col style={{ width: "14%" }} />
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "16%" }} />
                 </colgroup>
                 <thead>
                   <tr className="border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-500">
-                    <th scope="col" className="px-5 py-3 font-semibold">Person</th>
+                    <th scope="col" className="px-3 py-3">
+                      {/* The column needs a name even though the control
+                          below is the label a screen reader reads. */}
+                      <span className="sr-only">Select</span>
+                      <input
+                        type="checkbox"
+                        checked={allOnPageSelected}
+                        ref={(el) => {
+                          if (el) {
+                            el.indeterminate = someOnPageSelected;
+                          }
+                        }}
+                        onChange={toggleAllOnPage}
+                        aria-label="Select everyone on this page"
+                        className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+                      />
+                    </th>
+                    <th scope="col" className="px-4 py-3 font-semibold">Person</th>
                     <th scope="col" className="px-4 py-3 font-semibold">Role</th>
                     <th scope="col" className="px-4 py-3 font-semibold">Company</th>
                     <th scope="col" className="px-4 py-3 font-semibold">Location</th>
@@ -590,7 +704,12 @@ export default function PeoplePage() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {rows.map((p) => (
-                    <PersonRowDesktop key={p.id} person={p} />
+                    <PersonRowDesktop
+                      key={p.id}
+                      person={p}
+                      selected={selected.has(p.id)}
+                      onToggle={() => toggleRow(p.id)}
+                    />
                   ))}
                 </tbody>
               </table>
@@ -599,7 +718,12 @@ export default function PeoplePage() {
             {/* Mobile cards */}
             <div className="md:hidden divide-y divide-slate-100">
               {rows.map((p) => (
-                <PersonRowMobile key={p.id} person={p} />
+                <PersonRowMobile
+                  key={p.id}
+                  person={p}
+                  selected={selected.has(p.id)}
+                  onToggle={() => toggleRow(p.id)}
+                />
               ))}
             </div>
           </>
@@ -629,6 +753,75 @@ export default function PeoplePage() {
           </div>
         )}
       </div>
+
+      {/* Sequence picker - bulk "Add to Sequence". */}
+      {pickerOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add to Sequence"
+            className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4"
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h2 className="font-bold text-base text-slate-900">Add to Sequence</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {selected.size} {selected.size === 1 ? "person" : "people"} selected
+                </p>
+              </div>
+              <button
+                onClick={() => setPickerOpen(false)}
+                aria-label="Close"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {sequences.length === 0 ? (
+              <div className="text-sm text-slate-500 py-6 text-center">
+                No sequences yet. Create one from the Sequences page first.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {sequences.map((seq) => (
+                  <button
+                    key={seq.id}
+                    onClick={() => addToSequence(seq.id)}
+                    disabled={addingTo !== null}
+                    className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 px-4 py-3 text-left transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-slate-900 truncate">
+                        {seq.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {seq.total_targets ?? 0} recipient
+                        {(seq.total_targets ?? 0) === 1 ? "" : "s"}
+                      </div>
+                    </div>
+                    {addingTo === seq.id ? (
+                      <Loader2 className="w-4 h-4 motion-safe:animate-spin motion-reduce:animate-pulse text-blue-600 shrink-0" />
+                    ) : (
+                      <Send className="w-4 h-4 text-blue-600 shrink-0" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setPickerOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -814,10 +1007,31 @@ function ReachCell({ person }: { person: PersonRow }) {
   return <span className="text-xs text-slate-400">—</span>;
 }
 
-function PersonRowDesktop({ person }: { person: PersonRow }) {
+function PersonRowDesktop({
+  person,
+  selected,
+  onToggle,
+}: {
+  person: PersonRow;
+  selected: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <tr className="h-[57px] hover:bg-slate-50/80 transition-colors">
-      <td className="px-5 py-3">
+    <tr
+      className={`h-[57px] transition-colors ${
+        selected ? "bg-blue-50/60" : "hover:bg-slate-50/80"
+      }`}
+    >
+      <td className="px-3 py-3.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          aria-label={`Select ${person.name || `contact ${person.id}`}`}
+          className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+        />
+      </td>
+      <td className="px-4 py-3">
         <div className="flex items-center gap-2.5 min-w-0">
           <span
             aria-hidden="true"
@@ -903,44 +1117,65 @@ function PersonRowDesktop({ person }: { person: PersonRow }) {
   );
 }
 
-function PersonRowMobile({ person }: { person: PersonRow }) {
+function PersonRowMobile({
+  person,
+  selected,
+  onToggle,
+}: {
+  person: PersonRow;
+  selected: boolean;
+  onToggle: () => void;
+}) {
   return (
-    <div className="p-4 space-y-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-slate-900 truncate">
-            {person.name || "—"}
-          </p>
-          <p className="text-xs text-slate-600 truncate">
-            {person.title || person.business_name || "—"}
-          </p>
+    <div
+      className={`p-4 space-y-2 ${selected ? "bg-blue-50/60" : ""}`}
+    >
+      <div className="flex items-start gap-2.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          aria-label={`Select ${person.name || `contact ${person.id}`}`}
+          className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 accent-blue-600 shrink-0"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-900 truncate">
+                {person.name || "—"}
+              </p>
+              <p className="text-xs text-slate-600 truncate">
+                {person.title || person.business_name || "—"}
+              </p>
+            </div>
+            <SeniorityBadge person={person} />
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+            {person.city && (
+              <span className="inline-flex items-center gap-1">
+                <MapPin className="h-3 w-3" />
+                {person.city}
+                {person.state ? `, ${person.state}` : ""}
+              </span>
+            )}
+            {person.business_name && (
+              <span className="inline-flex items-center gap-1">
+                <Building2 className="h-3 w-3" />
+                {person.business_name}
+                {person.size_bucket ? ` · ${person.size_bucket} staff` : ""}
+              </span>
+            )}
+            {person.technologies?.length ? (
+              <span className="inline-flex items-center gap-1">
+                <Cpu className="h-3 w-3" />
+                {person.technologies.slice(0, 3).join(", ")}
+              </span>
+            ) : null}
+          </div>
+          <div className="pt-0.5">
+            <ReachCell person={person} />
+          </div>
         </div>
-        <SeniorityBadge person={person} />
-      </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
-        {person.city && (
-          <span className="inline-flex items-center gap-1">
-            <MapPin className="h-3 w-3" />
-            {person.city}
-            {person.state ? `, ${person.state}` : ""}
-          </span>
-        )}
-        {person.business_name && (
-          <span className="inline-flex items-center gap-1">
-            <Building2 className="h-3 w-3" />
-            {person.business_name}
-            {person.size_bucket ? ` · ${person.size_bucket} staff` : ""}
-          </span>
-        )}
-        {person.technologies?.length ? (
-          <span className="inline-flex items-center gap-1">
-            <Cpu className="h-3 w-3" />
-            {person.technologies.slice(0, 3).join(", ")}
-          </span>
-        ) : null}
-      </div>
-      <div className="pt-0.5">
-        <ReachCell person={person} />
       </div>
     </div>
   );
