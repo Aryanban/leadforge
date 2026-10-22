@@ -79,8 +79,17 @@ async def persist_raw_leads(
         raw_phone = lead.get("phone")
         contact = Contact(
             business_id=business.id,
-            first_name=name.split()[0] if name.split() else "Owner",
-            title="Owner / Decision Maker",
+            # No person has been identified yet. The old code wrote
+            # ``first_name="Gurucity"`` and ``title="Owner / Decision Maker"``
+            # here, inventing a founder out of the business's own name. It
+            # then counted as a decision maker, so the People table reported
+            # 126 founders where there were none. The contact is the
+            # *outreach target* for the business - a phone and a WhatsApp
+            # number - not a person, and it now says so.
+            first_name=None,
+            last_name=None,
+            title=None,
+            person_identified=False,
             # E.164, so the stored number and the wa.me link agree with each other
             # and with whatever the enrichment stage verifies later.
             phone=in_phone.to_e164(raw_phone) or raw_phone or None,
@@ -91,6 +100,7 @@ async def persist_raw_leads(
             source=lead.get("source", "discovery"),
             verification_status="unverified",
             extra_data={
+                "contact_kind": "business",
                 "channel": in_phone.preferred_channel(raw_phone),
                 "line_type": (
                     "mobile" if in_phone.is_mobile(raw_phone)

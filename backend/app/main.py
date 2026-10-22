@@ -7,7 +7,7 @@ import logging
 
 from app.config import settings
 from typing import Optional, Any, Dict, List
-from app.api import scraper, leads, enricher, campaigns, analytics, mailboxes, icp, inbox, lists, suppression, setup
+from app.api import scraper, leads, people, enricher, campaigns, analytics, mailboxes, icp, inbox, lists, suppression, setup
 from app.campaigns import tracker
 from app.database import Base, engine, async_session_maker, ensure_schema
 from app.seeds import seed_initial_data_if_empty
@@ -181,6 +181,7 @@ _auth_dependency = [Depends(require_api_key)]
 app.include_router(analytics.router, prefix=f"{settings.API_V1_STR}/analytics", tags=["Analytics"], dependencies=_auth_dependency)
 app.include_router(scraper.router, prefix=f"{settings.API_V1_STR}/scraper", tags=["Scraper"], dependencies=_auth_dependency)
 app.include_router(leads.router, prefix=f"{settings.API_V1_STR}/leads", tags=["Leads"], dependencies=_auth_dependency)
+app.include_router(people.router, prefix=f"{settings.API_V1_STR}/contacts", tags=["People"], dependencies=_auth_dependency)
 app.include_router(enricher.router, prefix=f"{settings.API_V1_STR}/enricher", tags=["Enrichment"], dependencies=_auth_dependency)
 app.include_router(campaigns.router, prefix=f"{settings.API_V1_STR}/campaigns", tags=["Campaigns"], dependencies=_auth_dependency)
 app.include_router(tracker.router, prefix=f"{settings.API_V1_STR}/campaigns/tracker", tags=["Campaign Tracker"])

@@ -582,17 +582,26 @@ async def scrape_leads_and_save(
                     db.add(business)
                     await db.flush()
 
-                    # Create initial contact entry
+                    # Create initial contact entry.
+                    #
+                    # This is the *business* as an outreach target, not a
+                    # person: no human has been identified. The old code
+                    # invented ``first_name="Gurucity"`` and
+                    # ``title="Owner / Decision Maker"``, which the People
+                    # table then counted as founders.
                     clean_phone = re.sub(r'[^0-9]', '', lead.get("phone") or "")
                     contact = Contact(
                         business_id=business.id,
-                        first_name=name.split()[0] if len(name.split()) > 0 else "Owner",
-                        title="Owner / Decision Maker",
+                        first_name=None,
+                        last_name=None,
+                        title=None,
+                        person_identified=False,
                         phone=lead.get("phone") or None,
                         whatsapp_link=f"https://wa.me/{clean_phone}" if clean_phone else None,
                         email=None,
                         source=lead.get("source", "google_maps"),
-                        verification_status="unverified"
+                        verification_status="unverified",
+                        extra_data={"contact_kind": "business"},
                     )
                     db.add(contact)
                     saved_count += 1

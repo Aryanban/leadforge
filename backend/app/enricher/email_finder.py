@@ -14,6 +14,13 @@ from sqlalchemy import select, or_
 from app.database import async_session_maker
 from app.models.business import Business
 from app.models.contact import Contact
+from app.enricher.people_extraction import (
+    extract_executives_from_jsonld,
+    extract_executives_from_text,
+    extract_people_without_roles,
+    merge_executives,
+    _strip_testimonials,
+)
 from app.sources import in_phone
 from app.verifier.smtp_verifier import (
     verify_email,
@@ -328,35 +335,21 @@ def _exec_for_address(email: str, execs: List[Dict[str, Any]]) -> Optional[Dict[
     """Finds the executive an address plausibly belongs to.
 
     A shared mailbox (``info@``, ``sales@``) belongs to nobody. A person
-    address carries their name (or its first letter) in the local part.
+    address carries their name (or its initials) in the local part.
     Returns None when no executive can be bound - which is the correct
     answer for a role mailbox.
     """
+    from app.enricher.people_extraction import bind_executives_to_email
+
     if not email or "@" not in email or not execs:
         return None
     local = email.split("@")[0].lower().strip()
-    if not local or local in _NOT_A_PERSON_NAME:
+    if not local:
         return None
     # A purely alphabetic local part that is a common role word is a mailbox.
     if local in ("contact", "info", "sales", "office", "support", "admin", "hello"):
         return None
-
-    tokens = [t for t in re.split(r"[._+\-]", local) if t]
-    for ex in execs:
-        name = (ex.get("name") or "").strip()
-        if not name:
-            continue
-        parts = name.lower().split()
-        first = parts[0]
-        last = parts[1] if len(parts) > 1 else ""
-        if first and first in tokens:
-            return ex
-        if last and last in tokens:
-            return ex
-        # Initials: "rsharma" for Rajesh Sharma.
-        if first and last and len(first) == 1 and tokens and tokens[0] == first:
-            return ex
-    return None
+    return bind_executives_to_email(email, execs)
 
 
 def _address_source(email: str, harvested: Any, permutations: List[str],
@@ -626,6 +619,7 @@ def _extract_page_contacts(
     html_text: str,
     current_url: str,
     base_domain: str,
+    company_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Every contact signal on one page of HTML.
 
@@ -666,13 +660,26 @@ def _extract_page_contacts(
             if cf_email and not any(ex in cf_email for ex in EXCLUDED_EMAIL_DOMAINS):
                 emails.add(cf_email)
 
-    # Executive detection on about/team pages
+    # Executive detection on about/team pages.
+    #
+    # Four passes, strongest first: JSON-LD (structured, so trusted
+    # outright), then "Name - Title", then "Title: Name", then "Name is a
+    # Role". The title-first form is the one the old pattern missed
+    # entirely, and it is common on Indian sites ("Proprietor: Mr. Rakesh
+    # Gupta").
+    #
+    # Testimonials and reviews are stripped first: a customer writing "I
+    # bought my office from Mr. Omkar" would otherwise add a customer to
+    # the People table.
+    _strip_testimonials(soup)
     text_clean = soup.get_text(" ", strip=True)
-    for match in _TITLE_PATTERN.finditer(text_clean):
-        found_name, found_title = match.group(1).strip(), match.group(2).strip()
-        if not _is_plausible_person_name(found_name):
-            continue
-        executives.append({"name": found_name, "title": found_title.title()})
+    executives.extend(
+        merge_executives(
+            extract_executives_from_jsonld(soup),
+            extract_executives_from_text(text_clean, company_name),
+            extract_people_without_roles(text_clean, company_name),
+        )
+    )
 
     for link in soup.find_all('a', href=True):
         href = link['href'].strip()
@@ -747,6 +754,7 @@ async def _crawl_with_client(
     url: str,
     max_pages: int,
     homepage_html: Optional[str],
+    company_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The crawl itself. See :func:`crawl_website_for_contacts`."""
     emails: Set[str] = set()
@@ -848,7 +856,7 @@ async def _crawl_with_client(
             if _normalize_crawl_url(target) == _normalize_crawl_url(url) and homepage_used is None:
                 homepage_used = html_text
 
-            data = _extract_page_contacts(html_text, target, base_domain)
+            data = _extract_page_contacts(html_text, target, base_domain, company_name)
             emails.update(data["emails"])
             phones.update(data["phones"])
             whatsapp_links.update(data["whatsapp"])
@@ -871,7 +879,7 @@ async def _crawl_with_client(
         "phones": list(phones),
         "whatsapp": list(whatsapp_links)[0] if whatsapp_links else None,
         "socials": socials,
-        "executives": executives[:5],
+        "executives": merge_executives(executives)[:8],
         "homepage_html": homepage_used,
     }
 
@@ -881,6 +889,7 @@ async def crawl_website_for_contacts(
     max_pages: int = 4,
     homepage_html: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
+    company_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Crawls a target business website, prioritizing contact/about subpages,
@@ -892,6 +901,10 @@ async def crawl_website_for_contacts(
 
     ``client`` lets the caller supply a pooled client. When omitted, one
     client is created and reused for every page of the crawl.
+
+    ``company_name`` is the business's own name. Its words are trimmed off
+    candidate people, so "Pundits ANERI MEHTA Co" at "Real Estate Pundits"
+    resolves to the person "ANERI MEHTA".
     """
     if not url:
         return {"emails": [], "phones": [], "whatsapp": None, "socials": {},
@@ -900,10 +913,14 @@ async def crawl_website_for_contacts(
     url = _normalize_site_url(url)
 
     if client is not None:
-        return await _crawl_with_client(client, url, max_pages, homepage_html)
+        return await _crawl_with_client(
+            client, url, max_pages, homepage_html, company_name
+        )
 
     async with _build_http_client(timeout=12.0) as owned_client:
-        return await _crawl_with_client(owned_client, url, max_pages, homepage_html)
+        return await _crawl_with_client(
+            owned_client, url, max_pages, homepage_html, company_name
+        )
 
 
 async def _probe_business_health_concurrent(business: Any, country: str = "IN") -> Dict[str, Any]:
@@ -999,6 +1016,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                         site_url,
                         homepage_html=homepage_html,
                         client=site_client,
+                        company_name=business.name,
                     )
                 if not homepage_html:
                     homepage_html = crawl_res.get("homepage_html")
@@ -1215,6 +1233,11 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     first_name=c_first,
                     last_name=c_last,
                     title=c_title,
+                    # A real human was found on the company's own site only
+                    # when an executive name was matched to this address. A
+                    # role mailbox (info@, sales@) is a company-level
+                    # target, not a person.
+                    person_identified=bool(exec_match) and not is_role,
                     email=email,
                     phone=in_phone.to_e164(business.phone or (list(all_phones)[0] if all_phones else None))
                          or (business.phone or (list(all_phones)[0] if all_phones else None)),
@@ -1252,10 +1275,57 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     existing_contact.first_name = c_first
                     existing_contact.last_name = c_last
                     existing_contact.title = c_title
+                    existing_contact.person_identified = not is_role
                 if discovered_socials:
                     existing_contact.social_links = discovered_socials
                 if discovered_whatsapp and not existing_contact.whatsapp_link:
                     existing_contact.whatsapp_link = discovered_whatsapp
+
+        # People who were identified on the website but whose email we do
+        # not have yet.
+        #
+        # This is the single biggest lever on the People table. A business
+        # whose site says "Rakesh Gupta - Proprietor" has told us who the
+        # decision maker is, even when the mailbox is role-only, the domain
+        # is catch-all, or the guessed address fails verification. Dropping
+        # that person on the floor because no email came back is what left
+        # the People table with 13 rows out of 149 businesses.
+        if execs:
+            bound_names = {
+                (c.first_name or "").strip().lower()
+                for c in (await db.execute(
+                    select(Contact).where(Contact.business_id == business.id)
+                )).scalars().all()
+            }
+            for ex in execs:
+                ex_name = (ex.get("name") or "").strip()
+                ex_title = (ex.get("title") or "").strip()
+                if not ex_name:
+                    continue
+                if ex_name.lower() in bound_names:
+                    continue
+                parts = ex_name.split()
+                person = Contact(
+                    business_id=business.id,
+                    first_name=parts[0],
+                    last_name=" ".join(parts[1:]) if len(parts) > 1 else None,
+                    title=ex_title or None,
+                    person_identified=True,
+                    email=None,
+                    phone=in_phone.to_e164(business.phone) if business.phone else None,
+                    whatsapp_link=in_phone.whatsapp_link(business.phone),
+                    preferred_channel=in_phone.preferred_channel(business.phone),
+                    source="website_executive",
+                    verification_status="unverified",
+                    extra_data={
+                        "contact_kind": "person",
+                        "identified_from": "website",
+                        "email_status": "no_address_found",
+                        **({"role_unknown": True} if not ex_title else {}),
+                    },
+                )
+                db.add(person)
+                bound_names.add(ex_name.lower())
 
         # If no email found but phone or WhatsApp found, ensure primary contact exists
         if not all_emails:
@@ -1270,13 +1340,19 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
             elif business.phone:
                 # Phone-only lead: no email was found, so this contact exists purely
                 # for the WhatsApp/call channel, which is the primary India channel.
+                # It is still the *business* as an outreach target - no human has
+                # been identified, so no name is invented.
                 c = Contact(
                     business_id=business.id,
-                    first_name=business.name.split()[0] if business.name else "Owner",
+                    first_name=None,
+                    last_name=None,
+                    title=None,
+                    person_identified=False,
                     phone=in_phone.to_e164(business.phone) or business.phone,
                     whatsapp_link=in_phone.whatsapp_link(business.phone),
                     preferred_channel=in_phone.preferred_channel(business.phone),
                     extra_data={
+                        "contact_kind": "business",
                         "line_type": (
                             "mobile" if in_phone.is_mobile(business.phone)
                             else "landline" if in_phone.is_landline(business.phone)

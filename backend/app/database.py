@@ -87,6 +87,11 @@ async def ensure_schema() -> None:
     except Exception as exc:  # pragma: no cover - never block a boot
         logger.warning("identity backfill skipped: %s", exc)
 
+    try:
+        await backfill_people_dimensions()
+    except Exception as exc:  # pragma: no cover - never block a boot
+        logger.warning("people-dimension backfill skipped: %s", exc)
+
 
 async def backfill_business_identity(batch_size: int = 2000) -> int:
     """One-time backfill of the derived Business identity columns.
@@ -109,27 +114,34 @@ async def backfill_business_identity(batch_size: int = 2000) -> int:
     )
 
     fixed = 0
+    # A phone that is not a number ("N/A", "call for details") normalises
+    # to None, so the row would keep matching the WHERE clause after the
+    # update and this loop would never end. Tracking the ids that have
+    # been looked at bounds it.
+    seen: set = set()
     async with async_session_maker() as db:
         while True:
-            rows = (await db.execute(
-                select(
-                    Business.id,
-                    Business.phone,
-                    Business.phone_e164,
-                    Business.website,
-                    Business.domain,
-                    Business.source,
-                    Business.extra_data,
-                    Business.is_demo,
-                ).where(
-                    (Business.phone_e164.is_(None) & Business.phone.isnot(None))
-                    | (Business.domain.is_(None) & Business.website.isnot(None))
-                    | Business.is_demo.is_(None)
-                ).limit(batch_size)
-            )).all()
+            query = select(
+                Business.id,
+                Business.phone,
+                Business.phone_e164,
+                Business.website,
+                Business.domain,
+                Business.source,
+                Business.extra_data,
+                Business.is_demo,
+            ).where(
+                (Business.phone_e164.is_(None) & Business.phone.isnot(None))
+                | (Business.domain.is_(None) & Business.website.isnot(None))
+                | Business.is_demo.is_(None)
+            )
+            if seen:
+                query = query.where(Business.id.notin_(seen))
+            rows = (await db.execute(query.limit(batch_size))).all()
             if not rows:
                 break
             for (bid, phone, phone_e164, website, domain, source, extra, is_demo) in rows:
+                seen.add(bid)
                 new_phone = phone_e164 or normalize_phone_e164(phone)
                 new_domain = domain or canonical_domain_of(website)
                 extra_map = extra if isinstance(extra, dict) else {}
@@ -145,6 +157,142 @@ async def backfill_business_identity(batch_size: int = 2000) -> int:
             await db.commit()
     if fixed:
         logger.info("schema sync: backfilled %s business identity row(s)", fixed)
+    return fixed
+
+
+async def backfill_people_dimensions(batch_size: int = 2000) -> int:
+    """Backfills the People-table dimensions on existing rows.
+
+    ``city`` / ``state`` / ``market_tier`` on a business and ``seniority``
+    / ``is_decision_maker`` on a contact are all derived on write by event
+    listeners, so rows written after the columns existed already have them.
+    Rows that predate the columns do not, and without a backfill a legacy
+    database would answer "every owner in Pune" with an empty list while
+    looking perfectly healthy.
+
+    The scan only touches rows whose derived values are missing, so it
+    costs nothing on an up-to-date database.
+    """
+    from sqlalchemy import select
+    from app.models.business import Business
+    from app.models.contact import Contact, FABRICATED_TITLE
+    from app.locations.india import extract_city_state, market_tier
+    from app.enricher.seniority import classify_seniority, is_decision_maker
+
+    fixed = 0
+    async with async_session_maker() as db:
+        # Every business with an address is re-derived, but only rows whose
+        # derived values actually change are written. The scan is cheap; the
+        # writes are what matter, and they stop once the data is correct.
+        last_id = 0
+        while True:
+            rows = (await db.execute(
+                select(
+                    Business.id, Business.address, Business.city, Business.state,
+                    Business.market_tier,
+                )
+                .where(Business.address.isnot(None), Business.id > last_id)
+                .order_by(Business.id)
+                .limit(batch_size)
+            )).all()
+            if not rows:
+                break
+            for bid, address, city, state, tier in rows:
+                last_id = bid
+                parsed_city, parsed_state = extract_city_state(address)
+                new_city = parsed_city
+                new_state = parsed_state
+                new_tier = market_tier(new_city)
+                if (city, state, tier) == (new_city, new_state, new_tier):
+                    continue
+                await db.execute(
+                    Business.__table__.update()
+                    .where(Business.id == bid)
+                    .values(city=new_city, state=new_state, market_tier=new_tier)
+                )
+                fixed += 1
+            await db.commit()
+
+        last_id = 0
+        while True:
+            rows = (await db.execute(
+                select(
+                    Contact.id, Contact.title, Contact.seniority,
+                    Contact.is_decision_maker, Contact.first_name,
+                    Contact.person_identified, Business.name,
+                )
+                .join(Business, Contact.business_id == Business.id)
+                .where(
+                    Contact.id > last_id,
+                    (
+                        Contact.title.isnot(None)
+                        | (
+                            Contact.first_name.isnot(None)
+                            & (Contact.first_name != "")
+                        )
+                    ),
+                )
+                .order_by(Contact.id)
+                .limit(batch_size)
+            )).all()
+            if not rows:
+                break
+            for cid, title, seniority, is_dm, first_name, person_id, biz_name in rows:
+                last_id = cid
+                title = (title or "").strip()
+                if title and title.lower() == FABRICATED_TITLE.lower():
+                    # The placeholder the discovery path used to invent for
+                    # every business. It is not a person's title, so it must
+                    # not keep a seniority band or count as a founder. The
+                    # first name was invented the same way - the business
+                    # name's first word - so it goes too.
+                    new_first = first_name
+                    if biz_name and first_name and biz_name.split():
+                        if first_name.strip().lower() == biz_name.split()[0].strip().lower():
+                            new_first = None
+                    await db.execute(
+                        Contact.__table__.update()
+                        .where(Contact.id == cid)
+                        .values(
+                            title=None,
+                            first_name=new_first,
+                            seniority=None,
+                            is_decision_maker=False,
+                            person_identified=False,
+                        )
+                    )
+                    fixed += 1
+                    continue
+
+                band = classify_seniority(title) if title else None
+                dm = is_decision_maker(band) if band else False
+                # A human is identified by a title, or by a name that is not
+                # just the business name's first word.
+                named_person = bool(
+                    first_name and biz_name and biz_name.split()
+                    and first_name.strip().lower() != biz_name.split()[0].strip().lower()
+                )
+                is_person = bool(person_id) or named_person or bool(title)
+                if (
+                    seniority == band
+                    and bool(is_dm) == dm
+                    and bool(person_id) == is_person
+                ):
+                    continue
+                await db.execute(
+                    Contact.__table__.update()
+                    .where(Contact.id == cid)
+                    .values(
+                        seniority=band,
+                        is_decision_maker=dm,
+                        person_identified=is_person,
+                    )
+                )
+                fixed += 1
+            await db.commit()
+
+    if fixed:
+        logger.info("schema sync: backfilled %s people dimension(s)", fixed)
     return fixed
 
 

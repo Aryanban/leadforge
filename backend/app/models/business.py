@@ -24,12 +24,29 @@ class Business(Base):
     #: ``smileshop.example.com`` - a silent false merge.
     domain = Column(String, nullable=True, index=True)
     address = Column(String, nullable=True)
+    #: City and state, derived from ``address`` on every write. The
+    #: free-text address is not filterable, so "all owners in Pune" was
+    #: impossible without them.
+    city = Column(String, nullable=True, index=True)
+    state = Column(String, nullable=True, index=True)
+    #: ``metro`` / ``tier_2`` / ``tier_3`` - Indian SMB outreach costs and
+    #: response rates differ sharply between them.
+    market_tier = Column(String, nullable=True, index=True)
     rating = Column(Float, nullable=True)
     reviews_count = Column(Integer, nullable=True)
     industry = Column(String, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     maps_url = Column(String, nullable=True)
+    #: Company-size and revenue signals scraped from the company's own
+    #: site. Apollo filters on these, so without them the ICP cannot be
+    #: expressed as "11-50 employees, over 10Cr turnover".
+    employee_count = Column(Integer, nullable=True, index=True)
+    size_bucket = Column(String, nullable=True)
+    revenue = Column(Float, nullable=True)
+    revenue_band = Column(String, nullable=True, index=True)
+    #: Technology names detected on the company's site.
+    technologies = Column(JSON, nullable=True)
     extra_data = Column(JSON, nullable=True)
 
     source = Column(String, nullable=True, index=True)
@@ -105,6 +122,30 @@ def _populate_identity(mapper, connection, target):
     target.domain = canonical_domain_of(target.website)
     extra = target.extra_data if isinstance(target.extra_data, dict) else {}
     target.is_demo = bool(extra.get("seeded")) or target.source == "google_maps_seed"
+    _populate_location(target)
+
+
+def _populate_location(target):
+    """Derives city / state / market tier from the free-text address.
+
+    The People table's most valuable filter is geographic - "every owner in
+    Pune" - and the only location the database had was an address blob.
+    Deriving it on write means it works on rows that were scraped months
+    ago, and it cannot drift from the address the way a hand-entered column
+    does.
+    """
+    from app.locations.india import extract_city_state, market_tier
+
+    city, state = extract_city_state(target.address)
+    # These are derived, never operator-set, so they are always overwritten:
+    # a corrected parser must reach rows that were written before the fix.
+    if city:
+        target.city = city
+    if state:
+        target.state = state
+    tier = market_tier(target.city)
+    if tier:
+        target.market_tier = tier
 
 
 event.listen(Business, "before_insert", _populate_identity)
