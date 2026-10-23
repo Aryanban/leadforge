@@ -104,28 +104,38 @@ test('the city filter narrows the result set', async ({ request }) => {
   }
 });
 
-test('clicking a filter changes the rows on screen', async ({ page: pw }) => {
-  await pw.goto(BASE + '/people', { waitUntil: 'networkidle' });
-  await pw.waitForTimeout(700);
+test('clicking a filter changes the rows on screen', async ({ page: pw, request }) => {
+  const created = await request.post(API + '/api/v1/leads/', {
+    data: { name: 'People Filter Business Target Fixture', phone: '+91 98765 40001' },
+  });
+  expect(created.ok(), 'could not create the business-target fixture').toBeTruthy();
+  const fixture = await created.json();
 
-  // The row *count* is not a reliable signal here: the page size is 25, and
-  // a page of people and a page of business targets are both a full page.
-  // The total in the footer is the thing that actually changes.
-  const totalText = () => pw.getByText(/· \d+ people/).first().innerText();
-  const before = await totalText();
+  try {
+    await pw.goto(BASE + '/people', { waitUntil: 'networkidle' });
+    await pw.waitForTimeout(700);
 
-  const toggle = pw.getByRole('button', { name: 'Show business targets' });
-  await toggle.click();
-  await pw.waitForTimeout(1500);
+    // The row *count* is not a reliable signal here: the page size is 25, and
+    // a page of people and a page of business targets are both a full page.
+    // The total in the footer is the thing that actually changes.
+    const totalText = () => pw.getByText(/· \d+ people/).first().innerText();
+    const before = await totalText();
 
-  const after = await totalText();
-  expect(after, 'the filter did not change the result set').not.toBe(before);
+    const toggle = pw.getByRole('button', { name: 'Show business targets' });
+    await toggle.click();
+    await pw.waitForTimeout(1500);
 
-  // And the filter chip must be removable.
-  await expect(pw.getByRole('button', { name: /Including business targets/ })).toBeVisible();
-  await pw.getByRole('button', { name: /Remove filter: Rows/ }).click();
-  await pw.waitForTimeout(1500);
-  expect(await totalText()).toBe(before);
+    const after = await totalText();
+    expect(after, 'the filter did not change the result set').not.toBe(before);
+
+    // And the filter chip must be removable.
+    await expect(pw.getByRole('button', { name: /Including business targets/ })).toBeVisible();
+    await pw.getByRole('button', { name: /Remove filter: Rows/ }).click();
+    await pw.waitForTimeout(1500);
+    expect(await totalText()).toBe(before);
+  } finally {
+    await request.delete(API + `/api/v1/leads/${fixture.id}`);
+  }
 });
 
 test('the people table is a real table with headers on a desktop viewport', async ({ page: pw }) => {
