@@ -79,8 +79,14 @@ async def _build_campaign(
 
 
 def _capture(monkeypatch):
-    """Stubs the SMTP call and captures what would have been sent."""
+    """Stubs SMTP and holds the send window open for content-focused tests."""
     captured = {}
+
+    # These cases exercise message composition and channel routing. Keeping
+    # them independent of wall-clock time prevents the India send window from
+    # turning them into deferred sends when CI runs after 20:00 IST.
+    from app.campaigns import india_advisor
+    monkeypatch.setattr(india_advisor, "in_email_send_window", lambda: True)
 
     async def _fake_send(*args, **kwargs):
         captured.update(kwargs)
