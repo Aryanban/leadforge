@@ -16,10 +16,14 @@ COPY . .
 # Next.js telemetry is disabled
 ENV NEXT_TELEMETRY_DISABLED 1
 
-# NEXT_PUBLIC_* values are INLINED at build time, so the API base URL must be
-# available as a build arg (docker-compose passes it). Falls back to localhost.
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# The browser now calls the dashboard's own origin (/api/v1) and Next proxies
+# /api/* to the backend, so no absolute API URL is baked into the JS bundle.
+# That is what makes LAN and Docker installs work without a rebuild.
+#
+# API_PROXY_URL is where the Next server forwards /api/*. Inside compose the
+# backend service is reachable as "backend"; override it for other topologies.
+ARG API_PROXY_URL=http://backend:8000/api
+ENV API_PROXY_URL=$API_PROXY_URL
 
 RUN npm run build
 

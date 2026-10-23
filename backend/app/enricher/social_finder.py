@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -217,10 +218,12 @@ async def probe_direct_socials(business: Any, timeout: float = 10.0) -> Dict[str
         "linkedin": f"https://www.linkedin.com/search/results/companies/?keywords={encoded}",
     }
 
-    for platform, url in searches.items():
+    # The three platform searches are independent network calls, so they run
+    # concurrently instead of one after the other.
+    async def _search_one(platform: str, url: str) -> Optional[str]:
         html = await fetch_html(url, timeout=timeout)
         if not html:
-            continue
+            return None
         try:
             soup = BeautifulSoup(html, "html.parser")
             for link in soup.find_all("a", href=True):
@@ -229,11 +232,18 @@ async def probe_direct_socials(business: Any, timeout: float = 10.0) -> Dict[str
                     continue
                 lowered = href.lower()
                 if any(host in lowered for host in PLATFORM_HOSTS[platform]):
-                    candidates.setdefault(platform, href)
-                    break
+                    return href
         except Exception as e:
             logger.debug(f"[social:direct] {platform} search failed: {e}")
-            continue
+        return None
+
+    results = await asyncio.gather(
+        *(_search_one(platform, url) for platform, url in searches.items()),
+        return_exceptions=True,
+    )
+    for platform, found in zip(searches.keys(), results):
+        if isinstance(found, str) and found:
+            candidates.setdefault(platform, found)
 
     return candidates
 
@@ -248,9 +258,20 @@ async def upsert_social_profiles(
     from app.models.social_profile import SocialProfile
 
     saved = []
-    for platform, url in socials.items():
-        if not url:
-            continue
+    # The per-platform stat fetches are independent network calls, so they
+    # run concurrently. Sequentially, three platforms x ~10s of timeout is
+    # ~30 seconds per lead.
+    urls = {platform: url for platform, url in socials.items() if url}
+    stats_results = await asyncio.gather(
+        *(fetch_social_stats(url, platform) for platform, url in urls.items()),
+        return_exceptions=True,
+    )
+    stats_by_platform = {
+        platform: (result if isinstance(result, dict) else {})
+        for platform, result in zip(urls.keys(), stats_results)
+    }
+
+    for platform, url in urls.items():
         existing = await db.execute(
             select(SocialProfile).where(
                 SocialProfile.business_id == business_id,
@@ -259,11 +280,7 @@ async def upsert_social_profiles(
         )
         profile = existing.scalars().first()
 
-        stats: Dict[str, Any] = {}
-        try:
-            stats = await fetch_social_stats(url, platform)
-        except Exception as e:
-            logger.debug(f"[social] stats fetch failed for {platform}: {e}")
+        stats: Dict[str, Any] = stats_by_platform.get(platform) or {}
 
         if profile is None:
             profile = SocialProfile(

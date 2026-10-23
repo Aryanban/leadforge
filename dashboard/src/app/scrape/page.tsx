@@ -11,10 +11,12 @@ import {
   ArrowRight, 
   RefreshCw,
   Sliders,
-  Globe2,
-  MapPin
+  MapPin,
+  History
 } from "lucide-react";
 import { api, ScrapeJob } from "@/lib/api";
+import { toast } from "@/components/Toaster";
+import { EmptyState, ErrorState, StatusLive, TableSkeleton } from "@/components/PageStates";
 
 const PRESET_QUERIES = [
   { label: "Rohini Property Dealers", query: "Real Estate Agents & Property Dealers in Rohini Delhi" },
@@ -32,15 +34,20 @@ export default function ScrapePage() {
   const [activeJob, setActiveJob] = useState<ScrapeJob | null>(null);
   const [jobs, setJobs] = useState<ScrapeJob[]>([]);
   const [loadingJobs, setLoadingJobs] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
   const [enrichStatus, setEnrichStatus] = useState<string | null>(null);
 
   const fetchJobs = async () => {
     try {
       setLoadingJobs(true);
+      setJobsError(null);
       const data = await api.getJobs();
       setJobs(data);
-    } catch (err) {
+    } catch (err: any) {
       console.warn("Could not fetch jobs:", err);
+      setJobsError(
+        err?.message || "The backend did not answer. Check that it is running, then try again.",
+      );
     } finally {
       setLoadingJobs(false);
     }
@@ -90,7 +97,7 @@ export default function ScrapePage() {
       });
       fetchJobs();
     } catch (err: any) {
-      alert(`Scrape failed to start: ${err.message}`);
+      toast.error("Scrape failed to start", err.message || "Check the query and try again.");
     } finally {
       setIsSubmitting(false);
     }
@@ -109,6 +116,9 @@ export default function ScrapePage() {
 
   return (
     <div className="space-y-8 max-w-5xl mx-auto">
+      {/* Screen-reader announcement of the loading state. */}
+      <StatusLive loading={loadingJobs} loadingLabel="Loading your scrape history…" />
+
       {/* Header */}
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
@@ -120,17 +130,18 @@ export default function ScrapePage() {
       </div>
 
       {/* Main Scrape Form */}
-      <div className="rounded-2xl border border-slate-200/90 bg-white p-6 sm:p-7 shadow-xs space-y-6">
+      <div id="scrape-form" className="rounded-2xl border border-slate-200/90 bg-white p-6 sm:p-7 shadow-xs space-y-6">
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
+            <label htmlFor="scrape-query" className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center gap-1.5">
               <MapPin className="w-3.5 h-3.5 text-blue-600" />
               Target Search Query & Location
             </label>
             <div className="flex gap-3">
               <div className="relative flex-1">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
+                  id="scrape-query"
                   type="text"
                   placeholder="e.g. Real Estate Agents in Rohini Sector 24 Delhi"
                   value={query}
@@ -141,11 +152,11 @@ export default function ScrapePage() {
               <button
                 type="submit"
                 disabled={isSubmitting || !query.trim()}
-                className="inline-flex items-center justify-center rounded-xl text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 h-11 px-5 transition-colors shadow-xs shrink-0"
+                className="inline-flex items-center justify-center rounded-xl text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 h-11 px-5 transition-colors shadow-xs shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               >
                 {isSubmitting ? (
                   <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    <Loader2 className="w-4 h-4 mr-2 motion-safe:animate-spin motion-reduce:animate-pulse" />
                     Starting...
                   </>
                 ) : (
@@ -178,9 +189,12 @@ export default function ScrapePage() {
           {/* Settings Row */}
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <Sliders className="w-4 h-4 text-slate-400" />
-              <label className="text-xs text-slate-600 font-medium">Max Leads to Extract:</label>
+              <Sliders className="w-4 h-4 text-slate-500" />
+              <label htmlFor="max-results" className="text-xs text-slate-600 font-medium">
+                Max Leads to Extract:
+              </label>
               <select
+                id="max-results"
                 value={maxResults}
                 onChange={(e) => setMaxResults(Number(e.target.value))}
                 className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 focus:outline-none"
@@ -192,7 +206,7 @@ export default function ScrapePage() {
               </select>
             </div>
 
-            <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+            <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
               Anti-detection jitter enabled
             </div>
@@ -206,14 +220,14 @@ export default function ScrapePage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               {activeJob.status === "running" || activeJob.status === "pending" ? (
-                <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+                <Loader2 className="w-5 h-5 text-blue-600 motion-safe:animate-spin motion-reduce:animate-pulse" />
               ) : activeJob.status === "completed" ? (
                 <CheckCircle2 className="w-5 h-5 text-emerald-600" />
               ) : (
                 <AlertCircle className="w-5 h-5 text-red-600" />
               )}
               <div>
-                <h3 className="font-bold text-sm text-slate-900">
+                <h2 className="font-bold text-sm text-slate-900">
                   {activeJob.status === "running"
                     ? "Scraping in Progress..."
                     : activeJob.status === "pending"
@@ -221,7 +235,7 @@ export default function ScrapePage() {
                     : activeJob.status === "completed"
                     ? "Scrape Completed Successfully!"
                     : "Scrape Job Failed"}
-                </h3>
+                </h2>
                 <p className="text-xs text-slate-600 mt-0.5">
                   Query: <span className="font-semibold text-slate-800">"{activeJob.query}"</span>
                 </p>
@@ -243,19 +257,19 @@ export default function ScrapePage() {
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-white p-3.5 rounded-xl border border-blue-100">
             <div>
-              <span className="text-[10px] uppercase font-bold text-slate-400">Total Found</span>
+              <span className="text-[10px] uppercase font-bold text-slate-500">Total Found</span>
               <div className="text-lg font-bold text-slate-800">{activeJob.total_found}</div>
             </div>
             <div>
-              <span className="text-[10px] uppercase font-bold text-slate-400">Leads Saved</span>
-              <div className="text-lg font-bold text-emerald-600">{activeJob.leads_saved}</div>
+              <span className="text-[10px] uppercase font-bold text-slate-500">Leads Saved</span>
+              <div className="text-lg font-bold text-emerald-700">{activeJob.leads_saved}</div>
             </div>
             <div>
-              <span className="text-[10px] uppercase font-bold text-slate-400">Deduplication</span>
+              <span className="text-[10px] uppercase font-bold text-slate-500">Deduplication</span>
               <div className="text-lg font-bold text-slate-800">Active</div>
             </div>
             <div>
-              <span className="text-[10px] uppercase font-bold text-slate-400">Started</span>
+              <span className="text-[10px] uppercase font-bold text-slate-500">Started</span>
               <div className="text-xs font-medium text-slate-600 mt-1">
                 {activeJob.created_at ? new Date(activeJob.created_at).toLocaleTimeString() : "Just now"}
               </div>
@@ -266,13 +280,13 @@ export default function ScrapePage() {
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <Link
                 href="/leads"
-                className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 h-9 px-4 transition-colors"
+                className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-emerald-700 text-white hover:bg-emerald-800 h-9 px-4 transition-colors"
               >
                 View Discovered Leads <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
               </Link>
               <button
                 onClick={handleEnrichAll}
-                className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 h-9 px-4 transition-colors"
+                className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 h-9 px-4 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               >
                 <Sparkles className="w-3.5 h-3.5 mr-1.5 text-indigo-600" />
                 Deep Web Enrich (Find Missing Emails/Phones)
@@ -291,21 +305,39 @@ export default function ScrapePage() {
       <div className="rounded-2xl border border-slate-200/80 bg-white shadow-xs overflow-hidden">
         <div className="p-5 border-b border-slate-100 flex items-center justify-between">
           <div>
-            <h3 className="font-bold text-base text-slate-900">Scrape Task History</h3>
+            <h2 className="font-bold text-base text-slate-900">Scrape Task History</h2>
             <p className="text-xs text-slate-500 mt-0.5">Past queries and extracted leads</p>
           </div>
           <button
             onClick={fetchJobs}
             disabled={loadingJobs}
-            className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-8 px-3 transition-colors shadow-xs"
+            className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-8 px-3 transition-colors shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
-            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${loadingJobs ? "animate-spin text-blue-600" : ""}`} />
+            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${loadingJobs ? "motion-safe:animate-spin motion-reduce:animate-pulse text-blue-600" : ""}`} />
             Refresh History
           </button>
         </div>
 
+        {/* Inline error with a retry — a toast disappears, this stays. */}
+        {jobsError && !loadingJobs && (
+          <div className="p-4">
+            <ErrorState
+              title="Could not load the scrape history"
+              message={jobsError}
+              onRetry={fetchJobs}
+            />
+          </div>
+        )}
+
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full min-w-[720px] table-fixed text-left text-xs">
+            <colgroup>
+              <col style={{ width: "34%" }} />
+              <col style={{ width: "16%" }} />
+              <col style={{ width: "16%" }} />
+              <col style={{ width: "22%" }} />
+              <col style={{ width: "12%" }} />
+            </colgroup>
             <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
               <tr>
                 <th className="px-5 py-3">Search Query</th>
@@ -316,10 +348,17 @@ export default function ScrapePage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {jobs && jobs.length > 0 ? (
+              {loadingJobs ? (
+                <TableSkeleton
+                  rows={5}
+                  columns={5}
+                  rowClassName="h-[49px]"
+                  cellClassName="px-4 py-3.5"
+                />
+              ) : jobs && jobs.length > 0 ? (
                 jobs.map((j) => (
-                  <tr key={j.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="px-5 py-3.5 font-medium text-slate-900">
+                  <tr key={j.id} className="h-[49px] hover:bg-slate-50/80 transition-colors">
+                    <td className="px-5 py-3.5 font-medium text-slate-900 truncate">
                       {j.query}
                     </td>
                     <td className="px-4 py-3.5">
@@ -353,8 +392,26 @@ export default function ScrapePage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={5} className="px-5 py-8 text-center text-slate-400">
-                    No scrape jobs recorded yet.
+                  <td colSpan={5} className="px-5 py-8">
+                    <EmptyState
+                      icon={<History className="h-5 w-5" />}
+                      title="No scrape jobs yet"
+                      description="Start a Google Maps scrape and every job — query, status and how many leads it saved — will be listed here."
+                      action={
+                        <a
+                          href="#scrape-form"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            document
+                              .getElementById("scrape-form")
+                              ?.scrollIntoView({ behavior: "smooth", block: "center" });
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+                        >
+                          <Search className="w-3.5 h-3.5" /> Start your first scrape
+                        </a>
+                      }
+                    />
                   </td>
                 </tr>
               )}

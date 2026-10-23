@@ -13,6 +13,11 @@ class SourceStats(Base):
     leads_found = Column(Integer, default=0)
     enriched = Column(Integer, default=0)
     avg_score = Column(Float, default=0.0)
+    # Number of correctly attributed score observations in avg_score.
+    # Older versions stored a blended score shared by all sources; a zero
+    # sample count marks those averages as legacy and lets the first corrected
+    # observation replace them instead of preserving the bad attribution.
+    score_samples = Column(Integer, default=0)
     hot_leads = Column(Integer, default=0)
     last_run = Column(DateTime(timezone=True), server_default=func.now())
 

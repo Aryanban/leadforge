@@ -14,13 +14,15 @@ import json
 import asyncio
 import logging
 import urllib.parse
-from typing import Dict, Any, List, Optional
+from collections import defaultdict
+from datetime import datetime
+from typing import Dict, Any, List, Optional, Sequence, Set
 
 # Ensure backend directory is in python search path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sqlalchemy import select, or_, func
-from app.database import async_session_maker
+from app.database import async_session_maker, ensure_schema
 from app.models.business import Business
 from app.models.contact import Contact
 from app.models.scrape_job import ScrapeJob
@@ -32,7 +34,7 @@ from app.models.suppression import Suppression, PERMANENT_REASONS
 from app.scraper.maps_scraper import scrape_leads_and_save
 from app.enricher.email_finder import enrich_business_by_id
 from app.campaigns.sender import execute_campaign_step, test_smtp_connection
-from app.campaigns.suppression import is_suppressed, add_suppression
+from app.campaigns.suppression import add_suppression, filter_suppressed
 from app.verifier.smtp_verifier import verify_email_async
 from app.verifier.email_status import should_send
 
@@ -45,11 +47,26 @@ logger = logging.getLogger("leadforge-mcp")
 # asyncio tasks). Mirrors the API's BackgroundTasks launch, which also detaches.
 _BACKGROUND_TASKS = set()
 
+#: How long the stdio loop waits for in-flight requests to write their
+#: response after stdin reaches EOF, before it cancels the stragglers.
+_SHUTDOWN_GRACE_SECONDS = 10.0
+
+#: Progress percentage per scrape-job status, so a polling agent gets a
+#: number it can chart instead of guessing from a string.
+_SCRAPE_JOB_PROGRESS = {
+    "pending": 0,
+    "running": 20,
+    "scraping": 40,
+    "enriching": 80,
+    "completed": 100,
+    "failed": 100,
+}
+
 
 TOOLS_DEFINITIONS = [
     {
         "name": "leadforge_scrape",
-        "description": "Scrapes business listings from Google Maps in real-time, extracts phone numbers, ratings, addresses, and official websites, automatically discovers emails from across the open web, and saves them to the database.",
+        "description": "Starts a Google Maps scrape in the BACKGROUND and returns a job handle immediately. Scrapes business listings in real-time, extracts phone numbers, ratings, addresses and official websites, discovers emails from across the open web, and saves everything to the database. Because a full scrape plus enrichment takes minutes (far past the ~60s MCP client tool timeout) this tool does NOT block: it returns a job_id and you must poll `leadforge_get_scrape_job` until the status is 'completed'.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -69,6 +86,20 @@ TOOLS_DEFINITIONS = [
                 }
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "leadforge_get_scrape_job",
+        "description": "Polls a scrape job started by `leadforge_scrape`. Returns the job status, progress percentage, how many leads were found and saved, and - once the job is 'completed' - the leads it produced with their Contact IDs (use those with `leadforge_add_campaign_targets`; a Contact ID is NOT the Business ID).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "integer",
+                    "description": "The job_id returned by `leadforge_scrape`"
+                }
+            },
+            "required": ["job_id"]
         }
     },
     {
@@ -93,6 +124,64 @@ TOOLS_DEFINITIONS = [
                     "type": "integer",
                     "description": "Number of leads to retrieve (default: 15)",
                     "default": 15
+                }
+            }
+        }
+    },
+    {
+        "name": "leadforge_search_people",
+        "description": "Searches and filters the People table: one row per identified human, with their company, role, seniority band, location and reachability. Use this to answer questions like 'every owner in Pune' or 'all directors at companies over 10Cr turnover'.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {
+                    "type": "string",
+                    "description": "Search keyword matching the person's name, title, email, company or city"
+                },
+                "seniority": {
+                    "type": "string",
+                    "description": "Comma-separated role bands: owner, c_level, vp, director, head, manager, senior, staff, other, unknown"
+                },
+                "decision_makers_only": {
+                    "type": "boolean",
+                    "description": "Only people who can actually say yes (owner, C-level, VP, director, head)"
+                },
+                "city": {
+                    "type": "string",
+                    "description": "Filter by city"
+                },
+                "state": {
+                    "type": "string",
+                    "description": "Filter by state"
+                },
+                "market_tier": {
+                    "type": "string",
+                    "description": "Filter by market tier: metro, tier_2, tier_3"
+                },
+                "has_email": {
+                    "type": "boolean",
+                    "description": "Filter by whether the person has a reachable email address"
+                },
+                "size_bucket": {
+                    "type": "string",
+                    "description": "Filter by company size: 1, 2-10, 11-50, 51-200, 201-500, 500+"
+                },
+                "revenue_band": {
+                    "type": "string",
+                    "description": "Filter by turnover band: <1Cr, 1-10Cr, 10-50Cr, 50-100Cr, 100-500Cr, 500Cr+"
+                },
+                "technology": {
+                    "type": "string",
+                    "description": "Filter by a technology detected on the company's site (Shopify, Tally, Razorpay, ...)"
+                },
+                "include_business_targets": {
+                    "type": "boolean",
+                    "description": "Also include companies with no identified person behind them (default false)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of people to retrieve (default: 25)",
+                    "default": 25
                 }
             }
         }
@@ -202,12 +291,20 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "leadforge_launch_campaign",
-        "description": "Activates a campaign and dispatches its sequence in the background. Refuses to launch with 0 targets or 0 steps to avoid emailing the whole database. Honors suppression, warmup/health, daily limits, delays, and send jitter.",
+        "description": "Activates a campaign and dispatches its sequence in the background. Refuses to launch with 0 targets or 0 steps to avoid emailing the whole database. Honors suppression, warmup/health, daily limits, delays, and send jitter. Performs a DRY RUN by default - it returns the exact recipient list and subject lines without sending anything. Set dry_run=false only when the operator has explicitly approved the send.",
         "inputSchema": {
             "type": "object",
-            "properties": {"campaign_id": {"type": "integer", "description": "Campaign ID"}},
+            "properties": {
+                "campaign_id": {"type": "integer", "description": "Campaign ID"},
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "When true (the default), preview the recipients and subject lines WITHOUT sending. Set to false to actually send.",
+                    "default": True,
+                },
+            },
             "required": ["campaign_id"]
-        }
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False}
     },
     {
         "name": "leadforge_pause_campaign",
@@ -276,75 +373,266 @@ TOOLS_DEFINITIONS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+async def _contacts_by_business(
+    db: Any, business_ids: Sequence[int]
+) -> Dict[int, List[Contact]]:
+    """Fetches the contacts of every business on a page in ONE query.
+
+    The handlers used to run ``SELECT ... FROM contacts WHERE business_id = ?``
+    once per business, so a 15-row page cost 16 round-trips instead of 2. On
+    a slow link (a self-hosted box on a Raspberry Pi, or Postgres over the
+    internet) that is the difference between 40ms and 900ms for the same
+    page - and it scaled linearly with the page size.
+
+    Returns a dict keyed by ``business_id``; businesses with no contacts are
+    simply absent from it.
+    """
+    ids: List[int] = []
+    seen: Set[int] = set()
+    for bid in business_ids or []:
+        if bid is None:
+            continue
+        bid = int(bid)
+        if bid not in seen:
+            seen.add(bid)
+            ids.append(bid)
+    if not ids:
+        return {}
+
+    rows = (await db.execute(
+        select(Contact).where(Contact.business_id.in_(ids))
+    )).scalars().all()
+
+    grouped: Dict[int, List[Contact]] = defaultdict(list)
+    for c in rows:
+        grouped[c.business_id].append(c)
+    return dict(grouped)
+
+
+def _contact_summary(contacts: Sequence[Contact]) -> Dict[str, Any]:
+    """The contact fields an agent needs to target a lead."""
+    return {
+        "contact_ids": [c.id for c in contacts],
+        "primary_contact_id": next(
+            (c.id for c in contacts if c.email),
+            contacts[0].id if contacts else None,
+        ),
+        "emails": [
+            f"`{c.email}`" + (" (✓ deliverable)" if c.is_verified else "")
+            for c in contacts if c.email
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Background scrape job
+# ---------------------------------------------------------------------------
+
+async def _mark_scrape_job(
+    job_id: int, *, status: str, error: Optional[str] = None
+) -> None:
+    """Records a terminal state on a scrape job row. Never raises."""
+    try:
+        async with async_session_maker() as db:
+            job = await db.get(ScrapeJob, job_id)
+            if job is None:
+                return
+            # Never downgrade a finished job.
+            if job.status in ("completed", "failed") and status != job.status:
+                return
+            job.status = status
+            if error:
+                job.error = error
+            if status in ("completed", "failed"):
+                job.finished_at = datetime.utcnow()
+            await db.commit()
+    except Exception:
+        logger.exception("Could not update scrape job %s", job_id)
+
+
+async def _run_scrape_job(
+    job_id: int, query: str, max_results: int, auto_enrich: bool
+) -> None:
+    """Runs a scrape in the background and records the outcome on the job row.
+
+    The scrape used to run INLINE inside the tool call, which held the
+    JSON-RPC read loop for the whole scrape + enrichment waterfall. Every
+    other request queued behind it, and MCP clients (Claude Desktop) time a
+    tool call out at ~60s - so the tool always looked like a failure.
+    """
+    try:
+        saved_count, new_biz_ids = await scrape_leads_and_save(
+            query=query,
+            max_results=max_results,
+            job_id=job_id,
+            enrich=auto_enrich,
+        )
+        # Remember which businesses this job produced so
+        # `leadforge_get_scrape_job` can hand the agent the exact leads
+        # (and their Contact IDs) without a second, lossy search.
+        try:
+            async with async_session_maker() as db:
+                job = await db.get(ScrapeJob, job_id)
+                if job is not None:
+                    result = dict(job.result or {})
+                    result["business_ids"] = list(new_biz_ids or [])
+                    result["leads_saved"] = saved_count
+                    job.result = result
+                    if job.status == "completed" and not job.finished_at:
+                        job.finished_at = datetime.utcnow()
+                    await db.commit()
+        except Exception:
+            logger.exception("Could not record scrape job %s results", job_id)
+    except asyncio.CancelledError:
+        # The server is shutting down mid-scrape. Mark the job so it does
+        # not sit at "running" forever and mislead a later poll.
+        try:
+            await _mark_scrape_job(
+                job_id, status="failed", error="scrape interrupted (server shut down)"
+            )
+        except Exception:
+            pass
+        raise
+    except Exception as exc:
+        logger.exception("Scrape job %s failed", job_id)
+        await _mark_scrape_job(
+            job_id, status="failed", error=f"{type(exc).__name__}: {exc}"
+        )
+
+
+async def _scrape_job_leads(db: Any, job: ScrapeJob) -> List[Dict[str, Any]]:
+    """The businesses a finished scrape job produced, with their contacts."""
+    business_ids = list((job.result or {}).get("business_ids") or [])
+    if not business_ids:
+        return []
+
+    businesses = (await db.execute(
+        select(Business).where(Business.id.in_(business_ids)).order_by(Business.id)
+    )).scalars().all()
+
+    contacts_by_biz = await _contacts_by_business(db, [b.id for b in businesses])
+
+    rows: List[Dict[str, Any]] = []
+    for b in businesses:
+        contacts = contacts_by_biz.get(b.id, [])
+        summary = _contact_summary(contacts)
+        clean_phone = (b.phone or "").replace(" ", "").replace("-", "")
+        maps_url = b.maps_url or (
+            "https://www.google.com/maps/search/?api=1&query="
+            f"{urllib.parse.quote((b.name + ' ' + (b.address or '')).strip())}"
+        )
+        rows.append({
+            "business_id": b.id,
+            "contact_ids": summary["contact_ids"],
+            "primary_contact_id": summary["primary_contact_id"],
+            "name": b.name,
+            "maps_url": maps_url,
+            "phone": b.phone or "—",
+            "whatsapp": f"https://wa.me/{clean_phone}" if clean_phone else "—",
+            "website": b.website or "—",
+            "emails": summary["emails"],
+            "rating": f"★ {b.rating}" if b.rating else "—",
+            "address": b.address or "—",
+        })
+    return rows
+
+
 async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     """Executes an MCP tool and returns markdown-formatted response for the AI assistant."""
 
     if name == "leadforge_scrape":
         query = arguments.get("query")
+        if not query:
+            raise ValueError("`query` is required for leadforge_scrape")
         max_results = min(int(arguments.get("max_results", 10)), 50)
-        auto_enrich = arguments.get("auto_enrich", True)
+        auto_enrich = bool(arguments.get("auto_enrich", True))
 
-        # Create scrape job record
-        job_id = None
+        # Create the job row FIRST so the caller gets a handle it can poll
+        # immediately, then run the scrape in the BACKGROUND.
+        #
+        # The scrape used to run inline, which held the JSON-RPC read loop for
+        # the whole scrape + enrichment waterfall (minutes). MCP clients
+        # (Claude Desktop) time a tool call out at ~60s, so the tool always
+        # looked like a failure and every other request queued behind it.
         async with async_session_maker() as db:
-            job = ScrapeJob(query=query, status="running")
+            job = ScrapeJob(query=query, status="pending")
             db.add(job)
             await db.commit()
             await db.refresh(job)
             job_id = job.id
 
-        # Run scrape
-        saved_count, _new_biz_ids = await scrape_leads_and_save(query=query, max_results=max_results, job_id=job_id)
+        task = asyncio.ensure_future(
+            _run_scrape_job(job_id, query, max_results, auto_enrich)
+        )
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
-        # Fetch newly scraped leads
+        return json.dumps({
+            "job_id": job_id,
+            "status": "running",
+            "query": query,
+            "max_results": max_results,
+            "auto_enrich": auto_enrich,
+            "poll": "leadforge_get_scrape_job",
+            "message": (
+                "Scrape started in the background. Poll `leadforge_get_scrape_job` "
+                f"with job_id {job_id} until status is 'completed' (or 'failed'). "
+                "The results, including the Contact IDs you need for "
+                "`leadforge_add_campaign_targets`, come back with the job."
+            ),
+        }, indent=2)
+
+    elif name == "leadforge_get_scrape_job":
+        job_id = int(arguments["job_id"])
         async with async_session_maker() as db:
-            stmt = select(Business).order_by(Business.id.desc()).limit(max_results)
-            res = await db.execute(stmt)
-            businesses = res.scalars().all()
+            job = await db.get(ScrapeJob, job_id)
+            if not job:
+                return json.dumps({
+                    "job_id": job_id,
+                    "error": f"Scrape job #{job_id} not found",
+                }, indent=2)
 
-            results = []
-            for b in businesses:
-                c_stmt = select(Contact).where(Contact.business_id == b.id)
-                c_res = await db.execute(c_stmt)
-                contacts = c_res.scalars().all()
+            status = job.status or "pending"
+            payload: Dict[str, Any] = {
+                "job_id": job.id,
+                "query": job.query,
+                "status": status,
+                "progress_pct": _SCRAPE_JOB_PROGRESS.get(status, 0),
+                "done": status in ("completed", "failed"),
+                "total_found": job.total_found or 0,
+                "leads_saved": job.leads_saved or 0,
+                "error": job.error,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+            }
 
-                emails = [
-                    f"`{c.email}`" + (" (✓ deliverable)" if c.is_verified else "")
-                    for c in contacts if c.email
-                ]
+            if status == "completed":
+                payload["leads"] = await _scrape_job_leads(db, job)
+            else:
+                payload["leads"] = []
 
-                clean_phone = (b.phone or "").replace(" ", "").replace("-", "")
-                wa_link = f"[WhatsApp](https://wa.me/{clean_phone})" if clean_phone else ""
-                maps_url = b.maps_url or f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote((b.name + ' ' + (b.address or '')).strip())}"
+        if status == "completed":
+            payload["message"] = (
+                "Scrape finished. Use the `contact_ids` / `primary_contact_id` of "
+                "each lead with `leadforge_add_campaign_targets` - a Contact ID "
+                "is NOT the Business ID."
+            )
+        elif status == "failed":
+            payload["message"] = (
+                "Scrape failed. Check `error`, fix the cause and start a new one "
+                "with `leadforge_scrape`."
+            )
+        else:
+            payload["message"] = (
+                "Scrape still running. Wait a few seconds and poll this tool "
+                "again with the same job_id."
+            )
 
-                results.append({
-                    "id": b.id,
-                    "name": b.name,
-                    "maps_url": maps_url,
-                    "phone": b.phone or "—",
-                    "whatsapp": wa_link or "—",
-                    "website": b.website or "—",
-                    "emails": "<br>".join(emails) if emails else "*None*",
-                    "rating": f"★ {b.rating}" if b.rating else "—",
-                    "address": b.address or "—"
-                })
-
-        # Format markdown response
-        md = [
-            f"### LeadForge Google Maps Scrape Results for: \"{query}\"\n",
-            f"• **Leads Extracted**: {len(results)}",
-            f"• **New Leads Saved**: {saved_count}\n",
-            "| Business Name | Google Maps | Phone | WhatsApp | Website | Verified Emails | Rating |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
-        ]
-
-        for r in results:
-            name_clean = r["name"].replace("|", "\\|")
-            maps_link = f"[View Listing]({r['maps_url']})"
-            web_link = f"[Website]({r['website']})" if r['website'] != "—" else "—"
-            md.append(f"| **{name_clean}** | {maps_link} | {r['phone']} | {r['whatsapp']} | {web_link} | {r['emails']} | {r['rating']} |")
-
-        return "\n".join(md)
+        return json.dumps(payload, indent=2)
 
     elif name == "leadforge_search_leads":
         search_term = arguments.get("search")
@@ -360,25 +648,31 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             if industry:
                 stmt = stmt.where(Business.industry.ilike(f"%{industry}%"))
 
+            # The "has email" filter is a SQL predicate applied BEFORE the
+            # limit. Filtering after the limit made the tool's own limit
+            # parameter change its answer: asking for 5 leads with
+            # has_email=true returned 0 matches, while asking for 100
+            # returned 6 - the filter was applied to an already-truncated set.
+            if has_email is not None:
+                email_ids = select(Contact.business_id).where(
+                    Contact.email.isnot(None), Contact.email != ""
+                )
+                stmt = stmt.where(
+                    Business.id.in_(email_ids) if has_email
+                    else Business.id.notin_(email_ids)
+                )
+
             stmt = stmt.order_by(Business.id.desc()).limit(limit)
             res = await db.execute(stmt)
             businesses = res.scalars().all()
 
+            # ONE query for the contacts of the whole page, not one per row.
+            contacts_by_biz = await _contacts_by_business(db, [b.id for b in businesses])
+
             results = []
             for b in businesses:
-                c_stmt = select(Contact).where(Contact.business_id == b.id)
-                c_res = await db.execute(c_stmt)
-                contacts = c_res.scalars().all()
-
-                emails = [
-                    f"`{c.email}`" + (" (✓ verified)" if c.is_verified else "")
-                    for c in contacts if c.email
-                ]
-
-                if has_email is True and not emails:
-                    continue
-                if has_email is False and emails:
-                    continue
+                contacts = contacts_by_biz.get(b.id, [])
+                summary = _contact_summary(contacts)
 
                 clean_phone = (b.phone or "").replace(" ", "").replace("-", "")
                 wa_link = f"[WhatsApp](https://wa.me/{clean_phone})" if clean_phone else ""
@@ -386,24 +680,103 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
                 results.append({
                     "id": b.id,
+                    # Contact ids are what `add_campaign_targets` needs.
+                    "contact_ids": summary["contact_ids"],
+                    "primary_contact_id": summary["primary_contact_id"],
                     "name": b.name,
                     "maps_url": maps_url,
                     "phone": b.phone or "—",
                     "whatsapp": wa_link or "—",
-                    "emails": "<br>".join(emails) if emails else "*None*",
+                    "emails": "<br>".join(summary["emails"]) if summary["emails"] else "*None*",
                     "industry": b.industry or "General",
                     "rating": f"★ {b.rating}" if b.rating else "—"
                 })
 
         md = [
             f"### LeadForge Database Search ({len(results)} matches)\n",
-            "| ID | Business Name | Google Maps | Phone | WhatsApp | Category | Emails | Rating |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+            "| Business ID | Contact ID | Business Name | Google Maps | Phone | WhatsApp | Category | Emails | Rating |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
         ]
         for r in results:
             name_clean = r["name"].replace("|", "\\|")
             maps_link = f"[Maps]({r['maps_url']})"
-            md.append(f"| #{r['id']} | **{name_clean}** | {maps_link} | {r['phone']} | {r['whatsapp']} | {r['industry']} | {r['emails']} | {r['rating']} |")
+            contact_id = r["primary_contact_id"] if r["primary_contact_id"] else "—"
+            md.append(
+                f"| #{r['id']} | {contact_id} | **{name_clean}** | {maps_link} | {r['phone']} "
+                f"| {r['whatsapp']} | {r['industry']} | {r['emails']} | {r['rating']} |"
+            )
+
+        md.append(
+            "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
+            "to enroll these leads in a sequence. The Contact ID is NOT the "
+            "Business ID."
+        )
+
+        return "\n".join(md)
+
+    elif name == "leadforge_search_people":
+        limit = min(int(arguments.get("limit", 25)), 200)
+        # The same filters as the People table, applied as SQL predicates
+        # BEFORE the limit so the tool's own limit parameter cannot change
+        # its answer.
+        from app.api.people import query_people
+
+        params: Dict[str, Any] = {
+            "page": 1,
+            "limit": limit,
+            "person_only": not bool(arguments.get("include_business_targets")),
+        }
+        for key in (
+            "search", "seniority", "city", "state", "market_tier",
+            "size_bucket", "revenue_band", "technology",
+        ):
+            value = arguments.get(key)
+            if value:
+                params[key] = value
+        if arguments.get("decision_makers_only"):
+            params["decision_makers_only"] = True
+        if arguments.get("has_email") is not None:
+            params["has_email"] = bool(arguments.get("has_email"))
+
+        async with async_session_maker() as db:
+            people_payload = await query_people(db, **params)
+        people = people_payload.get("people") or []
+        total = people_payload.get("total", 0)
+
+        md = [
+            f"### LeadForge People ({len(people)} of {total} matches)\n",
+            "| Contact ID | Name | Role | Band | Company | Location | Size | Turnover | Reach |",
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for p in people:
+            if p.get("email"):
+                reach = p["email"]
+            elif p.get("whatsapp_link"):
+                reach = f"[WhatsApp]({p['whatsapp_link']})"
+            elif p.get("phone"):
+                reach = p["phone"]
+            else:
+                reach = "—"
+            name_clean = str(p.get("name") or "—").replace("|", "\\|")
+            role = str(p.get("title") or "—").replace("|", "\\|")
+            company = str(p.get("business_name") or "—").replace("|", "\\|")
+            location = "—"
+            if p.get("city"):
+                location = p["city"]
+                if p.get("state"):
+                    location += f", {p['state']}"
+            md.append(
+                f"| #{p['id']} | **{name_clean}** | {role} | {p.get('seniority_label') or '—'} "
+                f"| {company} | {location} | {p.get('size_bucket') or '—'} "
+                f"| {p.get('revenue_band') or '—'} | {reach} |"
+            )
+
+        md.append(
+            "\n> Use the **Contact ID** column with `leadforge_add_campaign_targets` "
+            "to enroll these people in a sequence. A row with no role is a "
+            "business target - a company with a phone but no person behind it "
+            "identified yet."
+        )
 
         return "\n".join(md)
 
@@ -542,18 +915,40 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 select(Campaign).order_by(Campaign.created_at.desc())
             )).scalars().all()
 
-            rows = []
-            for camp in camps:
-                steps = (await db.execute(
-                    select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == camp.id)
-                )).scalar() or 0
-                targets = (await db.execute(
-                    select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == camp.id)
-                )).scalar() or 0
-                sends = (await db.execute(
-                    select(func.count(Send.id)).where(Send.campaign_id == camp.id)
-                )).scalar() or 0
-                rows.append((camp, steps, targets, sends))
+            # THREE grouped aggregate queries for the whole page instead of
+            # three COUNT queries per campaign. The old shape was 1 + 3N
+            # round-trips, so a 20-campaign workspace cost 61 queries to
+            # render one table.
+            camp_ids = [c.id for c in camps]
+            step_counts: Dict[int, int] = {}
+            target_counts: Dict[int, int] = {}
+            send_counts: Dict[int, int] = {}
+            if camp_ids:
+                step_counts = dict((await db.execute(
+                    select(CampaignStep.campaign_id, func.count(CampaignStep.id))
+                    .where(CampaignStep.campaign_id.in_(camp_ids))
+                    .group_by(CampaignStep.campaign_id)
+                )).all())
+                target_counts = dict((await db.execute(
+                    select(CampaignTarget.campaign_id, func.count(CampaignTarget.id))
+                    .where(CampaignTarget.campaign_id.in_(camp_ids))
+                    .group_by(CampaignTarget.campaign_id)
+                )).all())
+                send_counts = dict((await db.execute(
+                    select(Send.campaign_id, func.count(Send.id))
+                    .where(Send.campaign_id.in_(camp_ids))
+                    .group_by(Send.campaign_id)
+                )).all())
+
+            rows = [
+                (
+                    camp,
+                    step_counts.get(camp.id, 0),
+                    target_counts.get(camp.id, 0),
+                    send_counts.get(camp.id, 0),
+                )
+                for camp in camps
+            ]
 
         if not rows:
             return ("### LeadForge Campaigns\n\nNo campaigns yet. "
@@ -636,18 +1031,37 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 select(CampaignTarget.contact_id).where(CampaignTarget.campaign_id == campaign_id)
             )).all()}
 
+            # ONE query for every contact id, and ONE query for the whole
+            # suppression list. The old shape ran a SELECT per contact id and
+            # a suppression SELECT per contact - so adding 50 targets cost
+            # 100+ round-trips.
+            unique_ids = list(dict.fromkeys(contact_ids))
+            contacts = (await db.execute(
+                select(Contact).where(Contact.id.in_(unique_ids))
+            )).scalars().all()
+            contacts_by_id = {c.id: c for c in contacts}
+
+            candidates = [
+                contacts_by_id[cid] for cid in unique_ids
+                if cid in contacts_by_id and cid not in existing
+            ]
+            blocked = await filter_suppressed(db, [c.email for c in candidates])
+
             added = 0
             skipped = 0
-            for cid in dict.fromkeys(contact_ids):
+            missing = 0
+            for cid in unique_ids:
                 if cid in existing:
                     continue
                 # Gate 1 of 4: never add an already-suppressed address as a target.
-                contact = (await db.execute(
-                    select(Contact).where(Contact.id == cid)
-                )).scalars().first()
+                contact = contacts_by_id.get(cid)
                 if contact is None:
+                    # A non-existent contact id used to be silently dropped
+                    # and NOT counted, so the tool reported "Added 0 target(s)
+                    # (0 skipped)" and the agent concluded success.
+                    missing += 1
                     continue
-                if await is_suppressed(db, contact.email):
+                if contact.email and contact.email.strip().lower() in blocked:
                     skipped += 1
                     continue
                 db.add(CampaignTarget(campaign_id=campaign_id, contact_id=cid))
@@ -658,11 +1072,25 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == campaign_id)
             )).scalar() or 0
 
-        return (f"Added {added} target(s) to campaign #{campaign_id} "
-                f"({skipped} skipped: suppressed). Total targets: {total}.")
+        parts = [f"Added {added} target(s) to campaign #{campaign_id}"]
+        if skipped:
+            parts.append(f"({skipped} skipped: suppressed)")
+        if missing:
+            parts.append(
+                f"**WARNING: {missing} contact id(s) did not exist and were skipped** - "
+                "check that you are using Contact IDs (from the Contact ID column) "
+                "and not Business IDs."
+            )
+        parts.append(f"Total targets: {total}.")
+        return " ".join(parts)
 
     elif name == "leadforge_launch_campaign":
         campaign_id = int(arguments["campaign_id"])
+        # Dry run by default. An autonomous agent firing real cold email at
+        # real people without a human in the loop is the single most
+        # dangerous thing this server can do, and the tool had no way to
+        # preview what would be sent.
+        dry_run = arguments.get("dry_run", True)
         async with async_session_maker() as db:
             camp = await db.get(Campaign, campaign_id)
             if not camp:
@@ -680,6 +1108,40 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 return (f"Campaign #{campaign_id} cannot launch: no explicit targets. "
                         "Add recipients with `leadforge_add_campaign_targets` so we never "
                         "mail leads the operator did not pick.")
+
+            # Preview the exact recipients and subject lines.
+            recipient_rows = (await db.execute(
+                select(Contact.email, Contact.first_name)
+                .join(CampaignTarget, CampaignTarget.contact_id == Contact.id)
+                .where(CampaignTarget.campaign_id == campaign_id)
+            )).all()
+            step_rows = (await db.execute(
+                select(CampaignStep.step_number, CampaignStep.subject)
+                .where(CampaignStep.campaign_id == campaign_id)
+                .order_by(CampaignStep.step_number)
+            )).all()
+
+            if dry_run:
+                preview = [f"**DRY RUN - nothing was sent.**",
+                           f"Campaign #{campaign_id} would send {targets} email(s) "
+                           f"across {steps} step(s).",
+                           "",
+                           "**Recipients (first 10):**"]
+                for email, first_name in recipient_rows[:10]:
+                    preview.append(f"- {first_name or '—'} <{email}>")
+                if len(recipient_rows) > 10:
+                    preview.append(f"- ...and {len(recipient_rows) - 10} more")
+                preview.append("")
+                preview.append("**Steps:**")
+                for num, subject in step_rows:
+                    preview.append(f"- Step {num}: {subject}")
+                preview.append("")
+                preview.append("Re-call with `dry_run=false` to actually send.")
+                return "\n".join(preview)
+
+            if camp.status == CampaignStatus.ACTIVE.value:
+                return (f"Campaign #{campaign_id} is already active - not launching a "
+                        "second sender (that would double-send to the same leads).")
             camp.status = CampaignStatus.ACTIVE.value
             camp_name = camp.name
             await db.commit()
@@ -827,110 +1289,241 @@ async def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         raise ValueError(f"Unknown tool: {name}")
 
 
+async def _write_json_line(payload: Dict[str, Any], lock: asyncio.Lock) -> None:
+    """Writes exactly one complete JSON-RPC line to stdout, atomically.
+
+    The lock is held across the write AND the flush so two responses that
+    finish at the same time can never interleave mid-line and corrupt the
+    stream. A partially written line would break the client's parser for
+    every message that follows, so this is the one place that must not be
+    "optimised" into an unlocked write.
+    """
+    out_bytes = (json.dumps(payload) + "\n").encode("utf-8")
+    try:
+        async with lock:
+            sys.stdout.buffer.write(out_bytes)
+            sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # The client hung up. Nothing left to write to.
+        logger.warning("stdout closed by the client - dropping response")
+
+
+async def _handle_mcp_request(req: Dict[str, Any], write_lock: asyncio.Lock) -> None:
+    """Handles one JSON-RPC request and writes its response.
+
+    Runs as its own task so that a slow tool call never blocks the reader.
+    Responses are written as they complete, which means they may be emitted
+    OUT OF ORDER relative to the requests that produced them. That is legal
+    JSON-RPC: a client matches every response to its request by ``id``, so
+    ordering is not part of the contract.
+    """
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+
+    # A request without an id is a NOTIFICATION. JSON-RPC 2.0 says the
+    # server MUST NOT reply to a notification, so a request that carries no
+    # id is executed but never answered.
+    is_notification = req_id is None
+
+    response: Optional[Dict[str, Any]] = None
+
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "leadforge",
+                    "version": "1.0.0"
+                }
+            }
+        }
+    elif method == "notifications/initialized":
+        # Notification only, no reply required.
+        return
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": TOOLS_DEFINITIONS
+            }
+        }
+    elif method == "tools/call":
+        tool_name = params.get("name")
+        tool_args = params.get("arguments") or {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
+        try:
+            result_text = await handle_tool_call(tool_name, tool_args)
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": result_text
+                        }
+                    ]
+                }
+            }
+        except Exception as tool_err:
+            logger.exception("Error executing tool %s", tool_name)
+            # A tool that fails at execution time must return a RESULT
+            # with isError=true, not a transport-level JSON-RPC error.
+            # The model can read a tool result and react to it; a
+            # transport error is invisible to it and it typically retries
+            # or gives up. The raw exception text also leaked raw SQL
+            # into the transcript.
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            f"Tool '{tool_name}' failed: {type(tool_err).__name__}. "
+                            "Check the arguments and the system state with "
+                            "`leadforge_get_stats` / `leadforge_search_leads`, then "
+                            "retry with corrected arguments."
+                        ),
+                    }],
+                    "isError": True,
+                }
+            }
+    elif method == "ping":
+        response = {"jsonrpc": "2.0", "id": req_id, "result": {}}
+    else:
+        if req_id is not None:
+            response = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32601,
+                    "message": f"Method '{method}' not found"
+                }
+            }
+
+    if response is None or is_notification:
+        # Notifications never get a response.
+        return
+
+    await _write_json_line(response, write_lock)
+
+
 async def run_mcp_server():
-    """Runs the Model Context Protocol stdio loop."""
+    """Runs the Model Context Protocol stdio loop.
+
+    Requests are handled CONCURRENTLY. The reader keeps consuming stdin
+    while the tool calls are still running, so a five-minute scrape no
+    longer blocks every other request behind it - and each request gets
+    its own task, so one slow tool call cannot stall the others either.
+
+    Responses are written as they complete and may therefore arrive OUT OF
+    ORDER relative to the requests that produced them. JSON-RPC matches
+    responses to requests by ``id``, so out-of-order delivery is legal and
+    is what makes concurrency possible.
+
+    The loop exits cleanly on EOF (stdin closed) and on Ctrl-C.
+    """
     logger.info("Starting LeadForge MCP stdio server...")
 
-    loop = asyncio.get_event_loop()
+    # The MCP server talks to the database directly and must be able to
+    # survive a schema change on its own. It used to depend on the API
+    # process having started first.
+    await ensure_schema()
+
+    loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-    while True:
-        line = await reader.readline()
-        if not line:
-            break
+    # Serialises stdout writes so two responses that finish at the same
+    # time can never interleave mid-line.
+    write_lock = asyncio.Lock()
 
-        line_str = line.decode("utf-8").strip()
-        if not line_str:
-            continue
+    # Strong references to the in-flight request tasks. Python only keeps
+    # weak references to running asyncio tasks, so without this a task can
+    # be garbage-collected mid-flight and the client never gets a reply.
+    inflight: set = set()
 
-        try:
-            req = json.loads(line_str)
-        except Exception as parse_err:
-            logger.error(f"JSON decode error: {parse_err}")
-            continue
+    try:
+        while True:
+            line = await reader.readline()
+            if not line:
+                # EOF: the client closed stdin, the session is over.
+                break
 
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
+            line_str = line.decode("utf-8", errors="replace").strip()
+            if not line_str:
+                continue
 
-        response = None
-
-        if method == "initialize":
-            response = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
-                    "serverInfo": {
-                        "name": "leadforge",
-                        "version": "1.0.0"
-                    }
-                }
-            }
-        elif method == "notifications/initialized":
-            # Notification only, no reply required
-            continue
-        elif method == "tools/list":
-            response = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "tools": TOOLS_DEFINITIONS
-                }
-            }
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            tool_args = params.get("arguments", {})
             try:
-                result_text = await handle_tool_call(tool_name, tool_args)
-                response = {
+                req = json.loads(line_str)
+            except Exception as parse_err:
+                logger.error(f"JSON decode error: {parse_err}")
+                # JSON-RPC requires a Parse error response with a null id.
+                await _write_json_line({
                     "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": result_text
-                            }
-                        ]
-                    }
-                }
-            except Exception as tool_err:
-                logger.error(f"Error executing tool {tool_name}: {tool_err}")
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {
-                        "code": -32603,
-                        "message": str(tool_err)
-                    }
-                }
-        elif method == "ping":
-            response = {"jsonrpc": "2.0", "id": req_id, "result": {}}
-        else:
-            if req_id is not None:
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Method '{method}' not found"
-                    }
-                }
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error: invalid JSON"},
+                }, write_lock)
+                continue
 
-        if response:
-            out_bytes = (json.dumps(response) + "\n").encode("utf-8")
-            sys.stdout.buffer.write(out_bytes)
-            sys.stdout.buffer.flush()
+            if not isinstance(req, dict):
+                await _write_json_line({
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request: expected a JSON object"},
+                }, write_lock)
+                continue
+
+            # Hand the request to its own task and go straight back to
+            # reading. The task awaits the whole tool call on its own.
+            task = asyncio.ensure_future(_handle_mcp_request(req, write_lock))
+            inflight.add(task)
+            task.add_done_callback(inflight.discard)
+
+    except asyncio.CancelledError:
+        # Ctrl-C (or a parent shutting us down): stop the world promptly.
+        for t in list(inflight):
+            t.cancel()
+        if inflight:
+            await asyncio.gather(*list(inflight), return_exceptions=True)
+        raise
+
+    # EOF: let the requests that are already running write their response
+    # before the process goes away, then cancel the stragglers so the
+    # server cannot hang on a long tool call forever.
+    if inflight:
+        logger.info("stdin closed - draining %d in-flight request(s)", len(inflight))
+        pending = set(inflight)
+        _, still_pending = await asyncio.wait(
+            list(pending), timeout=_SHUTDOWN_GRACE_SECONDS
+        )
+        for t in still_pending:
+            t.cancel()
+        if still_pending:
+            await asyncio.gather(*list(still_pending), return_exceptions=True)
+
+    logger.info("LeadForge MCP stdio server stopped.")
 
 
 def main():
-    asyncio.run(run_mcp_server())
+    try:
+        asyncio.run(run_mcp_server())
+    except KeyboardInterrupt:
+        # Ctrl-C: exit quietly, without a traceback.
+        logger.info("LeadForge MCP server interrupted - shutting down")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

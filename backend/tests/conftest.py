@@ -44,3 +44,18 @@ async def reset_db():
 async def db_session():
     async with async_session_maker() as session:
         yield session
+
+
+@pytest.fixture
+async def client():
+    """An httpx client bound to the real ASGI app.
+
+    Promoted to conftest so every test module can exercise the HTTP API
+    without redefining it - several fixes in this codebase are only
+    observable through the API (pagination totals, filter placement, auth).
+    """
+    from httpx import AsyncClient
+    from app.main import app
+
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        yield ac

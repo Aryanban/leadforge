@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request, Response, status as http_status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
+from urllib.parse import quote, urlparse, parse_qs
 from app.database import get_db
 from app.models.send import Send
 from app.campaigns.suppression import add_suppression
@@ -11,14 +12,38 @@ router = APIRouter()
 # 1x1 transparent GIF
 TRANSPARENT_PIXEL = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
 
+
 @router.get("/open/{send_id}")
 async def track_open(send_id: int, db: AsyncSession = Depends(get_db)):
     # Update send status asynchronously
     stmt = update(Send).where(Send.id == send_id).values(opened=True)
     await db.execute(stmt)
     await db.commit()
-    
+
     return Response(content=TRANSPARENT_PIXEL, media_type="image/gif")
+
+
+@router.get("/click/{send_id}")
+async def track_click(send_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """Click tracking: records the click, then redirects to the real URL.
+
+    This route did not exist at all. The ``Send.clicked`` column was never
+    written by anything, and the warm-WhatsApp handoff panel requires either
+    three opens or one click - so with open tracking off by default, that
+    panel could never populate and the product's flagship India feature was
+    permanently empty.
+    """
+    target = request.query_params.get("u") or "/"
+    stmt = update(Send).where(Send.id == send_id).values(clicked=True)
+    await db.execute(stmt)
+    await db.commit()
+
+    # Only ever redirect to an absolute http(s) URL - an open redirect on a
+    # tracking endpoint is a phishing primitive.
+    parsed = urlparse(target)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return Response(status_code=302, headers={"Location": target})
+    return Response(status_code=302, headers={"Location": "/"})
 
 
 async def _suppress_contact(contact_id: int, db: AsyncSession) -> None:

@@ -15,6 +15,10 @@ class Mailbox(Base):
 
     daily_limit = Column(Integer, default=50)
     sent_today = Column(Integer, default=0)
+    #: Calendar day (YYYY-MM-DD, UTC) that ``sent_today`` refers to. Without
+    #: this the counter is a *lifetime* total, and the daily-cap filter that
+    #: reads it retires the mailbox permanently after ``daily_limit`` sends.
+    sent_today_date = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
 
     #: Inbound (IMAP) settings for reply detection. imap_host defaults to the

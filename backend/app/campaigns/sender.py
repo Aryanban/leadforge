@@ -1,4 +1,5 @@
 import smtplib
+import html
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate, make_msgid
@@ -7,8 +8,11 @@ import logging
 import asyncio
 import random
 import re
-from datetime import datetime
-from sqlalchemy import select, update
+from datetime import datetime, timezone
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
+from sqlalchemy import select, update, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session_maker
@@ -19,7 +23,11 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_step import CampaignStep
 from app.models.send import Send
 from app.campaigns.bounces import classify_bounce, HARD, SOFT
-from app.campaigns.suppression import is_suppressed, add_suppression
+from app.campaigns.suppression import is_suppressed, add_suppression, suppressed_reasons
+from app.models.suppression import PERMANENT_REASONS
+from app.campaigns.india_copy import localize_template
+from app.models.audit_event import record as record_audit
+from app.sources import in_phone
 from app.campaigns.warmup import (
     mailbox_age_days, ramp_limit, mailbox_health, is_mailbox_usable,
     rolling_24h_count, recent_outcomes,
@@ -27,20 +35,134 @@ from app.campaigns.warmup import (
 
 logger = logging.getLogger(__name__)
 
-def interpolate_template(text: str, data: Dict[str, str]) -> str:
-    """Replaces {{variable}} tags in subject/body with lead data."""
+#: IST - the operator's day. "Sent today" and the daily quota are counted on
+#: the calendar day the salesperson actually lives in, not UTC.
+IST = ZoneInfo("Asia/Kolkata")
+
+#: A send is only suppressed after this many transient failures. A single
+#: gateway hiccup must never delete a good lead for 30 days.
+SOFT_MAX_ATTEMPTS = 3
+
+#: Verification states that make an address undeliverable. The sender refuses
+#: these outright: mailing a known-dead address is a hard bounce, and hard
+#: bounces are how a sending domain gets permanently blocklisted.
+UNSENDABLE_STATUSES = (
+    "bounced", "invalid", "syntax_error", "gibberish", "disposable",
+    "no_mx", "domain_error", "spamtrap", "abuse", "do_not_mail", "mailbox_full",
+)
+
+#: Reply categories that must NOT stop a sequence. An out-of-office
+#: auto-responder is not a conversation - treating it as one silently ends
+#: the follow-up chain on every lead whose owner travels.
+_NON_TERMINAL_REPLIES = ("out_of_office",)
+
+_TOKEN_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
+
+def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Normalises a datetime to timezone-aware UTC.
+
+    SQLite hands back naive datetimes; Postgres (DateTime(timezone=True))
+    hands back aware ones. Mixing the two makes ``aware - naive`` raise
+    TypeError, which broke the sequence delay math on Postgres outright.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def interpolate_template(text: str, data: Dict[str, str], *, escape: bool = False,
+                          fallback: str = "") -> str:
+    """Replaces {{variable}} tags in subject/body with lead data.
+
+    An unknown tag is *blanked*, never shipped literally. A stray
+    ``{{frist_name}}`` used to reach the prospect verbatim, which reads as an
+    obviously automated mail and poisons the sender's reputation. Unknown tags
+    are logged so the operator can fix the template.
+    """
     if not text:
         return ""
-    result = text
-    for key, val in data.items():
-        placeholder = f"{{{{{key}}}}}"
-        result = result.replace(placeholder, str(val or ""))
-    return result
+    missing: list[str] = []
+
+    def _sub(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        if key not in data:
+            missing.append(key)
+            return fallback
+        value = str(data.get(key) or "")
+        return html.escape(value, quote=True) if escape else value
+
+    rendered = _TOKEN_RE.sub(_sub, text)
+    if missing:
+        logger.warning(
+            "template references unknown token(s) %s - rendered blank", sorted(set(missing))
+        )
+    return rendered
+
+
+
+def _rewrite_links_for_tracking(body: str, tracking_base: str, send_id: Optional[int]) -> str:
+    """Rewrites ``<a href="...">`` links to the click-tracking redirect.
+
+    Click tracking did not exist: there was no ``/click`` route, the
+    ``Send.clicked`` column was never written, and the warm-WhatsApp handoff
+    panel (which needs three opens or one click) could therefore never
+    populate. Open tracking is deliberately off by default - a tracking pixel
+    is a primary-inbox killer - which left click tracking as the only
+    engagement signal available.
+
+    The unsubscribe link is never rewritten: it must keep working even if
+    tracking is misconfigured, and it is appended after this runs anyway.
+    """
+    if not send_id or not body:
+        return body
+    if "http" not in body:
+        return body
+
+    def _replace(match: "re.Match[str]") -> str:
+        href = match.group(2)
+        if not href.startswith("http"):
+            return match.group(0)
+        if "unsubscribe" in href or "tracker/" in href:
+            return match.group(0)
+        tracker = f"{tracking_base.rstrip('/')}/api/v1/campaigns/tracker/click/{send_id}"
+        return f'{match.group(1)}"{tracker}?u={quote(href, safe="")}"'
+
+    return re.sub(r'(href\s*=\s*")([^"]+)(")', _replace, body)
 
 
 def _domain_from_email(email: str) -> str:
     """Returns the domain part of an address, for Message-ID generation."""
     return (email or "").rsplit("@", 1)[-1].lower() or "localhost"
+
+
+def _is_india_lead(business: Any, contact: Any = None) -> bool:
+    """Whether a lead is in India, for the send-window decision.
+
+    Two independent signals, either of which is enough: an Indian phone
+    number, or a state we recognise. Neither is certain on its own - a
+    business can have a foreign number, or a missing one - so both are
+    checked and the answer is only "yes" when one of them says so.
+    """
+    from app.locations.india import STATE_CODES
+
+    for obj in (contact, business):
+        phone = getattr(obj, "phone", None) if obj is not None else None
+        if phone:
+            digits = re.sub(r"\D", "", str(phone))
+            if digits.startswith("91") and len(digits) >= 11:
+                return True
+            if digits.startswith("0") and len(digits) in (11, 12):
+                return True
+
+    state = getattr(business, "state", None) if business is not None else None
+    if state:
+        for known in STATE_CODES:
+            if known.lower() == str(state).strip().lower():
+                return True
+    return False
 
 
 def jitter_seconds() -> float:
@@ -197,9 +319,41 @@ def send_single_email(
         server.quit()
         return True, ""
 
+    except smtplib.SMTPSenderRefused as e:
+        # OUR problem, not the recipient's. A rejected MAIL FROM (SPF
+        # misalignment, a blocked envelope sender, a policy gate) says nothing
+        # about the address we were trying to reach. Tagging it keeps the
+        # bounce classifier from suppressing the entire lead database.
+        logger.error("Sender rejected by %s for %s: %s", mailbox.smtp_host, to_email, e)
+        return False, f"sender_rejected:{e.smtp_code}:{e.smtp_error}"
+    except smtplib.SMTPRecipientsRefused as e:
+        # A genuine recipient refusal. smtplib gives us the per-recipient
+        # reply code, which is exactly what the classifier needs. The code is
+        # emitted FIRST so the classifier's code scanner cannot accidentally
+        # match digits inside the address itself.
+        details = "; ".join(
+            f"{code} {msg}" for _addr, (code, msg) in (e.recipients or {}).items()
+        )
+        logger.error("Recipient refused by %s for %s: %s", mailbox.smtp_host, to_email, details)
+        return False, f"recipient_refused:{details}"
+    except smtplib.SMTPDataError as e:
+        # Message content rejected at DATA time - our problem, not theirs.
+        logger.error("Data rejected by %s for %s: %s", mailbox.smtp_host, to_email, e)
+        return False, f"data_rejected:{e.smtp_code}:{e.smtp_error}"
     except Exception as e:
         logger.error(f"Error sending email to {to_email} via {mailbox.email}: {e}")
         return False, str(e)
+
+
+async def send_single_email_async(*args: Any, **kwargs: Any) -> Tuple[bool, str]:
+    """Runs the blocking SMTP handshake off the event loop.
+
+    ``send_single_email`` performs a TCP connect, a TLS handshake and an
+    authentication round-trip - seconds of blocking I/O. Called directly from
+    an ``async def`` it freezes the whole API (and the in-process reply
+    poller) for the duration of every send.
+    """
+    return await asyncio.to_thread(send_single_email, *args, **kwargs)
 
 
 from app.enricher.ai_icebreaker import generate_ai_icebreaker
@@ -221,7 +375,10 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
     # Single timestamp for the whole run. The mailbox warmup/ramp gate below
     # (mailbox_age_days / rolling_24h_count) and the per-step delay math both
     # read this, so it must be captured once, up front - not partway through.
-    now = datetime.utcnow()
+    # Timezone-aware: SQLite returns naive datetimes and Postgres returns
+    # aware ones, and mixing the two made the delay subtraction raise
+    # TypeError on Postgres outright.
+    now = datetime.now(timezone.utc)
     async with async_session_maker() as db:
         campaign = await db.get(Campaign, campaign_id)
         if not campaign or campaign.status != CampaignStatus.ACTIVE.value:
@@ -242,15 +399,28 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         step_ids_to_step = {s.id: s for s in steps}
 
         # Get available mailboxes, then apply the warmup/health/rolling gates.
-        # `sent_today < daily_limit` is only a fast pre-filter: the rolling
-        # 24h count over real Send timestamps is authoritative, a new mailbox
-        # ramps 10 -> limit over RAMP_DAYS, and a sick mailbox is held out
-        # until reviewed. Aged healthy mailboxes rotate first so fresh ones
-        # build reputation slowly - this is what keeps Gmail bulk-foldering
-        # at bay for new sending domains.
-        m_stmt = select(Mailbox).where(Mailbox.is_active == True, Mailbox.sent_today < Mailbox.daily_limit)
+        # The rolling 24h count over real Send timestamps is authoritative: a
+        # new mailbox ramps 10 -> limit over RAMP_DAYS, and a sick mailbox is
+        # held out until reviewed. Aged healthy mailboxes rotate first so
+        # fresh ones build reputation slowly - this is what keeps Gmail
+        # bulk-foldering at bay for new sending domains.
+        #
+        # NB: the mailbox's own ``sent_today`` counter is NOT used as a filter.
+        # It used to be, and because it was never reset it silently became a
+        # *lifetime* cap: after `daily_limit` sends the mailbox was excluded
+        # forever and the whole outreach engine stopped after 50 emails.
+        m_stmt = select(Mailbox).where(Mailbox.is_active == True)
         m_res = await db.execute(m_stmt)
         candidates_mb = list(m_res.scalars().all())
+
+        # Reset the per-day counters for any mailbox whose last send was on a
+        # previous IST calendar day, so the dashboard's "sent today" is honest
+        # and the daily limit means *per day*.
+        today = now.astimezone(IST).strftime("%Y-%m-%d")
+        for mb in candidates_mb:
+            if getattr(mb, "sent_today_date", None) != today:
+                mb.sent_today = 0
+                mb.sent_today_date = today
 
         mailboxes = []
         for mb in candidates_mb:
@@ -280,11 +450,20 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
         if not mailboxes:
             return {"error": "No active mailboxes available with remaining daily quota"}
 
-        # Load candidate contacts who have an email, haven't unsubscribed, and haven't bounced.
-        # If this campaign has explicit targets (Apollo-style "Add to Sequence"),
-        # scope to them: a campaign must never email a lead the operator didn't
-        # pick. An empty target set keeps the legacy all-eligible behaviour so
-        # campaigns created before targeting existed still run.
+        # Load candidate contacts who have an email, haven't unsubscribed, and
+        # are actually deliverable.
+        #
+        # The verification gate used to exclude exactly one status ("bounced"),
+        # which meant `invalid`, `syntax_error`, `gibberish`, `disposable` and
+        # `no_mx` addresses were all mailed. The verifier goes to real lengths
+        # never to report a dead address as valid, and then that verdict was
+        # thrown away one file away - so a list of scraped Indian SMB addresses
+        # (where ~30% are junk) went out with a ~30% hard-bounce rate against
+        # a 5% bulk-sender ceiling.
+        #
+        # Un-enriched contacts (status NULL or "pending") stay eligible: we
+        # cannot know they are bad, and refusing them would silently disable
+        # outreach entirely.
         from app.models.campaign_step import CampaignTarget
         target_stmt = select(CampaignTarget.contact_id).where(
             CampaignTarget.campaign_id == campaign_id)
@@ -297,7 +476,10 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             .where(
                 Contact.email.isnot(None),
                 Contact.unsubscribed == False,
-                Contact.verification_status != "bounced"
+                or_(
+                    Contact.verification_status.is_(None),
+                    Contact.verification_status.notin_(UNSENDABLE_STATUSES),
+                ),
             )
         )
         if target_ids:
@@ -320,18 +502,35 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             sends_by_contact.setdefault(s.contact_id, []).append(s)
 
         queue_to_send: List[Tuple[Contact, Business, CampaignStep]] = []
+        #: Contacts still inside the sequence whose next step is waiting on a
+        #: delay. The old code could not tell "everyone finished" apart from
+        #: "everyone is waiting", so a campaign was marked COMPLETED the
+        #: moment it was launched and the dashboard showed in-flight
+        #: sequences as done.
+        pending_delays = 0
+
+        # The authoritative suppression gate (gate 3 of 4). The per-contact
+        # `unsubscribed` boolean only records an unsubscribe on THIS row; a
+        # bounce, complaint or "stop" reply on any campaign must block the
+        # address everywhere.
+        #
+        # The whole candidate set is checked in ONE query. It used to be
+        # `await is_suppressed(db, contact.email)` inside the loop - one
+        # round-trip per candidate, so a 500-target campaign spent 500
+        # queries deciding who not to email.
+        candidate_emails = [c.email for c, _b in candidates if c.email]
+        suppression_reasons = await suppressed_reasons(db, candidate_emails)
 
         for contact, business in candidates:
             c_sends = sends_by_contact.get(contact.id, [])
 
-            # Authoritative suppression gate (gate 3 of 4). The per-contact
-            # `unsubscribed` boolean only records an unsubscribe on THIS row;
-            # a bounce, complaint or "stop" reply on any campaign must block
-            # the address everywhere. Check the workspace-wide table here,
-            # immediately before we would open an SMTP connection.
-            suppression_reason = await is_suppressed(db, contact.email)
+            suppression_reason = suppression_reasons.get((contact.email or "").lower())
             if suppression_reason:
-                contact.unsubscribed = True
+                # Only a genuine opt-out flips the per-contact flag. A soft
+                # bounce has a 30-day expiry, and setting the flag for it made
+                # a transient gateway failure remove the lead permanently.
+                if suppression_reason in ("unsubscribed", "replied_stop", "complaint", "manual"):
+                    contact.unsubscribed = True
                 if suppression_reason == HARD:
                     contact.verification_status = "bounced"
                     contact.is_verified = False
@@ -340,8 +539,18 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 )
                 continue
 
-            # If recipient already replied or bounced, skip them
-            if any(s.replied for s in c_sends) or any(s.status == "bounced" for s in c_sends):
+            # Stop on a real reply. An out-of-office auto-responder is not a
+            # conversation - ending the follow-up chain on it silently cost us
+            # the second and third touches on every lead whose owner travels.
+            def _is_terminal(send: Send) -> bool:
+                if send.status == "bounced":
+                    return True
+                if not send.replied:
+                    return False
+                category = (send.reply_category or "").lower()
+                return category not in _NON_TERMINAL_REPLIES
+
+            if any(_is_terminal(s) for s in c_sends):
                 continue
 
             if not c_sends:
@@ -371,22 +580,66 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 if next_step_num in steps_by_number:
                     next_step = steps_by_number[next_step_num]
                     # Check delay requirement in days
-                    days_elapsed = (now - last_send.sent_at).total_seconds() / 86400.0
-                    if days_elapsed >= next_step.delay_days:
+                    last_sent_at = _as_utc(last_send.sent_at) or now
+                    days_elapsed = (now - last_sent_at).total_seconds() / 86400.0
+                    if days_elapsed >= (next_step.delay_days or 0):
                         queue_to_send.append((contact, business, next_step))
+                    else:
+                        # Still waiting on the step delay - the sequence is
+                        # alive, it just is not due yet.
+                        pending_delays += 1
+                else:
+                    # No further step configured: this contact is finished.
+                    pass
 
             if len(queue_to_send) >= max_sends:
                 break
 
         if not queue_to_send:
+            if pending_delays > 0:
+                # The sequence is mid-flight and simply waiting for the next
+                # step's delay to elapse. Leave it ACTIVE so the scheduler
+                # picks it up when it becomes due.
+                logger.info(
+                    "campaign %s: %d contact(s) waiting on a step delay", campaign_id, pending_delays
+                )
+                await db.commit()
+                return {
+                    "message": f"{pending_delays} contact(s) are waiting on the next step delay",
+                    "sent": 0,
+                    "pending": pending_delays,
+                }
             # Check if all active contacts have finished all steps
             campaign.status = CampaignStatus.COMPLETED.value
             await db.commit()
             return {"message": "All eligible contacts are up to date with sequence schedule", "sent": 0}
 
+        # India send window. An email that lands at 03:00 IST is marked as
+        # spam by a human, not a filter - the recipient is asleep. The send
+        # is *deferred*, never dropped: the contact is not marked as sent,
+        # so the scheduler picks it up on its next tick, which is inside
+        # the window.
+        #
+        # The check is per lead, not per campaign. A campaign can mix an
+        # Indian lead with an American one, and holding the American one
+        # until 09:00 IST would be its 21:30 the previous evening.
+        from app.campaigns.india_advisor import (
+            in_email_send_window,
+            next_send_window_opens,
+        )
+
+        window_open = in_email_send_window()
+        deferred_count = 0
+        deferred_until = next_send_window_opens() if not window_open else None
+
         mailbox_idx = 0
 
         for idx, (contact, business, step) in enumerate(queue_to_send):
+            # Is this lead in India? An Indian number, or a state we know.
+            if not window_open and _is_india_lead(business, contact):
+                deferred_count += 1
+                continue
+
             mailbox = mailboxes[mailbox_idx % len(mailboxes)]
             mailbox_idx += 1
 
@@ -408,6 +661,30 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 first_name=contact.first_name
             )
 
+            # India localisation. `localize_template` only substitutes
+            # `{{festival_line}}` (and empties it outside a festival window),
+            # so it is safe to apply automatically. It was never called, so a
+            # template using that token shipped the literal braces to the
+            # prospect.
+            body_text = localize_template(step.body_text or "", city=lead_city)
+            body_html = localize_template(step.body_html, city=lead_city) if step.body_html else None
+
+            # Channel routing. `preferred_channel` is computed at enrichment
+            # time from the line type - whatsapp / call / email - and was
+            # never read by the sender, so the headline India differentiator
+            # (Indian SMB owners answer WhatsApp, and only a mobile can be
+            # reached on it) changed nothing. A WhatsApp-reachable lead now
+            # gets a `{{whatsapp_link}}` token and a CTA that points there.
+            channel = (getattr(contact, "preferred_channel", None) or "").lower()
+            if not channel:
+                channel = in_phone.preferred_channel(
+                    contact.phone or (business.phone if business else None)
+                )
+            wa_digits = "".join(filter(str.isdigit, contact.phone or ""))
+            if not wa_digits and business is not None:
+                wa_digits = "".join(filter(str.isdigit, business.phone or ""))
+            whatsapp_link = f"https://wa.me/{wa_digits}" if wa_digits else None
+
             data = {
                 "business_name": business.name if business else "Your Business",
                 "first_name": contact.first_name or "Friend",
@@ -419,8 +696,21 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 "ai_icebreaker": icebreaker_info["ai_icebreaker"],
                 "compliment": icebreaker_info["compliment"],
                 "pain_point": icebreaker_info["pain_point"],
-                "call_to_action": icebreaker_info["call_to_action"]
+                "call_to_action": icebreaker_info["call_to_action"],
+                # India channel tokens.
+                "channel": channel,
+                "whatsapp_link": whatsapp_link or "",
             }
+            if channel == "whatsapp" and whatsapp_link:
+                # A WhatsApp-first lead should be invited to WhatsApp, not
+                # asked to reply to an inbox they do not monitor.
+                data["call_to_action"] = (
+                    f"Quick question - WhatsApp is easier? {whatsapp_link}"
+                )
+            elif channel == "call":
+                data["call_to_action"] = (
+                    f"Would a 4-minute call this week work? {data['phone']}"
+                )
 
             rendered_subject = interpolate_template(step.subject, data)
             # A/B subject test. While undecided, split evenly by contact-id
@@ -436,8 +726,13 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 use_variant = "b"
             if use_variant == "b":
                 rendered_subject = interpolate_template(step.subject_b, data)
-            rendered_body_text = interpolate_template(step.body_text, data)
-            rendered_body_html = interpolate_template(step.body_html, data) if step.body_html else None
+            rendered_body_text = interpolate_template(body_text, data)
+            # HTML body: escape interpolated values so a business named
+            # "Suresh & Sons <Deals>" cannot corrupt the markup.
+            rendered_body_html = (
+                interpolate_template(body_html, data, escape=True)
+                if body_html else None
+            )
 
             outbox_message_id = make_msgid(domain=_domain_from_email(mailbox.email))
             send_record = Send(
@@ -445,14 +740,29 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 step_id=step.id,
                 contact_id=contact.id,
                 mailbox_id=mailbox.id,
-                status="pending",
+                status="sending",
                 message_id=outbox_message_id,
-                variant_used=use_variant
+                variant_used=use_variant,
+                attempt=1,
             )
             db.add(send_record)
-            await db.flush()
+            # Commit the intent to send BEFORE the SMTP call. If the process
+            # dies mid-flight the row survives as "sending" and the reaper can
+            # reconcile it; previously the row was only flushed, so a crash
+            # between delivery and commit left the prospect with a delivered
+            # email and no record - and the next run mailed them again.
+            await db.commit()
 
-            success, err = send_single_email(
+            # Now that the send row exists we know its id, so links can be
+            # rewritten to the click tracker.
+            if rendered_body_html:
+                rendered_body_html = _rewrite_links_for_tracking(
+                    rendered_body_html,
+                    settings.TRACKING_DOMAIN.rstrip("/"),
+                    send_record.id,
+                )
+
+            success, err = await send_single_email_async(
                 mailbox=mailbox,
                 to_email=contact.email,
                 subject=rendered_subject,
@@ -473,26 +783,63 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
 
             if success:
                 send_record.status = "sent"
-                send_record.sent_at = datetime.utcnow()
-                mailbox.sent_today += 1
+                send_record.sent_at = datetime.now(timezone.utc)
+                mailbox.sent_today = (mailbox.sent_today or 0) + 1
+                mailbox.sent_today_date = today
                 sent_count += 1
+                await record_audit(
+                    db,
+                    "email_sent",
+                    f"Emailed {contact.email}"
+                    + (f" at {business.name}" if business else ""),
+                    entity_type="contact",
+                    entity_id=contact.id,
+                    detail={
+                        "campaign_id": campaign_id,
+                        "step_id": step.id,
+                        "mailbox_id": mailbox.id,
+                        "variant": getattr(send_record, "variant_used", None),
+                    },
+                )
             elif bounce_reason == HARD:
                 send_record.status = "bounced"
+                send_record.sent_at = datetime.now(timezone.utc)
                 send_record.error_message = err
+                send_record.bounced = True
                 contact.verification_status = "bounced"
                 contact.is_verified = False
                 await add_suppression(db, contact.email, HARD, detail=err)
                 bounced_count += 1
+                await record_audit(
+                    db,
+                    "email_bounced",
+                    f"{contact.email} bounced permanently and was suppressed",
+                    entity_type="contact",
+                    entity_id=contact.id,
+                    detail={
+                        "campaign_id": campaign_id,
+                        "reason": err[:200] if err else None,
+                    },
+                )
             elif bounce_reason == SOFT:
                 send_record.status = "failed"
                 send_record.error_message = err
-                # Transient: do not mark the lead bad. A soft suppression with
-                # an expiry guards the next batch while the mailbox recovers.
-                await add_suppression(db, contact.email, SOFT, detail=err)
+                # Transient: do not mark the lead bad, and do not suppress it
+                # yet either. A soft suppression with an expiry guards the
+                # next batch while the mailbox recovers - but only once the
+                # retry budget is exhausted. One gateway hiccup used to park
+                # a perfectly good lead for 30 days.
+                prior_attempts = sum(
+                    1 for s in sends_by_contact.get(contact.id, [])
+                    if s.status == "failed" and s.step_id == step.id
+                )
+                if prior_attempts + 1 >= SOFT_MAX_ATTEMPTS:
+                    await add_suppression(db, contact.email, SOFT, detail=err)
                 failed_count += 1
             else:
-                # Not a recipient problem (policy block / unknown). Retry, but
-                # never suppress - the address is fine, our sender is not.
+                # Not a recipient problem (policy block / unknown / our own
+                # sender misconfiguration). Retry, but never suppress - the
+                # address is fine, our sender is not.
                 send_record.status = "failed"
                 send_record.error_message = err
                 failed_count += 1
@@ -505,10 +852,97 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
             if idx < len(queue_to_send) - 1:
                 await asyncio.sleep(jitter_seconds())
 
-        return {
+        # Finalise the A/B winner here, not only in the stats endpoint.
+        #
+        # The winner used to be declared as a side effect of somebody
+        # opening the sequence-detail page. If nobody looked, the test ran
+        # to the end of the campaign with both variants still live and no
+        # verdict - which is exactly when you want the answer.
+        ab_winner = await _finalise_ab_winner(db, campaign_id)
+        if ab_winner:
+            await record_audit(
+                db,
+                "ab_winner_declared",
+                f"Subject variant {ab_winner.upper()} won the A/B test",
+                entity_type="campaign",
+                entity_id=campaign_id,
+                detail={"winner": ab_winner},
+            )
+
+        result = {
             "campaign_id": campaign_id,
             "sent_count": sent_count,
             "failed_count": failed_count,
-            "bounced_count": bounced_count
+            "bounced_count": bounced_count,
+            "ab_winner": ab_winner,
         }
+        if deferred_count:
+            # The sends were *deferred*, not failed: the contacts are not
+            # marked as sent, so the scheduler will pick them up inside the
+            # window. Saying "deferred" rather than "failed" is the
+            # difference between "we will send this" and "we lost this".
+            result["deferred_count"] = deferred_count
+            result["deferred_until"] = deferred_until
+            await record_audit(
+                db,
+                "send_deferred",
+                f"{deferred_count} send(s) deferred - outside the India send "
+                f"window (opens at {deferred_until})",
+                entity_type="campaign",
+                entity_id=campaign_id,
+                detail={"deferred": deferred_count, "opens_at": deferred_until},
+            )
+            result["message"] = (
+                f"{deferred_count} send(s) deferred: it is outside the India "
+                f"send window. The next window opens at {deferred_until}, and "
+                "the scheduler will send them then."
+            )
+        return result
 
+
+async def _finalise_ab_winner(db: AsyncSession, campaign_id: int) -> Optional[str]:
+    """Declares the A/B subject winner for a campaign, if one is due.
+
+    Uses the same significance test as the stats endpoint, so both agree.
+    Returns the winner ("a"/"b") or None.
+    """
+    from app.api.campaigns import AB_POSITIVE_REPLIES, decide_ab_winner
+
+    steps = (await db.execute(
+        select(CampaignStep).where(CampaignStep.campaign_id == campaign_id)
+    )).scalars().all()
+    ab_steps = [s for s in steps if getattr(s, "subject_b", None)]
+    if not ab_steps:
+        return None
+
+    sends = (await db.execute(
+        select(Send).where(Send.campaign_id == campaign_id, Send.status == "sent")
+    )).scalars().all()
+
+    by_step: Dict[int, List[Any]] = {}
+    for s in sends:
+        by_step.setdefault(s.step_id, []).append(s)
+
+    declared: Optional[str] = None
+    changed = False
+    for step in ab_steps:
+        if getattr(step, "variant_winner", None):
+            declared = declared or step.variant_winner
+            continue
+        rows = by_step.get(step.id, [])
+        a = [s for s in rows if (getattr(s, "variant_used", None) or "a") == "a"]
+        b = [s for s in rows if getattr(s, "variant_used", None) == "b"]
+        a_rep = sum(1 for s in a if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        b_rep = sum(1 for s in b if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        winner = decide_ab_winner(len(a), a_rep, len(b), b_rep)
+        if winner:
+            step.variant_winner = winner
+            declared = declared or winner
+            changed = True
+            logger.info(
+                "campaign %s step %s: A/B winner is %s (%d vs %d positive replies)",
+                campaign_id, step.id, winner, a_rep, b_rep,
+            )
+    if changed:
+        await db.commit()
+    return declared

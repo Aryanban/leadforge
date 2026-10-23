@@ -155,6 +155,10 @@ async def seed_initial_data_if_empty():
                 rating=item["rating"],
                 reviews_count=item["reviews_count"],
                 industry=item["industry"],
+                # The business is what source-trust scoring reads. It used to
+                # be set on the *contact* only, so every seeded lead fell
+                # through to the default trust and never got a trust badge.
+                source="google_maps_seed",
                 extra_data={"query": "Real Estate Agents in Rohini Delhi", "seeded": True}
             )
             db.add(b)
@@ -204,7 +208,11 @@ async def seed_initial_data_if_empty():
         # 4. Insert Sample Outreach Campaign
         camp = Campaign(
             name="Rohini Real Estate Dealers — DDA Blueprint Intro",
-            status=CampaignStatus.ACTIVE.value
+            # DRAFT, not ACTIVE. The scheduler advances every ACTIVE campaign
+            # on its own, so a seeded ACTIVE campaign meant that the moment a
+            # new user connected a sending mailbox, LeadForge started cold
+            # emailing the sample leads without anyone asking it to.
+            status=CampaignStatus.DRAFT.value
         )
         db.add(camp)
         await db.flush()

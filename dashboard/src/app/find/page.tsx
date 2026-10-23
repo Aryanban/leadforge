@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { api, ICPDraft, RankedLead, DiscoveryJob } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
+import { EmptyState, ErrorState, StatusLive } from "@/components/PageStates";
 
 const EMPTY_DRAFT: ICPDraft = {
   name: "",
@@ -31,6 +32,15 @@ const EMPTY_DRAFT: ICPDraft = {
   preset: "outreach_quality",
   signal_weights: null,
   preferred_sources: null,
+  min_employees: null,
+  max_employees: null,
+  revenue_bands: [],
+  size_buckets: [],
+  market_tiers: [],
+  states: [],
+  seniorities: [],
+  decision_makers_only: false,
+  require_email: false,
 };
 
 export default function FindLeadsPage() {
@@ -45,17 +55,22 @@ export default function FindLeadsPage() {
   const [parsing, setParsing] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [ranking, setRanking] = useState(false);
+  // The parser's promise: the constraints it could NOT honour. They have to
+  // be visible - a silently dropped filter gives the operator a list that
+  // looks like an answer and is not.
+  const [parseWarnings, setParseWarnings] = useState<string[]>([]);
 
   const hasDraft = Boolean(draft.niche);
 
-  const handleParse = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleParse = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!intentText.trim()) return;
     try {
       setParsing(true);
       setError(null);
       const parsed = await api.parseIcp(intentText);
       setDraft(parsed);
+      setParseWarnings(parsed.warnings || []);
     } catch (err: any) {
       setError(err.message || "Could not parse that intent");
     } finally {
@@ -97,8 +112,8 @@ export default function FindLeadsPage() {
     poll();
   }, []);
 
-  const handleDiscover = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleDiscover = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     try {
       setError(null);
       setRanked(null);
@@ -151,6 +166,18 @@ export default function FindLeadsPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {/* Screen-reader announcement of the long-running discovery states. */}
+      <StatusLive
+        loading={parsing || discovering || ranking}
+        loadingLabel={
+          discovering
+            ? "Discovering and ranking leads…"
+            : ranking
+            ? "Ranking the leads in your database…"
+            : "Drafting your ideal customer profile…"
+        }
+      />
+
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">Find the Best Leads</h1>
         <p className="text-sm text-slate-500 mt-1">
@@ -160,9 +187,18 @@ export default function FindLeadsPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
-          {error}
-        </div>
+        <ErrorState
+          title="That did not work"
+          message={error}
+          onRetry={() => {
+            setError(null);
+            if (hasDraft) {
+              handleRankExisting();
+            } else if (intentText.trim()) {
+              handleParse();
+            }
+          }}
+        />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -175,6 +211,7 @@ export default function FindLeadsPage() {
           <form onSubmit={handleParse} className="space-y-3">
             <textarea
               rows={3}
+              aria-label="Describe the leads you are looking for"
               placeholder="e.g. Dentists in South Delhi with verified emails and no website"
               value={intentText}
               onChange={(e) => setIntentText(e.target.value)}
@@ -183,16 +220,32 @@ export default function FindLeadsPage() {
             <button
               type="submit"
               disabled={parsing || !intentText.trim()}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
-              {parsing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
+              {parsing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
               Draft my ICP
             </button>
           </form>
-          <p className="text-[11px] text-slate-400 leading-relaxed">
+          <p className="text-[11px] text-slate-500 leading-relaxed">
             Try signals like &ldquo;verified emails&rdquo;, &ldquo;no website&rdquo;, &ldquo;running ads&rdquo;, or &ldquo;best leads&rdquo;
             to tune the scoring model.
           </p>
+
+          {/* What the parser could not honour. A silently dropped filter
+              gives the operator a list that looks like an answer and is
+              not, so it has to be said out loud. */}
+          {parseWarnings.length > 0 && (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1"
+            >
+              {parseWarnings.map((w, i) => (
+                <p key={i} className="text-[11px] text-amber-900 leading-relaxed">
+                  {w}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Step 2 — Refine ICP */}
@@ -203,7 +256,7 @@ export default function FindLeadsPage() {
           </div>
 
           {!hasDraft ? (
-            <p className="text-xs text-slate-400 italic py-6 text-center">
+            <p className="text-xs text-slate-500 italic py-6 text-center">
               Draft an ICP above, or fill the fields manually below.
             </p>
           ) : null}
@@ -227,9 +280,10 @@ export default function FindLeadsPage() {
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </label>
-            <label className="block">
+            <label className="block" htmlFor="icp-preset">
               <span className="font-semibold text-slate-700 block mb-1">Scoring preset</span>
               <select
+                id="icp-preset"
                 value={draft.preset}
                 onChange={(e) => updateDraft({ preset: e.target.value as ICPDraft["preset"] })}
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none"
@@ -271,6 +325,157 @@ export default function FindLeadsPage() {
                 className="w-full h-9 px-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </label>
+
+            {/* The structured criteria. Keywords say what a business is
+                *called*; these say what it *looks like* - which is what a
+                salesperson actually says when they describe their
+                market. */}
+            <div className="col-span-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+              <p className="font-semibold text-slate-700 mb-2">
+                What the company looks like
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Minimum staff
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.min_employees ?? ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        min_employees: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                    placeholder="e.g. 11"
+                    aria-label="Minimum staff"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Maximum staff
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.max_employees ?? ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        max_employees: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                    placeholder="e.g. 50"
+                    aria-label="Maximum staff"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Market tier
+                  </span>
+                  <select
+                    value={draft.market_tiers?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        market_tiers: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Market tier"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any</option>
+                    <option value="metro">Metro</option>
+                    <option value="tier_2">Tier 2</option>
+                    <option value="tier_3">Tier 3</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Turnover band
+                  </span>
+                  <select
+                    value={draft.revenue_bands?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        revenue_bands: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Turnover band"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any</option>
+                    <option value="<1Cr">Under 1 Cr</option>
+                    <option value="1-10Cr">1-10 Cr</option>
+                    <option value="10-50Cr">10-50 Cr</option>
+                    <option value="50-100Cr">50-100 Cr</option>
+                    <option value="100-500Cr">100-500 Cr</option>
+                    <option value="500Cr+">500 Cr+</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    Target role
+                  </span>
+                  <select
+                    value={draft.seniorities?.[0] || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        seniorities: e.target.value ? [e.target.value] : [],
+                      })
+                    }
+                    aria-label="Target role"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">Any role</option>
+                    <option value="owner">Owner / Founder</option>
+                    <option value="c_level">C-Level / MD</option>
+                    <option value="vp">VP</option>
+                    <option value="director">Director</option>
+                    <option value="head">Head of Function</option>
+                    <option value="manager">Manager</option>
+                    <option value="senior">Senior / Lead</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="font-medium text-slate-600 block mb-1 text-[11px]">
+                    State
+                  </span>
+                  <input
+                    value={draft.states?.join(", ") || ""}
+                    onChange={(e) =>
+                      updateDraft({
+                        states: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                      })
+                    }
+                    placeholder="Maharashtra, Gujarat"
+                    aria-label="State"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-3">
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.decision_makers_only)}
+                    onChange={(e) => updateDraft({ decision_makers_only: e.target.checked })}
+                    className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+                  />
+                  Decision makers only
+                </label>
+                <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.require_email)}
+                    onChange={(e) => updateDraft({ require_email: e.target.checked })}
+                    className="h-3.5 w-3.5 rounded border-slate-300 accent-blue-600"
+                  />
+                  Must have a reachable email
+                </label>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -306,20 +511,20 @@ export default function FindLeadsPage() {
             <button
               onClick={handleRankExisting}
               disabled={ranking || !hasDraft}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               title="Rank the leads already in your database against this ICP"
             >
-              {ranking ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Database className="w-3.5 h-3.5 mr-1.5" />}
+              {ranking ? <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Database className="w-3.5 h-3.5 mr-1.5" />}
               Rank existing DB
             </button>
             <button
               onClick={handleDiscover}
               disabled={discovering || !hasDraft}
-              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 transition-colors shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               {discovering ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" />
                   {job?.status === "running" ? "Enriching & ranking…" : "Starting discovery…"}
                 </>
               ) : (
@@ -344,17 +549,34 @@ export default function FindLeadsPage() {
             </h2>
             <button
               onClick={() => setRanked(null)}
-              className="text-xs text-slate-400 hover:text-slate-700 inline-flex items-center gap-1"
+              className="text-xs text-slate-500 hover:text-slate-700 inline-flex items-center gap-1"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Clear
             </button>
           </div>
 
           {ranked.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-10 text-center text-sm text-slate-400">
-              No leads reached the minimum score of {draft.min_score}. Try lowering the gate, broadening the niche,
-              or running discovery with more results.
-            </div>
+            <EmptyState
+              icon={<Target className="h-5 w-5" />}
+              title="No lead passed your ICP gate"
+              description={`Nothing in your database scored at least ${draft.min_score}. Lower the gate, broaden the niche, or run discovery to look outside the database.`}
+              action={
+                <button
+                  onClick={() => updateDraft({ min_score: Math.max(10, draft.min_score - 15) })}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+                >
+                  Lower the score gate
+                </button>
+              }
+              secondaryAction={
+                <button
+                  onClick={handleDiscover}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                >
+                  <Target className="w-3.5 h-3.5" /> Run discovery
+                </button>
+              }
+            />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {ranked.map((lead) => (
@@ -391,7 +613,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={mapsUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5"
+            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <span className="truncate">{lead.name}</span>
             <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
@@ -426,8 +648,8 @@ function LeadCard({ lead }: { lead: RankedLead }) {
 
       <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
         {lead.phone ? (
-          <a href={`tel:${lead.phone}`} className="inline-flex items-center gap-1 text-slate-700 hover:text-blue-600 font-mono">
-            <Phone className="w-3 h-3 text-slate-400" />
+          <a href={`tel:${lead.phone}`} className="inline-flex items-center gap-1 text-slate-700 hover:text-blue-600 font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2">
+            <Phone className="w-3 h-3 text-slate-500" />
             {lead.phone}
           </a>
         ) : null}
@@ -436,7 +658,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={`https://wa.me/${cleanPhone}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-emerald-600 hover:text-emerald-700"
+            className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <MessageCircle className="w-3 h-3" />
             WhatsApp
@@ -447,15 +669,15 @@ function LeadCard({ lead }: { lead: RankedLead }) {
             href={lead.website.startsWith("http") ? lead.website : `https://${lead.website}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 max-w-[160px] truncate"
+            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 max-w-[160px] truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <Globe className="w-3 h-3 shrink-0" />
             <span className="truncate">{lead.website.replace(/^https?:\/\/|\/$/g, "")}</span>
           </a>
         ) : null}
         {lead.rating ? (
-          <span className="inline-flex items-center gap-1 text-amber-600 font-medium">
-            ★ {lead.rating} <span className="text-slate-400">({lead.reviews_count || 0})</span>
+          <span className="inline-flex items-center gap-1 text-amber-700 font-medium">
+            ★ {lead.rating} <span className="text-slate-500">({lead.reviews_count || 0})</span>
           </span>
         ) : null}
       </div>
@@ -465,7 +687,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
           {lead.contacts.map((contact) => (
             <div key={contact.id} className="flex items-center justify-between gap-2 text-[11px]">
               <span className="inline-flex items-center gap-1.5 text-slate-700 min-w-0">
-                <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                <Mail className="w-3 h-3 text-slate-500 shrink-0" />
                 <span className="truncate font-mono">{contact.email || "No email found"}</span>
               </span>
               {contact.is_verified ? (
@@ -488,7 +710,7 @@ function LeadCard({ lead }: { lead: RankedLead }) {
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-50 text-slate-600 border border-slate-200 hover:text-blue-700 capitalize"
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-slate-50 text-slate-600 border border-slate-200 hover:text-blue-700 capitalize focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               {platform}
             </a>

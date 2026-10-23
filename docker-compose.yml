@@ -12,6 +12,12 @@
 # Before exposing the API beyond localhost, generate a real secret:
 #   SECRET_KEY=$(openssl rand -hex 32) docker compose up -d
 # and set ENV=production + an explicit CORS_ORIGINS (see .env.example).
+#
+# The dashboard talks to the API through a same-origin Next.js rewrite, so the
+# browser only ever calls localhost:3000. That is what makes the stack work
+# from another machine on the LAN — the old build-time NEXT_PUBLIC_API_URL
+# baked "localhost:8000" into the client bundle, so every visitor's browser
+# tried to reach *their own* machine.
 
 services:
   postgres:
@@ -24,11 +30,21 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadforge -d leadforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     ports:
       - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   backend:
     build:
@@ -47,9 +63,19 @@ services:
       - TRACKING_DOMAIN=${TRACKING_DOMAIN:-http://localhost:8000}
       - USE_CELERY=true
     depends_on:
-      - postgres
-      - redis
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # No --reload. The reload watcher restarts the process on any file write,
+    # which kills in-flight campaigns (the sender runs inside this process).
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   celery-worker:
     build:
@@ -64,22 +90,50 @@ services:
       - ENV=${ENV:-dev}
       - USE_CELERY=true
     depends_on:
-      - postgres
-      - redis
-      - backend
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     command: celery -A app.workers.tasks worker --loglevel=info
+
+  # The beat scheduler. It was missing entirely, and because USE_CELERY=true
+  # disables the in-process reply poller in the API, reply detection NEVER ran
+  # in the Docker deployment. Multi-step sequences were not scheduled either.
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://leadforge:password@postgres:5432/leadforge
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-leadforge-secret-key-production-change-me}
+      - ENV=${ENV:-dev}
+      - USE_CELERY=true
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: celery -A app.workers.tasks beat --loglevel=info
 
   dashboard:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
       args:
-        # Inlined into the JS bundle at build time — must include /api/v1.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+        # Server-side only. The browser calls /api/* on its own origin and
+        # Next.js proxies to the backend, so nothing localhost-ish is baked
+        # into the client bundle.
+        API_PROXY_URL: ${API_PROXY_URL:-http://backend:8000/api}
     ports:
       - "3000:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:

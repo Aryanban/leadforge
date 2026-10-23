@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { 
   Users, 
   Search, 
@@ -31,19 +32,152 @@ import {
   Send,
   X,
   ShieldAlert,
-  BookmarkPlus
+  BookmarkPlus,
+  Keyboard,
+  SearchX,
+  FilterX,
+  CircleHelp
 } from "lucide-react";
 import { api, LeadItem, CampaignItem, LeadDetailResponse, SavedView } from "@/lib/api";
 import { TrustBadge } from "@/components/IndiaKit";
+import { toast } from "@/components/Toaster";
+import {
+  EmptyState,
+  ErrorState,
+  Skeleton,
+  StatusLive,
+  TableSkeleton,
+} from "@/components/PageStates";
 
+/** Rows per page — the backend paginates on the same number. */
+const PAGE_SIZE = 20;
+
+/**
+ * Height of one lead row. Every row is pinned to this height so the table
+ * (and the pagination bar under it) never moves when the rows land.
+ */
+const ROW_HEIGHT = "h-[85px]";
+
+/**
+ * Fixed column widths. An auto-sized table re-flows when the real rows
+ * arrive (the browser sizes columns to their content), which slides the
+ * header cells sideways — a horizontal layout shift. Pinning the widths
+ * keeps the table identical before and after the data lands.
+ */
+const LEAD_COLUMNS = ["3%", "16%", "8%", "18%", "12%", "10%", "15%", "8%", "10%"];
+
+/**
+ * The Suspense fallback for the `?search=` / `?industry=` URL params.
+ *
+ * It mirrors the real page — header, filter bar, table with the same number
+ * of rows at the same height — so swapping the fallback for the live page
+ * is a no-op for the layout. A short "Loading…" box here would shove the
+ * whole page down as soon as the params resolve.
+ */
+function LeadsSkeleton() {
+  return (
+    <div className="space-y-6 max-w-7xl mx-auto">
+      <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-start">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+            Lead Database
+          </h1>
+          <p className="text-sm text-slate-500 mt-1">Loading your lead database…</p>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
+        <div className="flex flex-col md:flex-row items-center gap-3">
+          <div className="relative flex-1 w-full">
+            <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <div className="w-full h-10 pl-10 pr-4 rounded-xl border border-slate-200 bg-slate-50/50" />
+          </div>
+          <div className="flex items-center gap-2 w-full md:w-auto">
+            <div className="h-10 w-full md:w-40 rounded-xl border border-slate-200 bg-white" />
+            <div className="h-10 w-36 rounded-xl border border-slate-200 bg-white" />
+            <div className="h-10 w-20 rounded-xl bg-slate-900/90" />
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200/80 bg-white shadow-xs overflow-hidden">
+        <div className="overflow-x-auto">
+          <table
+            className="w-full table-fixed text-left text-xs"
+            aria-keyshortcuts="j k x"
+            aria-label="Lead database — press j and k to move between rows, x to select"
+          >
+            <colgroup>
+              {LEAD_COLUMNS.map((w, i) => (
+                <col key={i} style={{ width: w }} />
+              ))}
+            </colgroup>
+            <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
+              <tr>
+                <th className="pl-5 pr-2 py-3" />
+                <th className="px-3 py-3">Business &amp; Address</th>
+                <th className="px-3 py-3">Score &amp; Status</th>
+                <th className="px-4 py-3">Category</th>
+                <th className="px-4 py-3">Phone &amp; WhatsApp</th>
+                <th className="px-4 py-3">Website</th>
+                <th className="px-4 py-3">Contact Email</th>
+                <th className="px-4 py-3">Rating</th>
+                <th className="px-5 py-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              <TableSkeleton rows={PAGE_SIZE} columns={9} rowClassName={ROW_HEIGHT} />
+            </tbody>
+          </table>
+        </div>
+        <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-600">
+          <Skeleton className="h-3 w-40" />
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-20 rounded-lg" />
+            <Skeleton className="h-7 w-24 rounded-lg" />
+            <Skeleton className="h-7 w-16 rounded-lg" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The page reads `?search=` / `?industry=` from the URL, which is what the
+ * global Cmd+K search lands on. `useSearchParams` forces the surrounding
+ * Suspense boundary (see the default export) so the route stays statically
+ * renderable.
+ */
 export default function LeadsPage() {
+  return (
+    <Suspense fallback={<LeadsSkeleton />}>
+      <LeadsPageInner />
+    </Suspense>
+  );
+}
+
+function LeadsPageInner() {
+  const searchParams = useSearchParams();
+  const urlSearch = searchParams.get("search") ?? "";
+  const urlIndustry = searchParams.get("industry") ?? "";
+
   const [leads, setLeads] = useState<LeadItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [industryFilter, setIndustryFilter] = useState("");
+  const [search, setSearch] = useState(urlSearch);
+  const [industryFilter, setIndustryFilter] = useState(urlIndustry);
   const [hasEmailFilter, setHasEmailFilter] = useState<string>("all");
+
+  // Pagination is driven by the total the API reports — a filtered last page
+  // is legitimately shorter than PAGE_SIZE, so row count can't drive it.
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const firstRowIndex = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const lastRowIndex = total === 0 ? 0 : Math.min(page * PAGE_SIZE, total);
+  const hasActiveFilters =
+    Boolean(search.trim()) || Boolean(industryFilter.trim()) || hasEmailFilter !== "all";
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [enrichingId, setEnrichingId] = useState<number | null>(null);
   const [bulkEnrichLoading, setBulkEnrichLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -96,9 +230,27 @@ export default function LeadsPage() {
   const contactIdFor = (lead: LeadItem): number | null =>
     lead.primary_contact?.id ?? lead.contacts?.[0]?.id ?? null;
 
-  const selectableIds = leads.map(contactIdFor);
-  const selectableCount = selectableIds.filter((id): id is number => id !== null).length;
+  // Selectable ids are PAGE-scoped, while `selected` is global (it can hold
+  // picks from earlier pages). Keep both views straight: the header checkbox
+  // reflects the current page only, and toggling it merges into / removes from
+  // the global set instead of replacing it.
+  const selectableIds = leads
+    .map(contactIdFor)
+    .filter((id): id is number => id !== null);
+  const selectableCount = selectableIds.length;
   const selectableLoaded = !loading && leads.length > 0;
+  const selectedOnPage = selectableIds.filter((id) => selected.has(id));
+  const allOnPageSelected = selectableCount > 0 && selectedOnPage.length === selectableCount;
+  const someOnPageSelected = selectedOnPage.length > 0 && !allOnPageSelected;
+
+  // The header checkbox is "indeterminate" when only part of the page is
+  // picked — the DOM property can't be set declaratively.
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someOnPageSelected;
+    }
+  }, [someOnPageSelected]);
 
   const toggleRow = (lead: LeadItem) => {
     const cid = contactIdFor(lead);
@@ -110,6 +262,86 @@ export default function LeadsPage() {
       return next;
     });
   };
+
+  // --- Keyboard navigation (the shortcuts a data table is expected to have) ---
+  //
+  // "/" focuses the search box, "Escape" clears it, "j"/"k" walk the visible
+  // rows, "x" picks the row under the cursor and "?" opens the cheat sheet.
+  // They must never fire while the user is typing, so every handler bails
+  // out when the event target is a text field.
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const tableBodyRef = useRef<HTMLTableSectionElement>(null);
+
+  // Keep the cursor inside the current page of results.
+  useEffect(() => {
+    setFocusedIndex((idx) => (leads.length === 0 ? -1 : Math.min(idx, leads.length - 1)));
+  }, [leads.length]);
+
+  const moveFocus = useCallback(
+    (delta: number) => {
+      if (leads.length === 0) return;
+      setFocusedIndex((idx) => {
+        const next = idx < 0 ? (delta > 0 ? 0 : leads.length - 1) : idx + delta;
+        return Math.max(0, Math.min(leads.length - 1, next));
+      });
+    },
+    [leads.length],
+  );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const typing =
+        !!target &&
+        (tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          (target as HTMLElement).isContentEditable);
+
+      // Escape clears the search box, but only while the search box has it.
+      if (e.key === "Escape") {
+        if (document.activeElement === searchInputRef.current) {
+          e.preventDefault();
+          setSearch("");
+        }
+        if (shortcutsOpen) setShortcutsOpen(false);
+        return;
+      }
+
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === "/") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      } else if (e.key === "j") {
+        e.preventDefault();
+        moveFocus(1);
+      } else if (e.key === "k") {
+        e.preventDefault();
+        moveFocus(-1);
+      } else if (e.key === "x") {
+        e.preventDefault();
+        const lead = leads[focusedIndex];
+        if (lead) toggleRow(lead);
+      } else if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [leads, focusedIndex, moveFocus, shortcutsOpen]);
+
+  // Keep the keyboard cursor visible: scroll it into view when it moves.
+  useEffect(() => {
+    if (focusedIndex < 0 || !tableBodyRef.current) return;
+    const row = tableBodyRef.current.children[focusedIndex] as HTMLElement | undefined;
+    row?.scrollIntoView({ block: "nearest" });
+  }, [focusedIndex]);
 
   // Row click opens the detail drawer (selection stays on the checkbox so
   // link/button clicks and bulk selection keep working exactly as before).
@@ -195,11 +427,14 @@ export default function LeadsPage() {
   }, [loadSavedViews]);
 
   const toggleAll = () => {
-    setSelected((prev) =>
-      prev.size === selectableCount
-        ? new Set()
-        : new Set(selectableIds.filter((id): id is number => id !== null)),
-    );
+    setSelected((prev) => {
+      const next = new Set(prev);
+      // Union (never replace): picks made on other pages must survive.
+      const everySelected = selectableIds.length > 0 && selectableIds.every((id) => next.has(id));
+      if (everySelected) selectableIds.forEach((id) => next.delete(id));
+      else selectableIds.forEach((id) => next.add(id));
+      return next;
+    });
   };
 
   const openSequencePicker = async () => {
@@ -228,29 +463,52 @@ export default function LeadsPage() {
     }
   };
 
-  const fetchLeads = async () => {
-    try {
-      setLoading(true);
-      const emailFilterParam = hasEmailFilter === "true" ? true : hasEmailFilter === "false" ? false : undefined;
-      const res = await api.getLeads({
-        page,
-        limit: 20,
-        search: search || undefined,
-        industry: industryFilter || undefined,
-        has_email: emailFilterParam,
-      });
-      setLeads(res.leads);
-      setTotal(res.total);
-    } catch (err) {
-      console.warn("Could not fetch live leads, using demo fallback:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Two in-flight requests can resolve out of order (a slow page-1 response
+  // landing after a fast page-2 response). A monotonically increasing token
+  // makes sure only the newest response is allowed to paint.
+  const requestToken = useRef(0);
+
+  const fetchLeads = useCallback(
+    async (args: { page: number; search: string; industry: string; hasEmail?: boolean }) => {
+      const token = ++requestToken.current;
+      try {
+        setLoading(true);
+        setLoadError(null);
+        const res = await api.getLeads({
+          page: args.page,
+          limit: PAGE_SIZE,
+          search: args.search || undefined,
+          industry: args.industry || undefined,
+          has_email: args.hasEmail,
+        });
+        if (token !== requestToken.current) return; // a newer request won
+        setLeads(res.leads);
+        setTotal(res.total);
+      } catch (err) {
+        if (token !== requestToken.current) return;
+        console.warn("Could not fetch live leads:", err);
+        setLoadError(
+          err instanceof Error && err.message
+            ? err.message
+            : "The backend did not answer. Check that it is running, then try again.",
+        );
+        toast.error("Could not load leads", "Check that the backend is reachable and try again.");
+      } finally {
+        if (token === requestToken.current) setLoading(false);
+      }
+    },
+    [],
+  );
+
+  const emailFilterParam =
+    hasEmailFilter === "true" ? true : hasEmailFilter === "false" ? false : undefined;
 
   useEffect(() => {
-    fetchLeads();
-  }, [page, industryFilter, hasEmailFilter]);
+    fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
+    // `search` / `industry` are intentionally excluded: they have their own
+    // debounced effect so typing doesn't fire a request per keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, hasEmailFilter, fetchLeads]);
 
   // Live search: debounced so typing doesn't fire a request per keystroke, but
   // without requiring the user to press Enter (Apollo-style instant filter).
@@ -262,15 +520,30 @@ export default function LeadsPage() {
     }
     const t = setTimeout(() => {
       setPage(1);
-      fetchLeads();
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     }, 400);
     return () => clearTimeout(t);
-  }, [search]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, industryFilter]);
+
+  // Sync the URL (?search= / ?industry=) into the filters. This is what makes
+  // the global Cmd+K search land on an actually filtered table. Changing the
+  // URL resets to the first page.
+  useEffect(() => {
+    setSearch((prev) => (prev === urlSearch ? prev : urlSearch));
+    setIndustryFilter((prev) => (prev === urlIndustry ? prev : urlIndustry));
+    setPage(1);
+  }, [urlSearch, urlIndustry]);
+
+  // Deleting the last row of the last page must not strand us on an empty page.
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
-    fetchLeads();
+    fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
   };
 
   const handleEnrichSingle = async (businessId: number) => {
@@ -280,10 +553,13 @@ export default function LeadsPage() {
       const emailCount = res.emails_found || 0;
       const phoneCount = res.phones_found || 0;
       const verifiedCount = res.verified_emails || 0;
-      alert(`Multi-Source Search Complete!\n• Emails Found: ${emailCount} (${verifiedCount} verified deliverable)\n• Discovered Phone Numbers: ${phoneCount}\n• Discovered Website: ${res.website || "None"}`);
-      fetchLeads();
+      toast.success(
+        "Multi-source search complete",
+        `Emails found: ${emailCount} (${verifiedCount} verified deliverable) • Phone numbers: ${phoneCount} • Website: ${res.website || "None"}`,
+      );
+      fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Search notice: ${err.message}`);
+      toast.error("Search failed", err.message || "Could not run the contact search.");
     } finally {
       setEnrichingId(null);
     }
@@ -293,10 +569,16 @@ export default function LeadsPage() {
     try {
       setBulkEnrichLoading(true);
       const res = await api.enrichAll(25);
-      alert(res.message || "Deep web contact enrichment started in background across DuckDuckGo & websites!");
-      setTimeout(() => fetchLeads(), 3000);
+      toast.info(
+        "Deep web enrichment started",
+        res.message || "Running in the background across DuckDuckGo & target websites.",
+      );
+      setTimeout(
+        () => fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam }),
+        3000,
+      );
     } catch (err: any) {
-      alert(`Failed to trigger bulk enrichment: ${err.message}`);
+      toast.error("Bulk enrichment failed", err.message || "Could not trigger bulk enrichment.");
     } finally {
       setBulkEnrichLoading(false);
     }
@@ -306,9 +588,10 @@ export default function LeadsPage() {
     if (!confirm("Are you sure you want to remove this lead?")) return;
     try {
       await api.deleteLead(id);
-      fetchLeads();
+      toast.success("Lead deleted", "The lead was removed from your database.");
+      fetchLeads({ page, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Failed to delete lead: ${err.message}`);
+      toast.error("Could not delete lead", err.message || "The lead is still in your database.");
     }
   };
 
@@ -319,9 +602,10 @@ export default function LeadsPage() {
       await api.createLead(newLead);
       setShowAddModal(false);
       setNewLead({ name: "", phone: "", email: "", website: "", address: "", industry: "Real Estate Agency" });
-      fetchLeads();
+      toast.success("Lead added", `${newLead.name} is now in your lead database.`);
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`Failed to add lead: ${err.message}`);
+      toast.error("Could not add lead", err.message || "Please check the details and try again.");
     }
   };
 
@@ -331,10 +615,13 @@ export default function LeadsPage() {
     try {
       setSyncingTwenty(true);
       const res = await api.exportTwentyCrm(syncWebhookUrl);
-      alert(`Sync successful! ${res.synced_companies || 0} companies pushed to target webhook.`);
+      toast.success(
+        "Sync successful",
+        `${res.synced_companies || 0} companies pushed to your webhook.`,
+      );
       setShowSyncModal(false);
     } catch (err: any) {
-      alert(`Sync notice: ${err.message}`);
+      toast.error("Sync failed", err.message || "Could not reach the webhook.");
     } finally {
       setSyncingTwenty(false);
     }
@@ -346,12 +633,15 @@ export default function LeadsPage() {
     try {
       setImportingCsv(true);
       const res = await api.importCsv(importCsvText.trim());
-      alert(`Import Successful!\n• Imported Leads: ${res.imported}\n• Skipped: ${res.skipped}\n• Total Processed: ${res.total_rows_processed}`);
+      toast.success(
+        "Import complete",
+        `Imported ${res.imported} lead(s) • Skipped ${res.skipped} • ${res.total_rows_processed} rows processed`,
+      );
       setShowImportModal(false);
       setImportCsvText("");
-      fetchLeads();
+      fetchLeads({ page: 1, search, industry: industryFilter, hasEmail: emailFilterParam });
     } catch (err: any) {
-      alert(`CSV Import failed: ${err.message}`);
+      toast.error("CSV import failed", err.message || "Could not read that CSV.");
     } finally {
       setImportingCsv(false);
     }
@@ -374,7 +664,7 @@ export default function LeadsPage() {
       const res = await api.getIcebreaker(leadId);
       setActiveIcebreaker(res);
     } catch (err: any) {
-      alert(`Icebreaker generation notice: ${err.message}`);
+      toast.error("Could not generate an icebreaker", err.message || "Try again in a moment.");
     } finally {
       setLoadingIcebreakerId(null);
     }
@@ -387,7 +677,7 @@ export default function LeadsPage() {
       const res = await api.checkSpam(spamSubject, spamBody);
       setSpamResult(res);
     } catch (err: any) {
-      alert(`Spam analysis notice: ${err.message}`);
+      toast.error("Spam analysis failed", err.message || "Try again in a moment.");
     } finally {
       setCheckingSpam(false);
     }
@@ -401,10 +691,20 @@ export default function LeadsPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
+      {/* Screen-reader announcement of the table's loading state. */}
+      <StatusLive
+        loading={loading}
+        loadingLabel={
+          hasActiveFilters
+            ? "Searching leads…"
+            : "Loading the lead database…"
+        }
+      />
+
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+        <div className="min-w-0">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 whitespace-nowrap">
             Lead Database
           </h1>
           <p className="text-sm text-slate-500 mt-1">
@@ -412,14 +712,26 @@ export default function LeadsPage() {
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          <button
+            onClick={() => setShortcutsOpen((open) => !open)}
+            aria-keyshortcuts="?"
+            aria-expanded={shortcutsOpen}
+            title="Keyboard shortcuts"
+            className="inline-flex items-center justify-center rounded-xl text-xs font-semibold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3 transition-colors shadow-xs"
+          >
+            <Keyboard className="w-3.5 h-3.5 mr-1.5" />
+            <span className="hidden sm:inline">Shortcuts</span>
+            <span className="sm:hidden">?</span>
+          </button>
+
           <button
             onClick={handleBulkEnrich}
             disabled={bulkEnrichLoading}
-            className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white h-9 px-3.5 transition-colors shadow-xs"
+            className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white h-9 px-3.5 transition-colors shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             {bulkEnrichLoading ? (
-              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 mr-1.5 motion-safe:animate-spin motion-reduce:animate-pulse" />
             ) : (
               <Sparkles className="w-3.5 h-3.5 mr-1.5" />
             )}
@@ -438,7 +750,7 @@ export default function LeadsPage() {
           <a
             href={api.exportCsvUrl}
             download="leadforge_leads.csv"
-            className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs"
+            className="inline-flex items-center justify-center rounded-xl text-xs font-medium border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 h-9 px-3.5 transition-colors shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
             Export CSV
@@ -475,14 +787,53 @@ export default function LeadsPage() {
         </div>
       </div>
 
+      {/* Shortcut cheat sheet — the "?" key opens it. */}
+      {shortcutsOpen && (
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
+          <div className="flex items-center justify-between">
+            <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-600">
+              <CircleHelp className="h-3.5 w-3.5" /> Keyboard shortcuts
+            </h2>
+            <button
+              onClick={() => setShortcutsOpen(false)}
+              aria-label="Close keyboard shortcuts"
+              className="rounded-lg p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <dl className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
+            {[
+              ["/", "Focus the search box"],
+              ["Esc", "Clear the search box"],
+              ["j / k", "Move down / up the rows"],
+              ["x", "Select or deselect the focused row"],
+              ["?", "Show or hide this panel"],
+            ].map(([keys, what]) => (
+              <div key={keys} className="flex items-center gap-2">
+                <dt>
+                  <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-slate-700">
+                    {keys}
+                  </kbd>
+                </dt>
+                <dd className="text-slate-600">{what}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+
       {/* Filter and Search Bar */}
       <div className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs">
         <form onSubmit={handleSearch} className="flex flex-col md:flex-row items-center gap-3">
           <div className="relative flex-1 w-full">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
+              ref={searchInputRef}
               type="text"
               placeholder="Search by business name, address, phone, or email..."
+              aria-label="Search the lead database by business name, address, phone, or email"
+              aria-keyshortcuts="/ Escape"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full h-10 pl-10 pr-4 rounded-xl border border-slate-200 bg-slate-50/50 text-xs text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
@@ -490,9 +841,18 @@ export default function LeadsPage() {
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto">
+            <input
+              type="text"
+              value={industryFilter}
+              onChange={(e) => setIndustryFilter(e.target.value)}
+              placeholder="Industry…"
+              aria-label="Filter by industry"
+              className="h-10 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 w-full md:w-40"
+            />
             <select
               value={hasEmailFilter}
               onChange={(e) => setHasEmailFilter(e.target.value)}
+              aria-label="Filter by contact email"
               className="h-10 px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-700 focus:outline-none"
             >
               <option value="all">All Contacts</option>
@@ -502,12 +862,50 @@ export default function LeadsPage() {
 
             <button
               type="submit"
-              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 h-10 px-4 transition-colors shrink-0"
+              className="inline-flex items-center justify-center rounded-xl text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 h-10 px-4 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               Search
             </button>
           </div>
         </form>
+
+        {/* Active filters — a saved view (or the global Cmd+K search) can apply
+            filters that have no control of their own. Show them so nothing is
+            applied silently, and let the user drop them one by one. */}
+        {hasActiveFilters && (
+          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Filters
+            </span>
+            {search.trim() && (
+              <button
+                onClick={() => setSearch("")}
+                className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                title="Clear search filter"
+              >
+                <Search className="w-3 h-3" /> “{search.trim()}” <X className="w-3 h-3" />
+              </button>
+            )}
+            {industryFilter.trim() && (
+              <button
+                onClick={() => setIndustryFilter("")}
+                className="inline-flex items-center gap-1 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700 hover:bg-violet-100 transition-colors"
+                title="Clear industry filter"
+              >
+                Industry: {industryFilter.trim()} <X className="w-3 h-3" />
+              </button>
+            )}
+            {hasEmailFilter !== "all" && (
+              <button
+                onClick={() => setHasEmailFilter("all")}
+                className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 transition-colors"
+                title="Clear contact filter"
+              >
+                {hasEmailFilter === "true" ? "Has email" : "Missing email"} <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Saved views (Apollo dynamic lists) + inline save */}
@@ -525,24 +923,30 @@ export default function LeadsPage() {
             </button>
             <button
               onClick={() => deleteView(v.id)}
-              className="p-0.5 rounded text-slate-300 hover:text-red-500"
+              className="p-0.5 rounded text-slate-500 hover:text-red-600"
               aria-label={`Delete view ${v.name}`}
             >
               <X className="w-3 h-3" />
             </button>
           </span>
         ))}
+        {savedViews.length === 0 && (
+          <span className="text-[11px] text-slate-500">
+            No saved lists yet — name the current filters to reuse them later.
+          </span>
+        )}
         <span className="inline-flex items-center gap-1">
           <input
             value={viewName}
             onChange={(e) => setViewName(e.target.value)}
             placeholder="Save current filters as view…"
+            aria-label="Name for the saved view"
             className="h-7 w-52 rounded-lg border border-slate-200 bg-white px-2 text-[11px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-300"
           />
           <button
             onClick={saveCurrentView}
             disabled={!viewName.trim()}
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-40 transition-colors"
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-600 disabled:opacity-40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
             <BookmarkPlus className="w-3 h-3" /> Save
           </button>
@@ -554,7 +958,7 @@ export default function LeadsPage() {
 
       {/* Bulk Action Bar — appears when rows are selected (Apollo-style) */}
       {selected.size > 0 && (
-        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-xs px-4 py-2.5 shadow-xs">
+        <div className="sticky top-2 z-20 flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/90 backdrop-blur-sm px-4 py-2.5 shadow-xs">
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center justify-center rounded-lg bg-blue-600 text-white text-xs font-bold h-6 min-w-6 px-2">
               {selected.size}
@@ -575,7 +979,7 @@ export default function LeadsPage() {
             )}
             <button
               onClick={openSequencePicker}
-              className="inline-flex items-center justify-center rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-8 px-3 transition-colors shadow-xs"
+              className="inline-flex items-center justify-center rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white h-8 px-3 transition-colors shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
             >
               <Send className="w-3.5 h-3.5 mr-1.5" />
               Add to Sequence
@@ -584,41 +988,73 @@ export default function LeadsPage() {
         </div>
       )}
 
+      {/* Inline error — a toast disappears, this stays until the data lands. */}
+      {loadError && !loading && (
+        <ErrorState
+          message={loadError}
+          onRetry={() =>
+            fetchLeads({
+              page,
+              search,
+              industry: industryFilter,
+              hasEmail: emailFilterParam,
+            })
+          }
+        />
+      )}
+
       {/* Leads Table */}
       <div className="rounded-2xl border border-slate-200/80 bg-white shadow-xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+        {/*
+          On a phone the table is unusable: nine columns crushed into 390px
+          wrap their headers onto three lines and overlap their contents. The
+          card list below carries the same information in a shape that fits.
+          The table is still the source of truth on desktop, and the two views
+          show the same leads.
+        */}
+        <div className="hidden md:block overflow-x-auto">
+          <table
+            className="w-full table-fixed text-left text-xs"
+            aria-keyshortcuts="j k x"
+            aria-label="Lead database — press j and k to move between rows, x to select"
+          >
+            <colgroup>
+              {LEAD_COLUMNS.map((w, i) => (
+                <col key={i} style={{ width: w }} />
+              ))}
+            </colgroup>
             <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
               <tr>
-                <th className="pl-5 pr-2 py-3 w-8">
+                <th className="pl-5 pr-2 py-3">
                   <input
+                    ref={headerCheckboxRef}
                     type="checkbox"
                     aria-label="Select all leads on this page"
-                    checked={selectableLoaded && selected.size === selectableCount}
+                    checked={selectableLoaded && allOnPageSelected}
                     onChange={toggleAll}
                     className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30"
                   />
                 </th>
-                <th className="px-3 py-3">Business & Address</th>
-                <th className="px-3 py-3">Score & Status</th>
+                <th className="px-3 py-3">Business &amp; Address</th>
+                <th className="px-3 py-3">Score &amp; Status</th>
                 <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3">Phone & WhatsApp</th>
+                <th className="px-4 py-3">Phone &amp; WhatsApp</th>
                 <th className="px-4 py-3">Website</th>
                 <th className="px-4 py-3">Contact Email</th>
                 <th className="px-4 py-3">Rating</th>
                 <th className="px-5 py-3 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody ref={tableBodyRef} className="divide-y divide-slate-100">
               {loading ? (
-                <tr>
-                  <td colSpan={9} className="px-5 py-12 text-center text-slate-400">
-                    <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
-                    Loading leads database...
-                  </td>
-                </tr>
+                <TableSkeleton
+                  rows={PAGE_SIZE}
+                  columns={9}
+                  rowClassName={ROW_HEIGHT}
+                  cellClassName="px-4 py-4"
+                />
               ) : leads && leads.length > 0 ? (
-                leads.map((lead) => {
+                leads.map((lead, rowIndex) => {
                   const contact = lead.primary_contact;
                   const cleanPhone = lead.phone ? lead.phone.replace(/[^0-9]/g, "") : "";
                   const waUrl = contact?.whatsapp_link || (cleanPhone ? `https://wa.me/${cleanPhone}` : null);
@@ -629,11 +1065,16 @@ export default function LeadsPage() {
                     <tr
                       key={lead.id}
                       onClick={(e) => onRowClick(e, lead)}
-                      className={`cursor-pointer hover:bg-slate-50/80 transition-colors ${
-                        (contactIdFor(lead) && selected.has(contactIdFor(lead)!)) ? "bg-blue-50/60" : ""
+                      aria-current={rowIndex === focusedIndex ? "true" : undefined}
+                      className={`cursor-pointer transition-colors ${ROW_HEIGHT} ${
+                        rowIndex === focusedIndex
+                          ? "bg-blue-50/70 ring-1 ring-inset ring-blue-300"
+                          : (contactIdFor(lead) && selected.has(contactIdFor(lead)!))
+                            ? "bg-blue-50/60"
+                            : "hover:bg-slate-50/80"
                       }`}
                     >
-                      <td className="pl-5 pr-2 py-4 w-8">
+                      <td className="pl-5 pr-2 py-4">
                         <input
                           type="checkbox"
                           aria-label={`Select ${lead.name}`}
@@ -650,7 +1091,7 @@ export default function LeadsPage() {
                             href={mapsUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5 group max-w-full"
+                            className="font-bold text-slate-900 hover:text-blue-600 transition-colors inline-flex items-center gap-1.5 group max-w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                             title="Open Google Maps listing in new tab"
                           >
                             <span className="truncate">{lead.name}</span>
@@ -661,7 +1102,7 @@ export default function LeadsPage() {
                           {lead.address || "Address not listed"}
                         </div>
                         {lead.latitude && lead.longitude && (
-                          <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                          <div className="text-[10px] font-mono text-slate-500 mt-0.5">
                             📍 {lead.latitude.toFixed(4)}, {lead.longitude.toFixed(4)}
                           </div>
                         )}
@@ -714,13 +1155,13 @@ export default function LeadsPage() {
                           {lead.phone ? (
                             <a
                               href={`tel:${lead.phone}`}
-                              className="inline-flex items-center gap-1 font-mono text-[11px] text-slate-700 hover:text-blue-600"
+                              className="inline-flex items-center gap-1 font-mono text-[11px] text-slate-700 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                             >
-                              <Phone className="w-3 h-3 text-slate-400" />
+                              <Phone className="w-3 h-3 text-slate-500" />
                               {lead.phone}
                             </a>
                           ) : (
-                            <span className="text-slate-400 italic text-[11px]">No phone</span>
+                            <span className="text-slate-500 italic text-[11px]">No phone</span>
                           )}
 
                           {waUrl && (
@@ -728,7 +1169,7 @@ export default function LeadsPage() {
                               href={waUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
+                              className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                               title="Chat on WhatsApp"
                             >
                               <MessageCircle className="w-3.5 h-3.5" />
@@ -743,14 +1184,14 @@ export default function LeadsPage() {
                             href={lead.website.startsWith("http") ? lead.website : `https://${lead.website}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 text-[11px] font-medium max-w-[140px] truncate"
+                            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 text-[11px] font-medium max-w-[140px] truncate focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                           >
                             <Globe className="w-3 h-3 shrink-0" />
                             <span className="truncate">{lead.website.replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
-                            <ExternalLink className="w-2.5 h-2.5 shrink-0 text-slate-400" />
+                            <ExternalLink className="w-2.5 h-2.5 shrink-0 text-slate-500" />
                           </a>
                         ) : (
-                          <span className="text-slate-400 italic text-[11px]">No website</span>
+                          <span className="text-slate-500 italic text-[11px]">No website</span>
                         )}
                       </td>
 
@@ -758,7 +1199,7 @@ export default function LeadsPage() {
                         {contact?.email ? (
                           <div className="space-y-0.5">
                             <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-800">
-                              <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                              <Mail className="w-3 h-3 text-slate-500 shrink-0" />
                               <span className="truncate max-w-[180px]">{contact.email}</span>
                             </div>
                             <div>
@@ -782,7 +1223,7 @@ export default function LeadsPage() {
                           >
                             {enrichingId === lead.id ? (
                               <>
-                                <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
+                                <Loader2 className="w-3 h-3 motion-safe:animate-spin motion-reduce:animate-pulse text-indigo-600" />
                                 Searching Web...
                               </>
                             ) : (
@@ -795,7 +1236,7 @@ export default function LeadsPage() {
                         )}
                       </td>
 
-                      <td className="px-4 py-4 whitespace-nowrap text-amber-600 font-medium text-[11px]">
+                      <td className="px-4 py-4 whitespace-nowrap text-amber-700 font-medium text-[11px]">
                         {lead.rating ? `★ ${lead.rating} (${lead.reviews_count || 0})` : "—"}
                       </td>
 
@@ -804,11 +1245,11 @@ export default function LeadsPage() {
                           <button
                             onClick={() => handleShowIcebreaker(lead.id)}
                             disabled={loadingIcebreakerId === lead.id}
-                            className="text-slate-400 hover:text-purple-600 p-1.5 rounded-lg hover:bg-purple-50 transition-colors"
+                            className="text-slate-500 hover:text-purple-600 p-1.5 rounded-lg hover:bg-purple-50 transition-colors"
                             title="Generate AI Icebreaker Hook"
                           >
                             {loadingIcebreakerId === lead.id ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-600" />
+                              <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse text-purple-600" />
                             ) : (
                               <Wand2 className="w-3.5 h-3.5 text-purple-600" />
                             )}
@@ -817,7 +1258,7 @@ export default function LeadsPage() {
                             href={mapsUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-slate-400 hover:text-blue-600 p-1.5 rounded-lg hover:bg-blue-50 transition-colors"
+                            className="text-slate-500 hover:text-blue-600 p-1.5 rounded-lg hover:bg-blue-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                             title="View on Google Maps"
                           >
                             <MapPin className="w-3.5 h-3.5 text-red-500" />
@@ -825,18 +1266,18 @@ export default function LeadsPage() {
                           <button
                             onClick={() => handleEnrichSingle(lead.id)}
                             disabled={enrichingId === lead.id}
-                            className="text-slate-400 hover:text-indigo-600 p-1.5 rounded-lg hover:bg-indigo-50 transition-colors"
+                            className="text-slate-500 hover:text-indigo-600 p-1.5 rounded-lg hover:bg-indigo-50 transition-colors"
                             title="Deep Web Contact Search"
                           >
                             {enrichingId === lead.id ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
+                              <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse text-indigo-600" />
                             ) : (
                               <Sparkles className="w-3.5 h-3.5" />
                             )}
                           </button>
                           <button
                             onClick={() => handleDelete(lead.id)}
-                            className="text-slate-400 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
+                            className="text-slate-500 hover:text-red-600 p-1.5 rounded-lg hover:bg-red-50 transition-colors"
                             title="Delete Lead"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -848,8 +1289,66 @@ export default function LeadsPage() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={9} className="px-5 py-12 text-center text-slate-400">
-                    No leads found matching your criteria.
+                  <td colSpan={9} className="px-5 py-10">
+                    {hasActiveFilters ? (
+                      /* Filtered to nothing: the data is there, the user is just
+                         looking at too little of it. Offer the way back. */
+                      <EmptyState
+                        icon={<FilterX className="h-5 w-5" />}
+                        title="No leads match these filters"
+                        description={
+                          <>
+                            {total === 0
+                              ? "Nothing in your database matches the current search, industry and email filters."
+                              : "No lead on this page matches the current filters."}
+                          </>
+                        }
+                        action={
+                          <button
+                            onClick={() => {
+                              setSearch("");
+                              setIndustryFilter("");
+                              setHasEmailFilter("all");
+                              setPage(1);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700"
+                          >
+                            <X className="w-3.5 h-3.5" /> Clear filters
+                          </button>
+                        }
+                        secondaryAction={
+                          <button
+                            onClick={() => setShowAddModal(true)}
+                            className="inline-flex items-center rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                          >
+                            <Plus className="w-3.5 h-3.5 mr-1.5" /> Add a lead manually
+                          </button>
+                        }
+                      />
+                    ) : (
+                      /* Nothing scraped yet — point at the two ways in. */
+                      <EmptyState
+                        icon={<Database className="h-5 w-5" />}
+                        title="Your lead database is empty"
+                        description="Scrape Google Maps for local businesses, or let LeadForge find and rank the best prospects for your niche."
+                        action={
+                          <a
+                            href="/scrape"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                          >
+                            <Search className="w-3.5 h-3.5" /> Scrape leads
+                          </a>
+                        }
+                        secondaryAction={
+                          <a
+                            href="/find"
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" /> Find leads
+                          </a>
+                        }
+                      />
+                    )}
                   </td>
                 </tr>
               )}
@@ -857,21 +1356,253 @@ export default function LeadsPage() {
           </table>
         </div>
 
-        {/* Pagination Bar */}
-        <div className="p-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-          <span>Showing {leads.length} of {total} leads</span>
+        {/* Mobile card list — the same leads, shaped for a phone. */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {loading ? (
+            <div className="p-4 space-y-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="rounded-xl border border-slate-200 p-3 space-y-2">
+                  <div className="h-4 w-2/3 rounded bg-slate-100" />
+                  <div className="h-3 w-1/2 rounded bg-slate-100" />
+                  <div className="h-3 w-1/3 rounded bg-slate-100" />
+                </div>
+              ))}
+            </div>
+          ) : leads && leads.length > 0 ? (
+            leads.map((lead, rowIndex) => {
+              const contact = lead.primary_contact;
+              const cleanPhone = lead.phone ? lead.phone.replace(/[^0-9]/g, "") : "";
+              const waUrl = contact?.whatsapp_link || (cleanPhone ? `https://wa.me/${cleanPhone}` : null);
+              const mapsUrl = lead.maps_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((lead.name + " " + (lead.address || "")).trim())}`;
+              const cid = contactIdFor(lead);
+              const isSelected = cid !== null && selected.has(cid);
+
+              return (
+                <article
+                  key={lead.id}
+                  onClick={(e) => onRowClick(e, lead)}
+                  className={`p-4 transition-colors ${
+                    rowIndex === focusedIndex
+                      ? "bg-blue-50/70"
+                      : isSelected
+                        ? "bg-blue-50/60"
+                        : ""
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${lead.name}`}
+                      checked={isSelected}
+                      onChange={() => toggleRow(lead)}
+                      disabled={cid === null}
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-4 h-4 mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/30 disabled:opacity-40"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <a
+                        href={mapsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="font-bold text-sm text-slate-900 inline-flex items-center gap-1.5 max-w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                      >
+                        <span className="truncate">{lead.name}</span>
+                        <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                      </a>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        {lead.address || "Address not listed"}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                        {lead.lead_tier === "HOT" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200">
+                            <Flame className="w-3 h-3 text-rose-500 fill-rose-500" />
+                            {lead.lead_score || 85} HOT
+                          </span>
+                        ) : lead.lead_tier === "WARM" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                            <Zap className="w-3 h-3 text-amber-500 fill-amber-500" />
+                            {lead.lead_score || 55} WARM
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                            {lead.lead_score || 35} COLD
+                          </span>
+                        )}
+                        {lead.industry && (
+                          <span className="inline-block px-2 py-0.5 bg-slate-100 rounded-md text-[10px] font-medium text-slate-700">
+                            {lead.industry}
+                          </span>
+                        )}
+                        {lead.rating ? (
+                          <span className="text-[10px] font-medium text-amber-700">
+                            ★ {lead.rating} ({lead.reviews_count || 0})
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-2 text-[11px]">
+                        {lead.phone ? (
+                          <a
+                            href={`tel:${lead.phone}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 font-mono text-slate-700 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                          >
+                            <Phone className="w-3 h-3 text-slate-500" />
+                            {lead.phone}
+                          </a>
+                        ) : (
+                          <span className="text-slate-500 italic">No phone</span>
+                        )}
+                        {waUrl && (
+                          <a
+                            href={waUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-900 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                          >
+                            <MessageCircle className="w-3 h-3" />
+                            WhatsApp
+                          </a>
+                        )}
+                        {lead.website && (
+                          <a
+                            href={lead.website.startsWith("http") ? lead.website : `https://${lead.website}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                          >
+                            <Globe className="w-3 h-3" />
+                            Website
+                          </a>
+                        )}
+                      </div>
+
+                      {contact?.email ? (
+                        <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-800 mt-1.5">
+                          <Mail className="w-3 h-3 text-slate-500 shrink-0" />
+                          <span className="truncate">{contact.email}</span>
+                          {contact.is_verified && (
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800 shrink-0">
+                              ✓ Verified
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => handleEnrichSingle(lead.id)}
+                          disabled={enrichingId === lead.id}
+                          className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-indigo-700 hover:text-indigo-900 font-semibold bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 px-2 py-1 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                        >
+                          {enrichingId === lead.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 motion-safe:animate-spin motion-reduce:animate-pulse text-indigo-600" />
+                              Searching Web...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3 h-3 text-indigo-600" />
+                              Find Web Contacts
+                            </>
+                          )}
+                        </button>
+                      )}
+
+                      <div className="flex items-center gap-1 mt-2.5">
+                        <button
+                          onClick={() => handleShowIcebreaker(lead.id)}
+                          disabled={loadingIcebreakerId === lead.id}
+                          className="inline-flex items-center gap-1 text-[11px] text-purple-700 hover:text-purple-900 font-medium px-2 py-1 rounded-md hover:bg-purple-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                        >
+                          {loadingIcebreakerId === lead.id ? (
+                            <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse text-purple-600" />
+                          ) : (
+                            <Wand2 className="w-3.5 h-3.5 text-purple-600" />
+                          )}
+                          Icebreaker
+                        </button>
+                        <button
+                          onClick={() => handleDelete(lead.id)}
+                          className="inline-flex items-center gap-1 text-[11px] text-slate-600 hover:text-red-700 font-medium px-2 py-1 rounded-md hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })
+          ) : (
+            <div className="p-5">
+              {hasActiveFilters ? (
+                <EmptyState
+                  icon={<FilterX className="h-5 w-5" />}
+                  title="No leads match these filters"
+                  description={
+                    total === 0
+                      ? "Nothing in your database matches the current search, industry and email filters."
+                      : "No lead on this page matches the current filters."
+                  }
+                  action={
+                    <button
+                      onClick={() => {
+                        setSearch("");
+                        setIndustryFilter("");
+                        setHasEmailFilter("all");
+                        setPage(1);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                    >
+                      <X className="w-3.5 h-3.5" /> Clear filters
+                    </button>
+                  }
+                />
+              ) : (
+                <EmptyState
+                  icon={<Database className="h-5 w-5" />}
+                  title="Your lead database is empty"
+                  description="Scrape Google Maps for local businesses, or let LeadForge find and rank the best prospects for your niche."
+                  action={
+                    <a
+                      href="/scrape"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
+                    >
+                      <Search className="w-3.5 h-3.5" /> Scrape leads
+                    </a>
+                  }
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Pagination Bar — driven by the total the API reports, not by how
+            many rows happened to come back (a filtered last page is shorter). */}
+        <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-600">
+          <span>
+            {total === 0
+              ? "No leads"
+              : `Showing ${firstRowIndex}–${lastRowIndex} of ${total} lead${total === 1 ? "" : "s"}`}
+          </span>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1}
+              disabled={page === 1 || loading}
               className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
             >
               Previous
             </button>
-            <span className="font-semibold text-slate-900">Page {page}</span>
+            <span className="font-semibold text-slate-900">
+              Page {page} of {totalPages}
+            </span>
             <button
-              onClick={() => setPage((p) => p + 1)}
-              disabled={leads.length < 20}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages || loading}
               className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50"
             >
               Next
@@ -882,13 +1613,13 @@ export default function LeadsPage() {
 
       {/* Add Lead Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-bold text-base text-slate-900">Add New Lead</h3>
+              <h2 className="font-bold text-base text-slate-900">Add New Lead</h2>
               <button
                 onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -896,8 +1627,9 @@ export default function LeadsPage() {
 
             <form onSubmit={handleCreateLead} className="space-y-3.5 text-xs">
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Business Name *</label>
+                <label htmlFor="lead-name" className="font-semibold text-slate-700 block mb-1">Business Name *</label>
                 <input
+                  id="lead-name"
                   type="text"
                   required
                   placeholder="e.g. Royal Associates Rohini"
@@ -909,8 +1641,9 @@ export default function LeadsPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Phone Number</label>
+                  <label htmlFor="lead-phone" className="font-semibold text-slate-700 block mb-1">Phone Number</label>
                   <input
+                    id="lead-phone"
                     type="text"
                     placeholder="+91 98..."
                     value={newLead.phone}
@@ -919,8 +1652,9 @@ export default function LeadsPage() {
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Email Address</label>
+                  <label htmlFor="lead-email" className="font-semibold text-slate-700 block mb-1">Email Address</label>
                   <input
+                    id="lead-email"
                     type="email"
                     placeholder="contact@company.com"
                     value={newLead.email}
@@ -931,8 +1665,9 @@ export default function LeadsPage() {
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Website URL</label>
+                <label htmlFor="lead-website" className="font-semibold text-slate-700 block mb-1">Website URL</label>
                 <input
+                  id="lead-website"
                   type="text"
                   placeholder="https://company.com"
                   value={newLead.website}
@@ -942,8 +1677,9 @@ export default function LeadsPage() {
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Address / Location</label>
+                <label htmlFor="lead-address" className="font-semibold text-slate-700 block mb-1">Address / Location</label>
                 <input
+                  id="lead-address"
                   type="text"
                   placeholder="e.g. Sector 24, Rohini, New Delhi"
                   value={newLead.address}
@@ -962,7 +1698,7 @@ export default function LeadsPage() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs"
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                 >
                   Save Lead
                 </button>
@@ -974,16 +1710,16 @@ export default function LeadsPage() {
 
       {/* Twenty CRM / Webhook Sync Modal */}
       {showSyncModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-lg w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-indigo-600" />
-                <h3 className="font-bold text-base text-slate-900">Twenty CRM & Webhook Sync</h3>
+                <h2 className="font-bold text-base text-slate-900">Twenty CRM &amp; Webhook Sync</h2>
               </div>
               <button
                 onClick={() => setShowSyncModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -1001,7 +1737,7 @@ export default function LeadsPage() {
               <a
                 href={api.exportTwentyCrmUrl}
                 download="leadforge_twenty_export.json"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 font-semibold text-slate-700 hover:bg-slate-100 shadow-2xs"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 font-semibold text-slate-700 hover:bg-slate-100 shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               >
                 <Download className="w-3.5 h-3.5" />
                 Download Twenty CRM JSON
@@ -1030,9 +1766,9 @@ export default function LeadsPage() {
                 <button
                   type="submit"
                   disabled={syncingTwenty}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-xs disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                 >
-                  {syncingTwenty ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Share2 className="w-3.5 h-3.5" />}
+                  {syncingTwenty ? <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Share2 className="w-3.5 h-3.5" />}
                   Push Leads Sync
                 </button>
               </div>
@@ -1043,16 +1779,16 @@ export default function LeadsPage() {
 
       {/* Import CSV Modal */}
       {showImportModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Upload className="w-5 h-5 text-blue-600" />
-                <h3 className="font-bold text-base text-slate-900">Import Leads from CSV</h3>
+                <h2 className="font-bold text-base text-slate-900">Import Leads from CSV</h2>
               </div>
               <button
                 onClick={() => setShowImportModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -1064,8 +1800,9 @@ export default function LeadsPage() {
 
             <form onSubmit={handleImportCsv} className="space-y-3">
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1.5">Choose .csv File</label>
+                <label htmlFor="csv-file" className="text-xs font-semibold text-slate-700 block mb-1.5">Choose .csv File</label>
                 <input
+                  id="csv-file"
                   type="file"
                   accept=".csv,text/csv"
                   onChange={handleFileUpload}
@@ -1074,8 +1811,9 @@ export default function LeadsPage() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1.5">Or Paste Raw CSV Content</label>
+                <label htmlFor="csv-text" className="text-xs font-semibold text-slate-700 block mb-1.5">Or Paste Raw CSV Content</label>
                 <textarea
+                  id="csv-text"
                   rows={6}
                   value={importCsvText}
                   onChange={(e) => setImportCsvText(e.target.value)}
@@ -1095,9 +1833,9 @@ export default function LeadsPage() {
                 <button
                   type="submit"
                   disabled={importingCsv || !importCsvText.trim()}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                 >
-                  {importingCsv ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+                  {importingCsv ? <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <Upload className="w-3.5 h-3.5" />}
                   Import Leads
                 </button>
               </div>
@@ -1108,15 +1846,15 @@ export default function LeadsPage() {
 
       {/* AI Icebreaker / Hook Modal */}
       {activeIcebreaker && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <Wand2 className="w-5 h-5 text-purple-600" />
                 <div>
-                  <h3 className="font-bold text-base text-slate-900">
+                  <h2 className="font-bold text-base text-slate-900">
                     AI Cold Outreach Hooks — {activeIcebreaker.business_name}
-                  </h3>
+                  </h2>
                   <p className="text-[11px] text-slate-500">
                     Industry: {activeIcebreaker.industry || "Local Business"} • 1-on-1 personalized copy ready for outreach
                   </p>
@@ -1124,7 +1862,7 @@ export default function LeadsPage() {
               </div>
               <button
                 onClick={() => setActiveIcebreaker(null)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -1252,13 +1990,13 @@ export default function LeadsPage() {
 
       {/* Spam Checker Modal */}
       {showSpamModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-5 h-5 text-purple-600" />
                 <div>
-                  <h3 className="font-bold text-base text-slate-900">Cold Email Deliverability & Spam Checker</h3>
+                  <h2 className="font-bold text-base text-slate-900">Cold Email Deliverability &amp; Spam Checker</h2>
                   <p className="text-[11px] text-slate-500">
                     Analyze trigger words, link density, formatting, and spam score to reach the inbox
                   </p>
@@ -1266,7 +2004,7 @@ export default function LeadsPage() {
               </div>
               <button
                 onClick={() => setShowSpamModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -1274,8 +2012,9 @@ export default function LeadsPage() {
 
             <form onSubmit={handleRunSpamCheck} className="space-y-3">
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">Subject Line</label>
+                <label htmlFor="spam-subject" className="text-xs font-semibold text-slate-700 block mb-1">Subject Line</label>
                 <input
+                  id="spam-subject"
                   type="text"
                   required
                   value={spamSubject}
@@ -1286,8 +2025,9 @@ export default function LeadsPage() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">Email Body Text</label>
+                <label htmlFor="spam-body" className="text-xs font-semibold text-slate-700 block mb-1">Email Body Text</label>
                 <textarea
+                  id="spam-body"
                   rows={6}
                   required
                   value={spamBody}
@@ -1298,15 +2038,15 @@ export default function LeadsPage() {
               </div>
 
               <div className="flex justify-between items-center pt-1">
-                <div className="text-[11px] text-slate-400">
+                <div className="text-[11px] text-slate-500">
                   Supported variables: <code className="font-mono text-purple-600">&#123;&#123;business_name&#125;&#125;</code>, <code className="font-mono text-purple-600">&#123;&#123;first_name&#125;&#125;</code>, <code className="font-mono text-purple-600">&#123;&#123;city&#125;&#125;</code>
                 </div>
                 <button
                   type="submit"
                   disabled={checkingSpam}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs shadow-xs disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                 >
-                  {checkingSpam ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                  {checkingSpam ? <Loader2 className="w-3.5 h-3.5 motion-safe:animate-spin motion-reduce:animate-pulse" /> : <ShieldCheck className="w-3.5 h-3.5" />}
                   Analyze Deliverability
                 </button>
               </div>
@@ -1323,7 +2063,7 @@ export default function LeadsPage() {
                       }`}>
                         {spamResult.score}
                       </span>
-                      <span className="text-xs text-slate-400 font-bold">/100</span>
+                      <span className="text-xs text-slate-500 font-bold">/100</span>
                     </div>
 
                     <span className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold tracking-wide uppercase ${
@@ -1377,6 +2117,48 @@ export default function LeadsPage() {
                   </div>
                 )}
 
+                {/* India-specific findings. A Western word list reads an
+                    Indian cold email as "Good" - these are the tells that
+                    an Indian recipient recognises instantly. */}
+                {(spamResult.india_risk_phrases?.length > 0 ||
+                  spamResult.india_tells?.length > 0 ||
+                  spamResult.mobile_signature ||
+                  spamResult.indian_salutation) ? (
+                  <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
+                    <div className="text-[11px] font-bold text-slate-700">
+                      India-specific findings
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {spamResult.india_risk_phrases?.map((w: string, i: number) => (
+                        <span
+                          key={`r${i}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-semibold"
+                        >
+                          ⚠️ {w} (spam)
+                        </span>
+                      ))}
+                      {spamResult.india_tells?.map((w: string, i: number) => (
+                        <span
+                          key={`t${i}`}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold"
+                        >
+                          {w}
+                        </span>
+                      ))}
+                      {spamResult.mobile_signature && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-semibold">
+                          ⚠️ {spamResult.mobile_signature}
+                        </span>
+                      )}
+                      {spamResult.indian_salutation && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold">
+                          Dear Sir/Madam
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
                 {/* Warnings / Recommendations */}
                 {(spamResult.recommendations?.length > 0 || spamResult.warnings?.length > 0) && (
                   <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
@@ -1409,18 +2191,18 @@ export default function LeadsPage() {
 
       {/* Sequence Picker Modal — bulk "Add to Sequence" */}
       {sequenceModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>
-                <h3 className="font-bold text-base text-slate-900">Add to Sequence</h3>
+                <h2 className="font-bold text-base text-slate-900">Add to Sequence</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
                   {selected.size} lead{selected.size === 1 ? "" : "s"} selected
                 </p>
               </div>
               <button
                 onClick={() => setSequenceModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
+                className="text-slate-500 hover:text-slate-700 font-bold text-sm"
               >
                 ✕
               </button>
@@ -1446,7 +2228,7 @@ export default function LeadsPage() {
                       </div>
                     </div>
                     {addingTo === seq.id ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+                      <Loader2 className="w-4 h-4 motion-safe:animate-spin motion-reduce:animate-pulse text-blue-600 shrink-0" />
                     ) : (
                       <Send className="w-4 h-4 text-blue-600 shrink-0" />
                     )}
@@ -1479,7 +2261,7 @@ export default function LeadsPage() {
               <button
                 onClick={() => setDrawerLeadId(null)}
                 aria-label="Close"
-                className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-400"
+                className="ml-auto p-1.5 rounded-lg hover:bg-slate-100 text-slate-500"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1487,12 +2269,17 @@ export default function LeadsPage() {
 
             <div className="flex-1 overflow-y-auto p-5 space-y-5">
               {drawerLoading ? (
-                <div className="text-center py-12 text-slate-400">
-                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
-                  Loading lead...
+                <div className="space-y-4" aria-hidden="true">
+                  <Skeleton className="h-9 w-32 rounded-xl" />
+                  <Skeleton className="h-24 w-full rounded-xl" />
+                  <Skeleton className="h-32 w-full rounded-xl" />
                 </div>
               ) : !drawer ? (
-                <p className="text-sm text-slate-500">Could not load this lead.</p>
+                <ErrorState
+                  title="Could not load this lead"
+                  message="The detail request failed. The lead is still in your database."
+                  onRetry={() => drawerLeadId !== null && openDrawer(drawerLeadId)}
+                />
               ) : (
                 <>
                   {viewMessage && (
@@ -1505,7 +2292,7 @@ export default function LeadsPage() {
                     {drawer.business.phone && (
                       <a
                         href={`tel:${drawer.business.phone}`}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                       >
                         <Phone className="w-3 h-3" /> {drawer.business.phone}
                       </a>
@@ -1515,7 +2302,7 @@ export default function LeadsPage() {
                         href={drawer.business.website}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                       >
                         <Globe className="w-3 h-3" /> Website
                       </a>
@@ -1524,13 +2311,13 @@ export default function LeadsPage() {
                       href={drawer.business.maps_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:border-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                     >
                       <MapPin className="w-3 h-3" /> Maps
                     </a>
                     <button
                       onClick={suppressDrawerLead}
-                      className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50"
+                      className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
                     >
                       <ShieldAlert className="w-3 h-3" /> Suppress company
                     </button>
@@ -1542,7 +2329,7 @@ export default function LeadsPage() {
                     </h3>
                     <div className="space-y-2">
                       {drawer.contacts.length === 0 && (
-                        <p className="text-xs text-slate-400">No contacts — enrich this lead first.</p>
+                        <p className="text-xs text-slate-500">No contacts — enrich this lead first.</p>
                       )}
                       {drawer.contacts.map((c) => (
                         <div key={c.id} className="rounded-xl border border-slate-200 p-3.5">
@@ -1570,7 +2357,7 @@ export default function LeadsPage() {
                             {c.email && <p className="font-mono">{c.email}</p>}
                             {c.title && <p>{c.title}</p>}
                             {c.verification_sub_status && (
-                              <p className="text-slate-400">
+                              <p className="text-slate-500">
                                 verification: {c.verification_sub_status}
                                 {c.verification_confidence !== null
                                   ? ` · confidence ${Math.round(c.verification_confidence * 100)}%`
@@ -1589,7 +2376,7 @@ export default function LeadsPage() {
                     </h3>
                     <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 max-h-64 overflow-y-auto">
                       {drawer.timeline.length === 0 && (
-                        <p className="text-xs text-slate-400 p-3">No sends yet.</p>
+                        <p className="text-xs text-slate-500 p-3">No sends yet.</p>
                       )}
                       {drawer.timeline.map((t) => (
                         <div key={t.send_id} className="px-3.5 py-2.5">
@@ -1606,7 +2393,7 @@ export default function LeadsPage() {
                               </span>
                             )}
                           </div>
-                          <p className="text-[10px] text-slate-400 mt-0.5">
+                          <p className="text-[10px] text-slate-500 mt-0.5">
                             {t.contact_email}
                             {t.sent_at ? ` · ${new Date(t.sent_at).toLocaleString()}` : ""}
                             {t.error_message ? ` · ${t.error_message}` : ""}

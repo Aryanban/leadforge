@@ -31,6 +31,9 @@ async def _learned_priority(niche: str, area: Optional[str]) -> Dict[str, float]
     scored: Dict[str, float] = {}
     try:
         async with async_session_maker() as db:
+            from app.qualifier.source_trust import source_trust, source_trust_overrides
+
+            calibrated_trust = await source_trust_overrides(db)
             stmt = select(SourceStats).where(
                 (SourceStats.niche == (niche or "").title())
                 | (SourceStats.niche == "")
@@ -38,6 +41,12 @@ async def _learned_priority(niche: str, area: Optional[str]) -> Dict[str, float]
             res = await db.execute(stmt)
             for stats in res.scalars().all():
                 priority = (stats.avg_score or 0.0) * min(1.0, (stats.leads_found or 0) / 10.0)
+                # Recent validation and SMTP results can move the source order
+                # by at most 20 points. The base yield score remains the main
+                # signal, while the outcome term favors data that proves usable.
+                prior, _ = source_trust(stats.source)
+                learned_trust = calibrated_trust.get((stats.source or "").strip().lower(), prior)
+                priority += (learned_trust - prior) * 20.0
                 # Prefer stats that match this exact area, then niche-wide stats.
                 if stats.area and area and stats.area.lower() in area.lower():
                     priority += 15
@@ -159,3 +168,27 @@ def list_available_sources() -> List[Dict[str, Any]]:
         }
         for source in REGISTRY
     ]
+
+
+async def source_health() -> List[Dict[str, Any]]:
+    """Live availability for every registered source, probed concurrently.
+
+    A source that returns nothing must say why. "This niche has no
+    businesses" and "this adapter is broken" look identical from the
+    outside, which is how a dead source sits in a product that advertises
+    itself as multi-source for months.
+    """
+    async def _probe(source: Source) -> Dict[str, Any]:
+        try:
+            health = await source.health()
+        except Exception as e:  # a broken adapter must not break the probe
+            health = {"available": False, "note": f"{type(e).__name__}: {e}"}
+        return {
+            "name": source.name,
+            "supports_india": source.supports_india,
+            "supports_global": source.supports_global,
+            "available": bool(health.get("available")),
+            "note": health.get("note"),
+        }
+
+    return list(await asyncio.gather(*(_probe(s) for s in REGISTRY)))

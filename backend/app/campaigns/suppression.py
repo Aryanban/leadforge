@@ -12,7 +12,7 @@ This module owns the SQL so that every gate agrees on the rules.
 """
 
 import logging
-from typing import Iterable, Optional, Set
+from typing import Dict, Iterable, Optional, Set
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,14 +68,19 @@ async def is_suppressed(
     return None
 
 
-async def filter_suppressed(
+async def suppressed_reasons(
     db: AsyncSession,
     emails: Iterable[Optional[str]],
-) -> Set[str]:
-    """Batch form of :func:`is_suppressed`. Returns the blocked addresses."""
+) -> Dict[str, str]:
+    """Batch form of :func:`is_suppressed`. Maps address -> suppression reason.
+
+    The campaign sender used to call ``is_suppressed`` once per candidate
+    contact - one round-trip each, so a 500-target campaign spent 500
+    queries deciding who *not* to email. One query answers the whole set.
+    """
     cleaned = {e.strip().lower() for e in emails if e and "@" in e}
     if not cleaned:
-        return set()
+        return {}
 
     keys: Set[str] = set(cleaned)
     for addr in cleaned:
@@ -86,16 +91,26 @@ async def filter_suppressed(
         await db.execute(select(Suppression).where(Suppression.identifier.in_(keys)))
     ).scalars().all()
 
-    blocked: Set[str] = set()
     live = [r for r in rows if r.is_active()]
+    out: Dict[str, str] = {}
     for row in live:
         if row.is_domain:
             suffix = row.identifier
-            blocked.update(a for a in cleaned if a.endswith(suffix))
+            for addr in cleaned:
+                if addr.endswith(suffix):
+                    out.setdefault(addr, row.reason)
         else:
-            blocked.add(row.identifier)
+            out.setdefault(row.identifier, row.reason)
+    return out
 
-    return blocked
+
+async def filter_suppressed(
+    db: AsyncSession,
+    emails: Iterable[Optional[str]],
+) -> Set[str]:
+    """Batch form of :func:`is_suppressed`. Returns the blocked addresses."""
+    reasons = await suppressed_reasons(db, emails)
+    return set(reasons.keys())
 
 
 async def add_suppression(
@@ -121,6 +136,12 @@ async def add_suppression(
             return False
         existing.reason = reason
         existing.detail = detail
+        # A row created as a soft bounce carries an expiry. If it is later
+        # upgraded to a permanent reason the expiry has to go, otherwise the
+        # hard-bounce suppression silently ages out and the dead address
+        # becomes mailable again.
+        if reason in PERMANENT_REASONS:
+            existing.expires_at = None
         await db.flush()
         return False
 
@@ -131,10 +152,13 @@ async def add_suppression(
 
 async def purge_expired(db: AsyncSession) -> int:
     """Deletes soft-bounce rows whose retry window has passed."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
     result = await db.execute(
         delete(Suppression).where(
             Suppression.expires_at.isnot(None),
-            Suppression.expires_at < Suppression.created_at,
+            Suppression.expires_at < now,
         )
     )
     await db.flush()

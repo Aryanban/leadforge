@@ -22,7 +22,7 @@ import asyncio
 import imaplib
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -198,7 +198,15 @@ def _poll_one_mailbox_sync(mailbox_id: int, email: str, password: str,
             body = extract_reply_body(msg)
             subject = _decode(msg.get("Subject"))
             auto = any(msg.get(h) for h in _AUTO_HEADERS)
-            inbound.append((num, refs, subject, body, auto))
+            # Carry the headers through. They were collected and then
+            # discarded, which made the ``Auto-Submitted`` branch of
+            # ``categorize_reply`` dead code at runtime: an out-of-office
+            # auto-responder was classified from body text alone, and often
+            # not at all. That mattered twice over - it ended the follow-up
+            # chain on every lead whose owner travels, and an auto-responder
+            # could be counted as a "reply" and pick the A/B winning subject.
+            headers = {str(k): v for k, v in msg.items()}
+            inbound.append((num, refs, subject, body, auto, headers))
         stats["matched"] = len(inbound)
         if not inbound:
             return stats
@@ -252,25 +260,51 @@ async def poll_mailbox(mailbox_id: int) -> Dict[str, int]:
     out.update({k: int(fetch.get(k, 0)) for k in ("seen", "matched")})
     if not inbound:
         return out
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     async with async_session_maker() as db:
-        for _num, refs, subject, body, _auto in inbound:
+        # Resolve every inbound reply to its Send row in ONE query. The loop
+        # used to issue a SELECT per inbound message, so a mailbox with 50
+        # new replies cost 50 round-trips every five minutes.
+        targets: List[str] = []
+        for _num, refs, _subject, _body, _auto, _headers in inbound:
+            target_id = next((r for r in refs if r in known_ids), None)
+            if target_id:
+                targets.append(target_id)
+        if not targets:
+            return out
+
+        send_rows = (await db.execute(
+            select(Send).where(Send.message_id.in_(targets))
+        )).scalars().all()
+        sends_by_message_id = {s.message_id: s for s in send_rows if s.message_id}
+
+        # The opt-out path needs the contact; fetch them in one go too.
+        contact_ids = {s.contact_id for s in send_rows if s.contact_id}
+        contacts_by_id = {}
+        if contact_ids:
+            for contact in (await db.execute(
+                select(Contact).where(Contact.id.in_(contact_ids))
+            )).scalars().all():
+                contacts_by_id[contact.id] = contact
+
+        for _num, refs, subject, body, _auto, headers in inbound:
             target_id = next((r for r in refs if r in known_ids), None)
             if not target_id:
                 continue
-            send = (await db.execute(
-                select(Send).where(Send.message_id == target_id)
-            )).scalars().first()
+            send = sends_by_message_id.get(target_id)
             if not send or send.replied:
                 continue
-            category, is_opt_out = categorize_reply(subject, body)
+            # Pass the headers so ``Auto-Submitted`` / ``X-Auto-Reply`` are
+            # honoured. Without them an out-of-office auto-responder is
+            # indistinguishable from a real reply.
+            category, is_opt_out = categorize_reply(subject, body, headers)
             send.replied = True
             send.replied_at = now
             send.reply_category = category
             send.reply_body = authored_text(body)[:500]
             known_ids.discard(target_id)
             if is_opt_out:
-                contact = await db.get(Contact, send.contact_id)
+                contact = contacts_by_id.get(send.contact_id)
                 if contact is not None and contact.email:
                     await add_suppression(db, contact.email, "replied_stop",
                                           detail=f"campaign {send.campaign_id}")

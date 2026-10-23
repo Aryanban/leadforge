@@ -1,4 +1,5 @@
 import pytest
+import re
 from app.enricher.email_finder import generate_email_permutations, calculate_lead_quality_score
 from app.enricher.pattern import infer_pattern, generate_candidates, match_pattern
 
@@ -40,6 +41,95 @@ def test_pattern_ignores_generic_and_foreign_seeds():
 def test_pattern_gibberish_seed_abstains():
     pattern, conf = infer_pattern(["e65rc109q@acme.in"], "acme.in")
     assert conf <= 0.3
+
+
+@pytest.mark.parametrize(
+    "seed,expected",
+    [
+        ("rsharma@acme.in", "flast"),
+        ("rajeshsharma@acme.in", "firstlast"),
+        ("rajesh.sharma@acme.in", "first.last"),
+        ("rajesh_sharma@acme.in", "first_last"),
+        ("rajesh-sharma@acme.in", "first-lastr"),
+        ("rajeshs@acme.in", "firstl"),
+        ("r.sharma@acme.in", "f.last"),
+        ("sharma@acme.in", "last"),
+    ],
+)
+def test_pattern_detects_all_templates(seed, expected):
+    """Every template must be detectable from a real seed.
+
+    The old shape heuristic could only reach 4 of the 10 patterns - the
+    ``f.last`` and ``firstl`` branches were unreachable dead code - and it
+    classified single-token seeds as ``{first}`` at 0.95 confidence, which is
+    confidently wrong rather than merely wrong.
+    """
+    names = [("Rajesh", "Sharma"), ("Aarav", "Verma")]
+    pattern, _conf = infer_pattern([seed], "acme.in", names)
+    assert pattern == expected
+
+
+def test_pattern_single_seed_is_never_confident():
+    """One seed is suggestive, not conclusive."""
+    names = [("Rajesh", "Sharma")]
+    _pattern, conf = infer_pattern(["rsharma@acme.in"], "acme.in", names)
+    assert conf <= 0.5
+
+
+def test_pattern_dominance_beats_a_single_outlier():
+    """Two agreeing seeds must outrank one disagreeing seed."""
+    names = [("Aarav", "Sharma"), ("Rohan", "Verma"), ("Priya", "Nair")]
+    pattern, conf = infer_pattern(
+        ["a.sharma@acme.in", "r.verma@acme.in", "somethingelse@acme.in"],
+        "acme.in", names,
+    )
+    assert pattern == "f.last"
+    assert conf >= 0.6
+
+
+def test_pattern_seed_survives_a_mismatched_name_list():
+    """Seed evidence must not be discarded because the exec list is partial.
+
+    The name-based and shape-based matchers used to be mutually exclusive,
+    so a seed belonging to the third exec on a team page taught us nothing
+    and the learned pattern was thrown away.
+    """
+    # The seed belongs to Priya Nair, who is NOT in the supplied name list.
+    pattern, _conf = infer_pattern(
+        ["priya.nair@acme.in"], "acme.in", [("Rajesh", "Sharma")]
+    )
+    assert pattern == "first.last"
+
+
+def test_candidates_are_all_syntactically_valid():
+    """No candidate may contain a space or a leading/trailing separator.
+
+    The old renderer emitted "priya.@acme.in" and
+    "rajesh.kumar sharma@acme.in", which consumed half the candidate budget
+    and burned real SMTP probes on addresses that cannot exist.
+    """
+    for names in ([("Priya", "Nair")], [("Rajesh", "Kumar Sharma")], [("Priya", "")]):
+        cands, _pattern, _conf = generate_candidates("acme.in", person_names=names)
+        for cand in cands:
+            local = cand.split("@")[0]
+            assert " " not in local, f"candidate contains a space: {cand}"
+            assert not local.startswith("."), f"candidate starts with '.': {cand}"
+            assert not local.endswith("."), f"candidate ends with '.': {cand}"
+            assert re.match(r"^[A-Za-z0-9._+-]+$", local), f"invalid local: {cand}"
+
+
+def test_candidates_cover_more_than_one_person():
+    """The person budget must be spread across the people we know.
+
+    Previously the first name consumed all four slots, so the second person -
+    whom we had also learned the pattern from - never got a candidate.
+    """
+    cands, _pattern, _conf = generate_candidates(
+        "acme.in", person_names=[("Priya", "Nair"), ("Rajesh", "Sharma")]
+    )
+    locals_ = [c.split("@")[0] for c in cands]
+    assert any("priya" in l for l in locals_)
+    assert any("rajesh" in l for l in locals_)
 
 
 def test_candidates_never_use_company_name():

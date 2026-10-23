@@ -65,6 +65,14 @@ _RECIPIENT_CODES = re.compile(
 #: Bare SMTP reply code at the end of the message, e.g. "(550 5.1.1 ...)"
 _CODE_RE = re.compile(r"\b([45]\d{2})\b")
 
+#: Prefixes emitted by ``campaigns.sender`` when the failure happened on OUR
+#: side of the SMTP transaction rather than the recipient's. A rejected
+#: envelope sender (SPF misalignment, policy gate) or rejected message
+#: content says nothing about the address we were trying to reach - and
+#: classifying it as a hard bounce used to permanently suppress the entire
+#: lead database the first time a sending domain misconfigured itself.
+_SENDER_FAULT_PREFIXES = ("sender_rejected:", "data_rejected:")
+
 
 def classify_bounce(error: Optional[str]) -> Optional[str]:
     """Maps an SMTP error string to ``hard_bounce`` / ``soft_bounce`` / None.
@@ -79,6 +87,11 @@ def classify_bounce(error: Optional[str]) -> Optional[str]:
     if not text:
         return None
 
+    # Our sender or our content was rejected - the recipient is innocent.
+    if text.startswith(_SENDER_FAULT_PREFIXES):
+        logger.info("SMTP fault was ours, not the recipient's: %s", text[:120])
+        return None
+
     # An explicit 4xx always wins over free-text matching, because the numeric
     # class is authoritative under RFC 3463 and many gateways wrap a 4xx in
     # prose containing the word "rejected".
@@ -91,12 +104,13 @@ def classify_bounce(error: Optional[str]) -> Optional[str]:
             return _classify_5xx(text)
 
     # No numeric code. Fall back to phrase matching, most specific first.
+    # Policy wins over hard: "blocked by policy" must never delete a lead.
+    if _POLICY_RE.search(text):
+        return None
     if _HARD_RE.search(text):
         return HARD
     if _SOFT_RE.search(text):
         return SOFT
-    if _POLICY_RE.search(text):
-        return None
 
     logger.debug("unclassifiable SMTP error, treating as soft: %s", text[:120])
     return SOFT

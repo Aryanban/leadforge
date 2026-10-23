@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
+import math
 from typing import Optional, List, Dict, Any
 
 from app.database import get_db
@@ -45,37 +46,65 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
     res = await db.execute(stmt)
     campaigns = res.scalars().all()
 
-    result = []
-    for c in campaigns:
-        # Aggregate send stats
+    # Three grouped aggregates instead of three queries per campaign. The
+    # endpoint used to issue 4N queries (1 for the list, 3 per campaign), so
+    # a 50-campaign list was 151 round-trips.
+    campaign_ids = [c.id for c in campaigns]
+
+    send_stats: Dict[int, tuple] = {}
+    target_counts: Dict[int, int] = {}
+    step_counts: Dict[int, int] = {}
+
+    if campaign_ids:
         sends_stmt = select(
+            Send.campaign_id,
             func.count(Send.id),
             func.count(Send.id).filter(Send.status == "sent"),
             func.count(Send.id).filter(Send.opened == True),
-            func.count(Send.id).filter(Send.replied == True)
-        ).where(Send.campaign_id == c.id)
-        
-        s_res = await db.execute(sends_stmt)
-        total_sends, sent_count, opened_count, replied_count = s_res.one()
+            func.count(Send.id).filter(Send.replied == True),
+        ).where(Send.campaign_id.in_(campaign_ids)).group_by(Send.campaign_id)
+        for cid, total, sent_c, opened_c, replied_c in (await db.execute(sends_stmt)).all():
+            send_stats[cid] = (total or 0, sent_c or 0, opened_c or 0, replied_c or 0)
+
+        targets_stmt = (
+            select(CampaignTarget.campaign_id, func.count(CampaignTarget.id))
+            .where(CampaignTarget.campaign_id.in_(campaign_ids))
+            .group_by(CampaignTarget.campaign_id)
+        )
+        target_counts = {
+            cid: count for cid, count in (await db.execute(targets_stmt)).all()
+        }
+
+        steps_stmt = (
+            select(CampaignStep.campaign_id, func.count(CampaignStep.id))
+            .where(CampaignStep.campaign_id.in_(campaign_ids))
+            .group_by(CampaignStep.campaign_id)
+        )
+        step_counts = {
+            cid: count for cid, count in (await db.execute(steps_stmt)).all()
+        }
+
+    result = []
+    for c in campaigns:
+        total_sends, sent_count, opened_count, replied_count = send_stats.get(
+            c.id, (0, 0, 0, 0)
+        )
 
         open_rate = round((opened_count / sent_count * 100), 1) if sent_count > 0 else 0.0
         reply_rate = round((replied_count / sent_count * 100), 1) if sent_count > 0 else 0.0
 
         # Explicit recipients (Apollo "prospects") plus total steps, so the UI
         # can render "N prospects · M steps" without a second round-trip.
-        target_count = (await db.execute(
-            select(func.count(CampaignTarget.id)).where(CampaignTarget.campaign_id == c.id)
-        )).scalar() or 0
-        step_count = (await db.execute(
-            select(func.count(CampaignStep.id)).where(CampaignStep.campaign_id == c.id)
-        )).scalar() or 0
+        target_count = target_counts.get(c.id, 0)
+        step_count = step_counts.get(c.id, 0)
 
         result.append({
             "id": c.id,
             "name": c.name,
             "status": c.status,
-            "total_targets": total_sends,
+            "total_targets": target_count,
             "contacts_selected": target_count,
+            "total_sends": total_sends,
             "step_count": step_count,
             "sent_count": sent_count,
             "opened_count": opened_count,
@@ -326,8 +355,17 @@ async def check_email_deliverability(req: SpamCheckRequest):
 
 # --- India advisor (advisory only: nothing here blocks, gates or sends) ------
 
-from app.campaigns.india_advisor import check_sender_auth, dlt_checklist, in_quiet_hours
-from app.campaigns.india_copy import festival_context, hinglish_closers, culture_checklist
+from app.campaigns.india_advisor import (
+    check_sender_auth_async,
+    dlt_checklist,
+    in_quiet_hours,
+)
+from app.campaigns.india_copy import (
+    festival_context,
+    hinglish_closers,
+    regional_closers,
+    culture_checklist,
+)
 from app.campaigns.engagement import whatsapp_handoff, engagement_summary
 
 
@@ -346,7 +384,9 @@ async def india_advisor(domain: Optional[str] = None):
     out: Dict[str, Any] = {
         "quiet_hours_now": in_quiet_hours(),
         "festival": festival_context(),
-        "auth": check_sender_auth(domain) if domain else None,
+        # The async variant: the sync one performs up to 13 blocking DNS
+        # lookups, which froze the event loop for up to 39 seconds.
+        "auth": await check_sender_auth_async(domain) if domain else None,
     }
     return out
 
@@ -359,10 +399,19 @@ async def india_dlt_checklist(req: DltCheckRequest):
 
 @router.get("/india/copy")
 async def india_copy_kit():
-    """Hinglish closers, festival hook, and the India copy do/don't checklist."""
+    """The India copy kit: closers, the festival hook, and the do/don't list.
+
+    The Hinglish closers plus the regional-language ones. A tier-2 Indian
+    SMB owner often reads Marathi, Telugu, Bengali, Kannada or Tamil and
+    not English - but a full-Devanagari cold email reads like a mass
+    blast, which is exactly why the Hinglish register exists. These are the
+    same closers in the regional script: a short, natural line the
+    operator can adapt.
+    """
     return {
         "festival": festival_context(),
         "hinglish_closers": hinglish_closers(),
+        "regional_closers": regional_closers(),
         "culture_checklist": culture_checklist(),
     }
 
@@ -408,7 +457,16 @@ async def india_warm_handoff(campaign_id: int, db: AsyncSession = Depends(get_db
                     "link and write a personal message."}
 
 #: Minimum sends per variant before an A/B winner may be declared.
-AB_MIN_SENDS_PER_VARIANT = 10
+#: Cold-email reply rates sit at 1-3%, so at 10 sends per variant a single
+#: extra reply is a 10pp swing - a coin flip would "declare" a winner. 50
+#: per variant gives a real sample.
+AB_MIN_SENDS_PER_VARIANT = 50
+
+#: Reply categories that count as a *positive* reply for A/B purposes. An
+#: out-of-office auto-responder and an opt-out are not signals that a subject
+#: line works - counting them let a vacation responder pick the winning
+#: subject line, and an opt-out was counted as a success.
+AB_POSITIVE_REPLIES = ("interested",)
 
 
 def decide_ab_winner(a_sent: int, a_replied: int, b_sent: int, b_replied: int,
@@ -420,14 +478,31 @@ def decide_ab_winner(a_sent: int, a_replied: int, b_sent: int, b_replied: int,
     is deliberately NOT consulted: opens require the deliverability-killing
     open-tracking pixel, so with tracking off open counts are all zero and
     any open-based decision would be fiction.
+
+    The comparison is a two-proportion z-test. The old code compared raw
+    rates with no significance test at all, so with 1-3% reply rates a single
+    reply decided the winner.
     """
     if a_sent < min_sends or b_sent < min_sends:
         return None
-    a_rate = a_replied / a_sent
-    b_rate = b_replied / b_sent
-    if b_rate == a_rate:
+    if a_replied + b_replied < 3:
+        # Fewer than three replies in total: nothing to say.
         return None
-    return "b" if b_rate > a_rate else "a"
+
+    p1, p2 = a_replied / a_sent, b_replied / b_sent
+    if p1 == p2:
+        return None
+
+    pooled = (a_replied + b_replied) / (a_sent + b_sent)
+    if pooled <= 0 or pooled >= 1:
+        return None
+    se = math.sqrt(pooled * (1 - pooled) * (1 / a_sent + 1 / b_sent))
+    if se == 0:
+        return None
+    z = abs(p1 - p2) / se
+    if z < 1.96:  # ~95% confidence
+        return None
+    return "b" if p2 > p1 else "a"
 
 
 @router.get("/{campaign_id}/step-stats")
@@ -462,8 +537,8 @@ async def get_step_stats(campaign_id: int, db: AsyncSession = Depends(get_db)):
         rows = [s for s in by_step.get(step.id, []) if getattr(s, "status", None) == "sent"]
         a = [s for s in rows if (getattr(s, "variant_used", None) or "a") == "a"]
         b = [s for s in rows if getattr(s, "variant_used", None) == "b"]
-        a_rep = sum(1 for s in a if s.replied)
-        b_rep = sum(1 for s in b if s.replied)
+        a_rep = sum(1 for s in a if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
+        b_rep = sum(1 for s in b if (getattr(s, "reply_category", "") or "") in AB_POSITIVE_REPLIES)
 
         is_ab = bool(getattr(step, "subject_b", None))
         winner = getattr(step, "variant_winner", None)

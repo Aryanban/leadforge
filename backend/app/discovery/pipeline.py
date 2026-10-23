@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -16,19 +17,43 @@ from app.sources.router import discover as run_sources
 
 logger = logging.getLogger(__name__)
 
+#: How many leads to enrich at once. Each enrichment is a multi-request
+#: waterfall (search engines, a website crawl, an SMTP verification), so it
+#: is almost entirely I/O bound - concurrency is close to free.
+ENRICH_CONCURRENCY = 8
 
-async def _enrich_new_leads(business_ids: List[int]) -> int:
-    """ICP-aware enrichment for freshly discovered leads (best-effort)."""
+
+async def _enrich_new_leads(business_ids: List[int],
+                            concurrency: int = ENRICH_CONCURRENCY) -> int:
+    """ICP-aware enrichment for freshly discovered leads (best-effort).
+
+    Enrichment used to run strictly one lead at a time. Measured at ~9s per
+    lead, so a 100-lead discovery job spent roughly 15 minutes - inside the
+    FastAPI event loop, with no other request served. Running the leads
+    concurrently (each one is I/O bound) brings that to ~2 minutes.
+
+    Failures are isolated: one lead that raises must not cancel the others.
+    """
     from app.enricher.email_finder import enrich_business_by_id
 
-    enriched = 0
-    for business_id in business_ids:
-        try:
-            await enrich_business_by_id(business_id)
-            enriched += 1
-        except Exception as e:
-            logger.warning(f"Enrichment failed for business {business_id}: {e}")
-    return enriched
+    if not business_ids:
+        return 0
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def _one(business_id: int) -> int:
+        async with semaphore:
+            try:
+                await enrich_business_by_id(business_id)
+                return 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"Enrichment failed for business {business_id}: {e}")
+                return 0
+
+    results = await asyncio.gather(*(_one(bid) for bid in business_ids))
+    return sum(results)
 
 
 async def _record_source_stats(
@@ -64,13 +89,26 @@ async def _record_source_stats(
                     leads_found=discovered,
                     enriched=len(ranked),
                     avg_score=avg,
+                    score_samples=len(ranked),
                     hot_leads=hot,
                 )
                 db.add(stats)
             else:
+                previous_enriched = stats.enriched or 0
+                new_enriched = len(ranked)
+                previous_samples = stats.score_samples or 0
                 stats.leads_found += discovered
-                stats.enriched += len(ranked)
-                stats.avg_score = (stats.avg_score or 0) * 0.7 + avg * 0.3
+                stats.enriched = previous_enriched + new_enriched
+                if new_enriched:
+                    if previous_samples:
+                        stats.avg_score = (
+                            (stats.avg_score or 0.0) * previous_samples + avg * new_enriched
+                        ) / (previous_samples + new_enriched)
+                    else:
+                        # Discard the old blended average, which predates
+                        # correct per-source attribution.
+                        stats.avg_score = avg
+                    stats.score_samples = previous_samples + new_enriched
                 stats.hot_leads += hot
             await db.commit()
     except Exception as e:
@@ -119,6 +157,7 @@ async def run_discovery(
 
     all_new_ids: List[int] = []
     per_source_counts: Dict[str, int] = {}
+    per_source_ids: Dict[str, List[int]] = {}
     async with async_session_maker() as db:
         for source_name, raw_leads in raw_by_source.items():
             try:
@@ -127,6 +166,7 @@ async def run_discovery(
                 logger.warning(f"Persistence failed for source '{source_name}': {e}")
                 new_ids = []
             per_source_counts[source_name] = len(raw_leads)
+            per_source_ids[source_name] = new_ids
             all_new_ids.extend(new_ids)
 
     await _enrich_new_leads(all_new_ids)
@@ -148,13 +188,34 @@ async def run_discovery(
             contacts_by_business: Dict[int, List[Contact]] = {
                 business.id: list(business.contacts) for business in businesses
             }
+            from app.qualifier.source_trust import source_trust_overrides
 
-            ranked = rank_businesses(businesses, contacts_by_business, icp_profile, limit=max_results)
+            trust_overrides = await source_trust_overrides(db)
+
+            ranked_by_source: Dict[str, List[Dict[str, Any]]] = {}
+            for source_name, business_ids in per_source_ids.items():
+                source_id_set = set(business_ids)
+                source_businesses = [b for b in businesses if b.id in source_id_set]
+                ranked_by_source[source_name] = rank_businesses(
+                    source_businesses,
+                    contacts_by_business,
+                    icp_profile,
+                    limit=max_results,
+                    source_trust_by_source=trust_overrides,
+                )
+            ranked = sorted(
+                (lead for leads in ranked_by_source.values() for lead in leads),
+                key=lambda lead: lead["score"],
+                reverse=True,
+            )[:max_results]
     except Exception as e:
         logger.warning(f"Ranking failed for job {job_id}: {e}")
+        ranked_by_source = {source_name: [] for source_name in per_source_counts}
 
     for source_name, count in per_source_counts.items():
-        await _record_source_stats(source_name, niche, area, count, ranked)
+        await _record_source_stats(
+            source_name, niche, area, count, ranked_by_source.get(source_name, [])
+        )
 
     async with async_session_maker() as db:
         job = await db.get(ScrapeJob, job_id)

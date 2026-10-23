@@ -7,6 +7,9 @@ __pycache__/
 *.sqlite
 *.db
 leadforge.db
+# SQLite WAL sidecar files (created when journal_mode=WAL is enabled)
+*.db-wal
+*.db-shm
 *.log
 
 # Node & Next.js
