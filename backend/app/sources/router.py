@@ -31,6 +31,9 @@ async def _learned_priority(niche: str, area: Optional[str]) -> Dict[str, float]
     scored: Dict[str, float] = {}
     try:
         async with async_session_maker() as db:
+            from app.qualifier.source_trust import source_trust, source_trust_overrides
+
+            calibrated_trust = await source_trust_overrides(db)
             stmt = select(SourceStats).where(
                 (SourceStats.niche == (niche or "").title())
                 | (SourceStats.niche == "")
@@ -38,6 +41,12 @@ async def _learned_priority(niche: str, area: Optional[str]) -> Dict[str, float]
             res = await db.execute(stmt)
             for stats in res.scalars().all():
                 priority = (stats.avg_score or 0.0) * min(1.0, (stats.leads_found or 0) / 10.0)
+                # Recent validation and SMTP results can move the source order
+                # by at most 20 points. The base yield score remains the main
+                # signal, while the outcome term favors data that proves usable.
+                prior, _ = source_trust(stats.source)
+                learned_trust = calibrated_trust.get((stats.source or "").strip().lower(), prior)
+                priority += (learned_trust - prior) * 20.0
                 # Prefer stats that match this exact area, then niche-wide stats.
                 if stats.area and area and stats.area.lower() in area.lower():
                     priority += 15

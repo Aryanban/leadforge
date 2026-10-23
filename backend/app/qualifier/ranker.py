@@ -122,6 +122,7 @@ def _lead_payload(business: Business, contacts: List[Contact], scoring: Dict[str
         "signal_breakdown": scoring["signal_breakdown"],
         "signals": scoring["signals"],
         "source_trust": scoring.get("source_trust"),
+        "source_trust_note": scoring.get("source_trust_note"),
         "trust_modifier": scoring.get("trust_modifier", 0),
     }
 
@@ -131,6 +132,7 @@ def rank_businesses(
     contacts_by_business: Dict[int, List[Contact]],
     icp_profile: Any,
     limit: int = 50,
+    source_trust_by_source: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """Pure ranking pass over already-loaded leads."""
     min_score = getattr(icp_profile, "min_score", None)
@@ -144,7 +146,13 @@ def rank_businesses(
         if not _matches_structured_criteria(business, icp_profile):
             continue
         contacts = contacts_by_business.get(business.id, [])
-        scoring = score_lead(business, contacts, icp_profile)
+        source_key = str(getattr(business, "source", "") or "").strip().lower()
+        scoring = score_lead(
+            business,
+            contacts,
+            icp_profile,
+            source_trust_override=(source_trust_by_source or {}).get(source_key),
+        )
         if scoring["score"] < min_score:
             continue
         ranked.append(_lead_payload(business, contacts, scoring))
@@ -189,4 +197,13 @@ async def rank_existing(
         business.id: list(business.contacts) for business in businesses
     }
 
-    return rank_businesses(businesses, contacts_by_business, icp_profile, limit=limit)
+    from app.qualifier.source_trust import source_trust_overrides
+
+    trust_overrides = await source_trust_overrides(db)
+    return rank_businesses(
+        businesses,
+        contacts_by_business,
+        icp_profile,
+        limit=limit,
+        source_trust_by_source=trust_overrides,
+    )

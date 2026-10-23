@@ -466,6 +466,7 @@ def calculate_lead_quality_score(
     business: Any,
     contacts: List[Any],
     icp_profile: Any = None,
+    source_trust_override: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Entry point for the 0-100 lead quality score.
@@ -479,7 +480,10 @@ def calculate_lead_quality_score(
     """
     from app.qualifier.scorer import score_lead
 
-    result = score_lead(business, contacts, icp_profile)
+    result = score_lead(
+        business, contacts, icp_profile,
+        source_trust_override=source_trust_override,
+    )
 
     extra = getattr(business, "extra_data", None)
     if isinstance(extra, dict) and extra.get("is_claimed", True) is False:
@@ -1335,6 +1339,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                     source=address_source,
                     extra_data=contact_extra or None,
                     verified_at=datetime.now(timezone.utc) if is_valid else None,
+                    verification_checked_at=datetime.now(timezone.utc),
                 )
                 db.add(new_contact)
             else:
@@ -1344,6 +1349,7 @@ async def enrich_business_by_id(business_id: int) -> Dict[str, Any]:
                 existing_contact.verification_confidence = result.confidence
                 existing_contact.verification_detail = result.detail
                 existing_contact.mx_host = result.mx_host
+                existing_contact.verification_checked_at = datetime.now(timezone.utc)
                 existing_contact.is_role_account = is_role
                 existing_contact.is_free_email = result.is_free
                 existing_contact.verified_at = datetime.now(timezone.utc) if is_valid else None

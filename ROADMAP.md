@@ -659,13 +659,20 @@ precision, and records each source's own deduplicated ranked leads. Its running 
 weighted by the number of leads ranked, so duplicate results from a second source no longer
 inherit the first source's score.
 
-What remains: `qualifier/source_trust.py` still uses fixed priors. `SourceStats.avg_score`
-is an ICP-relative quality score, not an observed email-deliverability, phone-validity, or
-positive-reply rate. A future calibration pass should use those explicit outcomes, keep a
-minimum sample threshold, and retain the prior where evidence is sparse. Until then, the
-score modifier is a documented prior and source ordering is the part that learns from
-observed discovery results. A `score_samples` counter marks legacy blended averages so
-their first correctly attributed score replaces the old value instead of inheriting it.
+The score modifier now starts from the documented priors and calibrates against the last
+90 days of email-verifier results and completed SMTP outcomes, grouped by the business's
+discovery source. A source's prior contributes 20 pseudo-observations; verification samples
+count once and completed SMTP acceptances/hard bounces count twice, with each evidence
+stream capped at 50 samples per calibration. This keeps sparse evidence from swinging a
+source's score while allowing repeated hard bounces or clean SMTP acceptance to move it.
+Recent transient SMTP failures are excluded because they measure sender health, not lead quality. The source router uses
+learned trust as a bounded tie-breaker alongside observed discovery yield, and lead scores
+display the same calibrated modifier they apply.
+
+Still open: verified phone outcomes and positive-reply/conversion outcomes. Email trust is
+not a proxy for either, and this calibration does not claim to measure them. A `score_samples`
+counter marks legacy blended averages so their first correctly attributed score replaces
+the old value instead of inheriting it.
 
 ### 2d. The score is cached at enrichment time and never recomputed
 
@@ -820,9 +827,9 @@ feedback loop · S14/S15 decision-maker extraction · 2e analytics funnel · 2f 
 S25 click tracking · S17 India-aware spam linter.
 > **Shipped.** The People table (`/contacts` + `/people`), ICP-relative scoring, structured
 > ICP criteria, decision-maker extraction, the analytics funnel, click tracking, A/B
-> statistics and the India-aware spam linter are in. Still open from this week: **2c** —
-> the score modifier uses fixed source priors, while learned source ordering uses discovery
-> quality rather than verified deliverability or outreach outcomes.
+> statistics and the India-aware spam linter are in. Source trust now learns from recent
+> verification and hard-bounce outcomes. Still open from this week: phone validation and
+> positive-reply/conversion feedback for source calibration.
 
 **Week 3 — Make it ours** (2 weeks): GSTIN/Udyam registry · WhatsApp-first channel routing
 · real festival/IST send windows · multilingual copy · directory ecosystem expansion

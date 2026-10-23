@@ -60,6 +60,10 @@ class Contact(Base):
     extra_data = Column(JSON, nullable=True)
     # Set when an email was actually verified, so stale verdicts can be re-checked.
     verified_at = Column(DateTime(timezone=True), nullable=True)
+    # Unlike verified_at, this is recorded for both positive and negative
+    # verifier results. It lets source quality use recent checked/verified
+    # denominators instead of treating unchecked contacts as failures.
+    verification_checked_at = Column(DateTime(timezone=True), nullable=True, index=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

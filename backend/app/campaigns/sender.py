@@ -803,6 +803,7 @@ async def execute_campaign_step(campaign_id: int, max_sends: int = 50) -> Dict[s
                 )
             elif bounce_reason == HARD:
                 send_record.status = "bounced"
+                send_record.sent_at = datetime.now(timezone.utc)
                 send_record.error_message = err
                 send_record.bounced = True
                 contact.verification_status = "bounced"
@@ -945,4 +946,3 @@ async def _finalise_ab_winner(db: AsyncSession, campaign_id: int) -> Optional[st
     if changed:
         await db.commit()
     return declared
-

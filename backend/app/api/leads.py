@@ -257,6 +257,16 @@ async def get_leads(
     # "how good is this lead for *my* ICP" - which is the number a
     # salesperson actually sorts by.
     icp_profiles = await _load_icp_profiles(db, b_ids)
+    from app.qualifier.source_trust import (
+        calibrate_source_trust,
+        source_outcomes_by_source,
+    )
+
+    source_outcomes = await source_outcomes_by_source(db)
+    calibrated_trust = {
+        source: calibrate_source_trust(source, outcomes)
+        for source, outcomes in source_outcomes.items()
+    }
 
     leads_data = []
     #: Business ids whose persisted score was stale and has just been
@@ -297,7 +307,12 @@ async def get_leads(
         # comparable. Computing it live makes the score mean the same thing
         # everywhere and makes ICP tuning visible immediately.
         score_info = calculate_lead_quality_score(
-            b, b_contacts, icp_profiles.get(b.icp_profile_id)
+            b,
+            b_contacts,
+            icp_profiles.get(b.icp_profile_id),
+            source_trust_override=calibrated_trust.get(
+                str(getattr(b, "source", "") or "").strip().lower()
+            ),
         )
         lead_score = score_info["score"]
         lead_tier = score_info["tier"]
@@ -321,6 +336,18 @@ async def get_leads(
         # that did not include it.
         from app.qualifier.source_trust import source_trust, trust_score_modifier
         _trust_val, _trust_note = source_trust(getattr(b, "source", None))
+        _trust_val = score_info.get("source_trust") if score_info else _trust_val
+        _trust_note = score_info.get("source_trust_note") or _trust_note
+        source_key = str(getattr(b, "source", "") or "").strip().lower()
+        outcome = source_outcomes.get(source_key, {})
+        if source_key in calibrated_trust:
+            _trust_note = _trust_note.replace(
+                " Calibrated from recent email verification and SMTP outcomes.", ""
+            )
+            _trust_note += (
+                f" Calibrated from {outcome.get('email_checks', 0)} recent verifier checks "
+                f"and {outcome.get('send_outcomes', 0)} SMTP outcomes."
+            )
         _applied_modifier = score_info.get("trust_modifier") if score_info else None
         if _applied_modifier is None:
             _applied_modifier = trust_score_modifier(_trust_val)
@@ -346,6 +373,9 @@ async def get_leads(
             "lead_badges": lead_badges,
             "source": getattr(b, "source", None),
             "source_trust": _trust_val,
+            "source_trust_samples": (
+                outcome.get("email_checks", 0) + outcome.get("send_outcomes", 0)
+            ),
             "trust_note": _trust_note,
             "trust_modifier": _applied_modifier,
             "primary_contact": primary_contact,

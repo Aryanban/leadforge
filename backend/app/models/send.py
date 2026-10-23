@@ -41,8 +41,8 @@ class Send(Base):
     #: is not an A/B test. Powers per-variant stats and winner selection.
     variant_used = Column(String, nullable=True)
 
-    sent_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    sent_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     campaign = relationship("Campaign", back_populates="sends")
     contact = relationship("Contact")

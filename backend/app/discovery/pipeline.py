@@ -188,6 +188,9 @@ async def run_discovery(
             contacts_by_business: Dict[int, List[Contact]] = {
                 business.id: list(business.contacts) for business in businesses
             }
+            from app.qualifier.source_trust import source_trust_overrides
+
+            trust_overrides = await source_trust_overrides(db)
 
             ranked_by_source: Dict[str, List[Dict[str, Any]]] = {}
             for source_name, business_ids in per_source_ids.items():
@@ -198,6 +201,7 @@ async def run_discovery(
                     contacts_by_business,
                     icp_profile,
                     limit=max_results,
+                    source_trust_by_source=trust_overrides,
                 )
             ranked = sorted(
                 (lead for leads in ranked_by_source.values() for lead in leads),

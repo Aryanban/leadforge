@@ -71,6 +71,7 @@ def score_lead(
     business: Any,
     contacts: Optional[List[Any]] = None,
     icp_profile: Any = None,
+    source_trust_override: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Weighted 0-100 lead quality model.
@@ -90,8 +91,14 @@ def score_lead(
     from .source_trust import source_trust, trust_score_modifier, SOURCE_TRUST
     _source = (business.get("source") if isinstance(business, dict)
                else getattr(business, "source", None))
-    if _source and str(_source).strip().lower() in SOURCE_TRUST:
+    if _source and (
+        str(_source).strip().lower() in SOURCE_TRUST
+        or source_trust_override is not None
+    ):
         _trust, _trust_note = source_trust(_source)
+        if source_trust_override is not None:
+            _trust = max(0.0, min(1.0, float(source_trust_override)))
+            _trust_note += " Calibrated from recent email verification and SMTP outcomes."
         _trust_delta = trust_score_modifier(_trust)
         _trust_known = True
     else:
@@ -195,5 +202,6 @@ def score_lead(
         "signal_breakdown": breakdown,
         "signals": signals,
         "source_trust": _trust if _trust_known else None,
+        "source_trust_note": _trust_note if _trust_known else None,
         "trust_modifier": _trust_delta,
     }
