@@ -183,6 +183,22 @@ rating, because it is out of 10 and mixing the two would silently corrupt the
 
 ---
 
+### 8. Website Intelligence, Keyword Analysis & Tech Stack Fingerprinting
+* **Natural Language ICP Keyword Matching**: Automatically extracts structured positive keywords and negative exclusion terms from conversational search prompts (`nl_icp.py`). Distinguishes required positive tokens (`keywords`) from negative exclusions (`exclude_keywords`) to eliminate false matches before lead enrichment.
+* **Website Tech Stack Fingerprinting**: Crawls public corporate domains to detect 35+ marketing, eCommerce, payment, CRM, and analytics technologies without external APIs:
+  * **Analytics & Tracking**: Google Analytics (`gtag.js`, `ga`), Google Ads (`adsbygoogle`, `googleadservices`), Meta Pixel (`fbevents.js`, `facebook.com/tr`).
+  * **CMS & eCommerce Platforms**: Shopify, WooCommerce, Magento, BigCommerce, WordPress, Webflow, Wix, Squarespace.
+  * **Indian & Global Payments**: Razorpay, PayU, Cashfree, PhonePe, Paytm, Amazon Pay.
+  * **CRM & Business Helpdesks**: Zoho, Freshworks, Kylas, LeadSquared, HubSpot, Salesforce, Pipedrive, Zendesk, Odoo, Tally, Khatabook, Intercom, Twilio.
+* **On-Page Financial & Regulatory Extraction**: Extracts employee headcount ranges (e.g. "11-50 employees"), annual rupee turnover (mapped to revenue bands like *< 1 Cr*, *1-5 Cr*, *10-50 Cr*), and verified Indian business identifiers (GSTIN and Udyam registration numbers) directly from site text.
+* **Google Maps SEO Title Normalization**: Detects and strips SEO-stuffed promotional keywords, business prefixes, and trailing service tags from Google Maps listings (`maps_http.py`) to isolate the true canonical business name.
+* **Cold Copy Keyword & Deliverability Linter**: Scans outbound subject lines and body copy against 80+ high/moderate spam keywords, excessive capitalization, and regional cold email tells to output an actionable 0–100 deliverability score.
+* **Scope Clarification — Lead Intelligence vs. Traditional SEO Auditing**:
+  * **Supported**: B2B website qualification, technology stack detection, negative/positive keyword ICP filtering, Google Maps title sanitization, and outreach spam keyword linting.
+  * **Not Built-In**: Pure Search Engine Optimization (SEO) audit capabilities such as SERP keyword rank tracking, backlink crawler analysis, Lighthouse Core Web Vitals profiling, or on-page XML sitemap indexing (these require dedicated SEO suites or specialized agents).
+
+---
+
 ## 🔐 Security & Operations (read this before exposing the API)
 
 LeadForge is a single-user, self-hosted tool, so the local clone-and-run
@@ -396,10 +412,8 @@ in [`ROADMAP.md`](./ROADMAP.md).
 
 ## 🤖 MCP Server & CLI Usage
 
-The MCP server exposes **17 tools** covering the full agent automation loop:
-scrape → search → enrich → create campaign → add targets → launch → monitor →
-pause, plus mailboxes, email verification, spam scoring, AI icebreakers, and
-the global suppression list.
+The native Model Context Protocol (MCP) server exposes **19 specialized tools** covering the full autonomous prospecting and outreach lifecycle:
+scrape → search → enrich → filter ICP → create campaign → add targets → launch → monitor → pause, plus mailboxes, email verification, spam scoring, AI icebreakers, and global suppression management.
 
 LeadForge is a native **Model Context Protocol (MCP)** server, enabling AI coding assistants (Google Antigravity, Claude Code, Cursor) to drive lead generation autonomously.
 
@@ -416,6 +430,30 @@ LeadForge is a native **Model Context Protocol (MCP)** server, enabling AI codin
 }
 ```
 
+### Complete MCP Tool Catalog (19 Tools)
+
+| Tool Name | Key Parameters | Function & Description |
+| :--- | :--- | :--- |
+| `leadforge_scrape` | `query`, `max_results`, `auto_enrich` | Starts an asynchronous Google Maps scrape in the background; returns a `job_id` handle immediately. |
+| `leadforge_get_scrape_job` | `job_id` | Polls scrape job progress (0–100%), returning lead counts and generated Contact IDs. |
+| `leadforge_search_leads` | `query`, `city`, `min_score`, `rating_min`, `page`, `limit` | Queries stored business records by search keyword, city, minimum score, rating, or status with pagination. |
+| `leadforge_search_people` | `query`, `title`, `city`, `seniority`, `has_email`, `limit` | Searches the Apollo-grade People table by role, title, city, employee count, and email verification status. |
+| `leadforge_enrich_lead` | `business_id` | Triggers waterfall web discovery, Cloudflare XOR decode, and email pattern inference for a specific business ID. |
+| `leadforge_create_campaign` | `name`, `steps`, `mailbox_id` | Creates an automated outreach campaign with multi-step email templates, day delays, and assigned mailboxes. |
+| `leadforge_get_stats` | *(none)* | Fetches system-wide operational metrics: total leads, verified emails, active campaigns, and mailboxes. |
+| `leadforge_check_spam` | `subject`, `body` | Analyzes cold email subject and body copy against 80+ spam triggers, returning deliverability scores and fixes. |
+| `leadforge_generate_icebreaker` | `business_id` | Generates personalized, sentiment-driven opening hooks and pain-point angles for a lead. |
+| `leadforge_list_campaigns` | `status`, `limit` | Lists all campaigns and their operational states (`draft`, `running`, `paused`, `completed`). |
+| `leadforge_get_campaign` | `campaign_id` | Retrieves campaign parameters, targeted contact lists, send counts, and metrics. |
+| `leadforge_add_campaign_targets` | `campaign_id`, `contact_ids` | Associates specific Contact IDs to a target campaign sequence. |
+| `leadforge_launch_campaign` | `campaign_id`, `dry_run` | Starts or resumes cold email sequence dispatch (`dry_run=true` by default for agent safety). |
+| `leadforge_pause_campaign` | `campaign_id` | Halts active email dispatch on a running campaign immediately. |
+| `leadforge_list_mailboxes` | *(none)* | Inspects configured SMTP/IMAP sender accounts, daily limits, and health status. |
+| `leadforge_create_mailbox` | `email`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `daily_limit` | Registers a new sending mailbox with custom daily send caps and credentials. |
+| `leadforge_verify_email` | `email` | Runs live MX check, multi-probe catch-all detection, and SMTP handshake on any email address. |
+| `leadforge_list_suppression` | `limit` | Queries suppressed addresses/domains with recorded bounce or unsubscribe reasons. |
+| `leadforge_add_suppression` | `email_or_domain`, `reason` | Adds an email address or whole domain to the permanent suppression blacklist. |
+
 ### Full-Featured CLI Commands:
 ```bash
 # Set Python path
@@ -424,13 +462,13 @@ export PYTHONPATH=backend
 # 1. Scrape Google Maps leads & output as markdown table:
 .venv/bin/python -m app.cli scrape "Dentists in Austin TX" --limit 10 --format markdown
 
-# 2. Search database by query:
-.venv/bin/python -m app.cli search --query "Dental" --format markdown
+# 2. Search database by query, city, or score:
+.venv/bin/python -m app.cli search --query "Dental" --city "Austin" --min-score 70 --format markdown
 
-# 3. Waterfall enrich a specific lead:
+# 3. Waterfall enrich a specific lead (find emails, phones, tech stack):
 .venv/bin/python -m app.cli enrich 1
 
-# 4. Check email deliverability & spam triggers:
+# 4. Check email deliverability & 80+ spam triggers:
 .venv/bin/python -m app.cli spam "URGENT: Guaranteed 100% free profit for your business"
 
 # 5. Generate personalized AI outreach icebreaker:
@@ -438,6 +476,9 @@ export PYTHONPATH=backend
 
 # 6. View database statistics:
 .venv/bin/python -m app.cli stats
+
+# 7. Check database connection and readiness:
+.venv/bin/python -m app.cli ready
 ```
 
 ---
